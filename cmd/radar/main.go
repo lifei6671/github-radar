@@ -27,6 +27,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
 	"github.com/lifei6671/github-radar/internal/trending"
+	"github.com/lifei6671/github-radar/internal/webui"
 	"github.com/lifei6671/github-radar/migrations"
 )
 
@@ -132,9 +133,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		GitHub: readmes, Provider: provider, Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute}
 
 	gin.SetMode(gin.ReleaseMode)
+	router := api.NewRouter(db, pool, adminToken, logger, cfg)
+	webui.Register(router, os.DirFS("web/dist"))
 	server := &http.Server{
 		Addr:         cfg.Server.Listen,
-		Handler:      api.NewRouter(db, pool, adminToken, logger, cfg),
+		Handler:      router,
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeoutSeconds) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeoutSeconds) * time.Second,
 	}

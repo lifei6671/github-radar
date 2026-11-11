@@ -79,10 +79,11 @@ func (a *collectionAPI) repoPage(c *gin.Context, tx *gorm.DB, filters repoFilter
 		"discovered": "repositories.discovered_at", "stars": "repositories.stars", "followed": "repositories.followed_at",
 		"hotness":   "m.hotness_score",
 		"growth24h": `CASE WHEN json_extract(m.window_details_json,'$."24h".quality')='exact' THEN m.delta_24h END`,
+		"growth7d":  `CASE WHEN json_extract(m.window_details_json,'$."7d".quality')='exact' THEN m.delta_7d END`,
 	}
 	column := columns[sort]
 	db := tx.Model(&storage.Repository{})
-	if sort == "hotness" || sort == "growth24h" {
+	if metricSort(sort) {
 		db = db.Joins("LEFT JOIN latest_metrics m ON m.repo_id=repositories.repo_id AND repositories.state='active'")
 	}
 	if filters.State != "" {
@@ -178,7 +179,7 @@ WHERE s.repo_id=repositories.repo_id AND tag.value=?)`, filters.Tag)
 	}
 	now := iso(time.Now().UnixMilli())
 	updatedAt := &now
-	if sort == "hotness" || sort == "growth24h" {
+	if metricSort(sort) {
 		var marker storage.MaintenanceState
 		if err := tx.Find(&marker, "key=?", metrics.ComputeKey).Error; err != nil {
 			return nil, err
@@ -238,10 +239,14 @@ func (a *collectionAPI) filters(c *gin.Context) (repoFilters, string, error) {
 	slices.Sort(f.Category)
 	f.Category = slices.Compact(f.Category)
 	sort := c.DefaultQuery("sort", "discovered")
-	if !slices.Contains([]string{"discovered", "stars", "followed", "hotness", "growth24h"}, sort) || (sort == "followed" && !f.Followed) {
+	if !slices.Contains([]string{"discovered", "stars", "followed", "hotness", "growth24h", "growth7d"}, sort) || (sort == "followed" && !f.Followed) {
 		return f, "", errors.New("无效排序")
 	}
 	return f, sort, nil
+}
+
+func metricSort(sort string) bool {
+	return sort == "hotness" || sort == "growth24h" || sort == "growth7d"
 }
 
 // filterCategories 使用本次请求的数据库映射，多选分类取并集。

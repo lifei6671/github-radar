@@ -20,7 +20,7 @@ func TestMetricSortingKeepsGlobalRankAndNullCursor(t *testing.T) {
 	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
 		t.Fatal(err)
 	}
-	for _, sort := range []string{"hotness", "growth24h"} {
+	for _, sort := range []string{"hotness", "growth24h", "growth7d"} {
 		body := request(t, router, "GET", "/api/v1/repos?sort="+sort, "", "admin", 200)
 		if body["updatedAt"] != nil {
 			t.Fatalf("首次成功计算前没有指标发布时间: %+v", body)
@@ -47,13 +47,13 @@ func TestMetricSortingKeepsGlobalRankAndNullCursor(t *testing.T) {
 	}{
 		{1, 900, "estimated", number(81.125)}, {2, -15, "exact", number(81.125)}, {3, 0, "insufficient", nil},
 	} {
-		row := storage.LatestMetric{RepoID: item.id, Delta24h: &item.delta, HotnessScore: item.heat, DataQuality: item.quality,
-			CalculatedAt: now.UnixMilli(), WindowDetailsJSON: fmt.Sprintf(`{"24h":{"delta":%d,"quality":%q,"resolution":"raw"}}`, item.delta, item.quality)}
+		row := storage.LatestMetric{RepoID: item.id, Delta24h: &item.delta, Delta7d: &item.delta, HotnessScore: item.heat, DataQuality: item.quality,
+			CalculatedAt: now.UnixMilli(), WindowDetailsJSON: fmt.Sprintf(`{"24h":{"delta":%d,"quality":%q,"resolution":"raw"},"7d":{"delta":%d,"quality":%q,"resolution":"raw"}}`, item.delta, item.quality, item.delta, item.quality)}
 		if err := db.Create(&row).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
-	for sort, want := range map[string][]int{"hotness": {1, 2, 3, 4}, "growth24h": {2, 1, 3, 4}} {
+	for sort, want := range map[string][]int{"hotness": {1, 2, 3, 4}, "growth24h": {2, 1, 3, 4}, "growth7d": {2, 1, 3, 4}} {
 		cursor := ""
 		for i, id := range want {
 			path := "/api/v1/repos?limit=1&sort=" + sort + cursor

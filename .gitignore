@@ -30,6 +30,10 @@ go.work.sum
 
 # 本地 SQLite 数据库及日志文件
 /data/
+/web/node_modules/
+/web/dist/
+/web/test-results/
+/web/playwright-report/
 
 # Editor/IDE
 .idea/

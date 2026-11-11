@@ -1,3 +1,10 @@
+FROM node:24-bookworm-slim AS frontend
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run check && npm run build
+
 FROM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -13,6 +20,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 RUN mkdir -m 700 /app/data && chown 10001:10001 /app/data
 COPY --from=build /out/radar /usr/local/bin/radar
+COPY --from=frontend /src/web/dist /app/web/dist
 # GitHub API 和 Trending 页面使用系统根证书验证 HTTPS。
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY deploy/container.yaml /app/config.yaml

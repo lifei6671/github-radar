@@ -2,7 +2,7 @@
 
 - 版本：1.5.1
 - 日期：2026-11-11
-- 执行状态：待实现
+- 执行状态：UI-01～UI-07 已接入 React 与 Gin，UI-08 随阶段 5 实施
 - 主文档：[GitHub 热点雷达技术设计](./github-radar-technical-design.md)
 - 备份与一键恢复专项方案：[R2 五天备份与后台恢复](./backup-and-restore.md)
 - 视觉与交互参考：https://github.com/KKKKhazix/AIHOT
@@ -340,7 +340,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 | 首页最近发现列表 | GET /api/v1/repos?sort=discovered&limit=30 | 返回仓库卡片数据与游标 |
 | 首页热点推荐 | GET /api/v1/repos?sort=hotness&limit=10 | 归一化热度与更新时刻 |
 | GitHub 热榜 | GET /api/v1/trending?period=daily&sourceKey=all | TrendingResponse，完整批次不分页，不过滤非 active 成员 |
-| 自算增长榜 | GET /api/v1/repos?sort=growth24h | ApiList<RepositoryCardView>，与 GitHub 榜单独立 |
+| 自算增长榜 | GET /api/v1/repos?sort=growth24h 或 growth7d | ApiList<RepositoryCardView>，与 GitHub 榜单独立 |
 | 全部项目检索 | GET /api/v1/repos?q=...&category=...&language=...&cursor=... | URL 驱动过滤/分页 |
 | 项目详情 | GET /api/v1/repos/:id | 返回 RepositoryDetailView |
 | Star 曲线 | GET /api/v1/repos/:id/trend?range=7d | TrendResponse，含点位、真实边界与粒度 |
@@ -354,6 +354,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 | 分类列表 | GET /api/v1/categories | {items:CategoryView[]}，active 计数含 other |
 | 我的关注 | GET /api/v1/repos?followed=true&sort=followed | 包含已关注的全部仓库状态，followedAt 降序 |
 | 选题池 | GET /api/v1/topics | 返回候选、得分和状态 |
+| 加入选题池 | POST /api/v1/repos/:id/topic | 幂等加入并保留已有审核状态 |
 | 改变选题状态 | PATCH /api/v1/topics/:id | 成功后更新，本地失败恢复 |
 | 管理页任务 | GET /api/v1/system/jobs | 鉴权，绝不返回 README 内容 |
 | API 配额页 | GET /api/v1/system/limits | 分 core/search 配额 |

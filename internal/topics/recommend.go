@@ -82,13 +82,7 @@ func Generate(ctx context.Context, db *gorm.DB, cfg config.Recommendations, now 
 
 func recommendable(tx *gorm.DB, cfg config.Recommendations, now time.Time) ([]option, error) {
 	var rows []input
-	if err := tx.Raw(`
-SELECT r.*, m.hotness_score AS hotness,
- CASE WHEN json_extract(m.window_details_json,'$."24h".quality')='exact' THEN m.delta_24h END AS growth,
- CASE WHEN m.trending_score>0 THEN m.trending_rank END AS trending_rank,m.persistence_score AS persistence,
- s.summary_zh AS summary,s.features_json AS features,s.source_fingerprint AS fingerprint,s.source_readme_url AS source_url
-FROM repositories r LEFT JOIN latest_metrics m ON m.repo_id=r.repo_id AND m.calculated_at>=?
-LEFT JOIN ai_summaries s ON s.repo_id=r.repo_id AND s.summary_status='ready'
+	if err := tx.Raw(repoSignalsSQL+`
 WHERE r.state='active' AND r.disabled=0 AND r.archived=0 AND r.name_is_current=1
   AND (r.starred_by_user=1 OR trim(coalesce(r.description,''))<>'' OR s.repo_id IS NOT NULL)
   AND (r.starred_by_user=1 OR m.delta_24h>0 OR m.trending_score>0 OR m.persistence_score>0)`, now.Add(-signalAge).UnixMilli()).Scan(&rows).Error; err != nil {
@@ -117,6 +111,15 @@ WHERE r.state='active' AND r.disabled=0 AND r.archived=0 AND r.name_is_current=1
 	}
 	return options, nil
 }
+
+const repoSignalsSQL = `
+SELECT r.*, m.hotness_score AS hotness,
+ CASE WHEN json_extract(m.window_details_json,'$."24h".quality')='exact' THEN m.delta_24h END AS growth,
+ CASE WHEN m.trending_score>0 THEN m.trending_rank END AS trending_rank,m.persistence_score AS persistence,
+ s.summary_zh AS summary,s.features_json AS features,s.source_fingerprint AS fingerprint,s.source_readme_url AS source_url
+FROM repositories r LEFT JOIN latest_metrics m ON m.repo_id=r.repo_id AND m.calculated_at>=?
+LEFT JOIN ai_summaries s ON s.repo_id=r.repo_id AND s.summary_status='ready'
+`
 
 func materialChange(previous storage.TopicCandidate, row input, threshold int) bool {
 	// 已处理项目需要已确认的 README 变动或精确净增的明显抬升。
@@ -243,7 +246,7 @@ func save(tx *gorm.DB, row option, group int, now int64) error {
 		}
 		candidate.ReaderValue = readerValue(row.input)
 	}
-	candidate.Reason = []string{"24 小时精确净增长", "近期进入 GitHub Trending", "近期有可确认的日增长", "管理员已关注"}[group]
+	candidate.Reason = []string{"24 小时精确净增长", "近期进入 GitHub Trending", "近期有可确认的日增长", "管理员已关注", "人工加入选题池"}[group]
 	candidate.TopicScore = math.Round(row.score*100) / 100
 	candidate.HotnessScore, candidate.Growth24h = row.Hotness, row.Growth
 	return tx.Save(&candidate).Error

@@ -32,6 +32,7 @@ func (a *collectionAPI) register(v1 *gin.RouterGroup) {
 	v1.POST("/repos/:id/refresh", a.refresh)
 	v1.POST("/repos/:id/summary", a.requestSummary)
 	v1.POST("/repos/:id/follow", a.follow)
+	v1.POST("/repos/:id/topic", a.addTopic)
 	v1.GET("/topics", a.topics)
 	v1.PATCH("/topics/:id", a.updateTopic)
 	v1.GET("/categories", a.loadCategories, a.categoryList)
@@ -100,6 +101,7 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 		"summarySourceQuality": textPtr(summary.row.SourceQuality), "summaryJobId": summary.jobID,
 		"followed": repo.StarredByUser, "followedAt": optionalISO(repo.FollowedAt),
 		"lastSuccessAt": optionalISO(repo.LastSuccessAt),
+		"discoveredAt":  iso(repo.DiscoveredAt), "relativeGrowth": view.row.RelativeGrowth,
 	}
 }
 

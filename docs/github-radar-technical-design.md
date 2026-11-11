@@ -816,6 +816,7 @@ WHERE (repo_id, sample_slot) IN (
 | POST /api/v1/repos/:id/refresh | 手动调度采集，遵守配额 |
 | POST /api/v1/repos/:id/summary | 手动安排/复用 AI 总结 |
 | POST /api/v1/repos/:id/follow | 关注或取消关注 |
+| POST /api/v1/repos/:id/topic | 幂等加入选题池，返回原有或新建选题的状态 |
 | GET /api/v1/trending?period=daily&sourceKey=all | 单来源最新完整 Trending 榜单及批次，返回 TrendingResponse；本地增长榜使用 /repos?sort=growth24h |
 | GET /api/v1/topics | 候选选题及人工状态 |
 | PATCH /api/v1/topics/:id | 修改 shortlisted/accepted/ignored/published |
@@ -863,7 +864,7 @@ Trending 专用契约：GET /api/v1/trending 的 period 为 daily/weekly/monthly
 
 /repos 默认仅列 state=active；watchlist 使用 followed=true，包含所有已关注状态，按 followedAt 降序。可显式传 state 枚举查询其他状态；q 匹配 full_name/description，language 精确匹配，重复 category 参数按 OR 匹配第 3.4 节的数据库分类。/categories 返回全部分类及 active 计数；未知分类/排序/状态返回 400。
 
-sort 可取 discovered、hotness、growth24h、stars、followed，分别以 discovered_at、hotness_score、exact 的 delta_24h、stars、followed_at 降序，repo_id 升序作唯一次键；可用性不足的排序值为 null，统一排最后。followed 排序要求 followed=true。热度榜和增长榜的 updatedAt 为最近成功计算时间，首轮成功前为 null。cursor 是无填充 Base64URL 编码的 UTF-8 JSON：`{v:1,sort,filters,last:{value,repoId}}`；filters 为标准化 q/language/state/followed 和排序去重后的 category 数组，不含 limit。比较当前过滤条件及版本，非法编码/字段/不匹配返回 400 invalid_cursor。后续页以该排序键执行 keyset 查询，包括 null 段的 repo_id 续页，不使用 offset。
+sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分别以 discovered_at、hotness_score、exact 的 delta_24h、exact 的 delta_7d、stars、followed_at 降序，repo_id 升序作唯一次键；可用性不足的排序值为 null，统一排最后。followed 排序要求 followed=true。热度榜和增长榜的 updatedAt 为最近成功计算时间，首轮成功前为 null。cursor 是无填充 Base64URL 编码的 UTF-8 JSON：`{v:1,sort,filters,last:{value,repoId}}`；filters 为标准化 q/language/state/followed/grade/tag 和排序去重后的 category 数组，不含 limit。比较当前过滤条件及版本，非法编码/字段/不匹配返回 400 invalid_cursor。后续页以该排序键执行 keyset 查询，包括 null 段的 repo_id 续页，不使用 offset。
 
 游标只描述查询位置，不承载授权；不需要签名或服务端分页会话。热度、关注及采集数据会变动，分页为实时弱一致，前端按 repoId 去重，刷新列表重新从首页取；不承诺跨页固定快照。响应为 `{items,nextCursor,updatedAt}`，无下一页时 nextCursor=null。
 

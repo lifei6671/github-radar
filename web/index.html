@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN" class="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="description" content="GitHub 开源项目的 Star 增长、热点与选题。" />
+    <link rel="icon" type="image/svg+xml" href="/radar.svg" />
+    <title>GitHub 雷达</title>
+    <script>
+      // 在加载样式前应用已选主题，避免刷新时闪过浅色。
+      let preference;
+      try { preference = localStorage.getItem('radar.theme'); } catch {}
+      const dark = preference === 'dark' || (preference !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.className = dark ? 'dark' : 'light';
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

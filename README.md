@@ -1,10 +1,17 @@
 # github-radar
 
-GitHub 开源项目热点雷达。目前提供阶段 1 的候选发现、仓库采集与持久任务队列。
+GitHub 开源项目热点雷达，提供 Star 增长、GitHub Trending、中文摘要和选题管理。
 
 ## 本地启动
 
-在仓库根目录使用 Go 1.26 或以上版本。先把 `ADMIN_TOKEN` 设为随机令牌，再运行 `go run ./cmd/radar`。PowerShell 示例会为当前终端生成令牌。
+在仓库根目录使用 Go 1.26 及以上和 Node.js 22.12 及以上版本。先构建前端，再为 Go 服务设置管理员令牌。
+
+```powershell
+npm --prefix web ci
+npm --prefix web run build
+```
+
+PowerShell 示例会为当前终端生成令牌。
 
 ```powershell
 $bytes = New-Object byte[] 32
@@ -16,6 +23,8 @@ go run ./cmd/radar
 ```
 
 服务默认监听 `127.0.0.1:8080`，在 `./data/github-radar.db` 建库并自动迁移。需要改变监听地址或数据库路径时，复制 [configs/example.yaml](configs/example.yaml) 并运行 `go run ./cmd/radar server -config <文件路径>`。相对路径以命令的工作目录为准。
+
+在浏览器打开 `http://127.0.0.1:8080`，用当前终端的 `$env:ADMIN_TOKEN` 登录。空库会进入初始化页面。Gin 从 `web/dist` 提供页面与静态资源，运行时只需 Go 服务。开发前端时可另开终端执行 `npm --prefix web run dev`，Vite 默认将 API 转发到本地 8080 端口。
 
 | 接口 | 行为 |
 | --- | --- |
@@ -75,7 +84,7 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 | `GET /api/v1/system/storage` | SQLite 和 WAL 大小、快照与聚合行数、维护水位 |
 | `POST /api/v1/system/maintenance/run` | 返回 202 并持久化维护请求，下次扫描执行 |
 
-`/repos` 默认只返回 active，查询候选使用 `?state=candidate`。排序支持 discovered、stars、followed、hotness、growth24h，followed 排序要求 `followed=true`。增长榜使用精确的 24h 净增，热度排名基于全部 active 仓库。增长窗口会返回质量及实际采样时间，缺失增量为 `null`。卡片展示最近 24 个已完成 UTC 小时的累计 Star，缺测小时保留空点。
+`/repos` 默认只返回 active，查询候选使用 `?state=candidate`。排序支持 discovered、stars、followed、hotness、growth24h、growth7d，followed 排序要求 `followed=true`。增长榜使用精确窗口，热度排名基于全部 active 仓库。增长窗口会返回质量及实际采样时间，缺失增量为 `null`。卡片展示最近 24 个已完成 UTC 小时的累计 Star，缺测小时保留空点。
 
 需要独立处理一批任务时运行 `go run ./cmd/radar collect-once`，支持 `-config` 选项，需要已初始化数据库和 GitHub 令牌。该命令最多处理一百个当前可领取任务，未到期或受限流影响的任务保留在数据库。按设计使用单实例，同一数据库的服务运行期间应由 HTTP 刷新接口安排任务。
 
@@ -94,6 +103,7 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 | `POST /api/v1/repos/:id/summary` | 提交 `{requestId,force}` 生成摘要或复用已验证的缓存，异步任务通过 `statusUrl` 查询 |
 | `POST /api/v1/jobs/:id/retry` | 对调用结果未知的摘要任务提交 `{requestId,acceptPossibleCharge:true}`，确认可能再次计费并重新排队 |
 | `GET /api/v1/topics` | 查询每日选题，支持状态筛选与游标分页 |
+| `POST /api/v1/repos/:id/topic` | 从仓库详情加入选题池，重复加入保留已有审核状态 |
 | `PATCH /api/v1/topics/:id` | 提交 `{status,feedback}` 更新人工状态或反馈，`candidate` 可手动重新打开选题 |
 
 仓库详情返回中文摘要、来源质量、模型和生成时间。来源 SHA 及供应商、模型、提示词版本匹配时复用缓存，README 正文只在内存中处理。Markdown 提取和语言识别分别复用 [Goldmark](https://github.com/yuin/goldmark) 和 [Whatlanggo](https://github.com/abadojack/whatlanggo)。
@@ -108,11 +118,17 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 go test ./...
 go vet ./...
 go build ./...
+npm --prefix web run check
+npm --prefix web run build
+npx --prefix web playwright install chromium
+npm --prefix web test
 ```
+
+浏览器测试覆盖 390、768、1440、1920 像素视口下的亮暗主题和关键流程。测试截图写到 `web/test-results`。前端参考与分发许可见 [第三方声明](web/THIRD_PARTY_NOTICES.md)。
 
 ## Docker
 
-设置 `ADMIN_TOKEN` 后运行 `docker compose -f deploy/compose.yaml up --build`。Compose 将端口发布到宿主机回环地址，并通过 `radar-data` 卷保存数据库。
+设置 `ADMIN_TOKEN` 后运行 `docker compose -f deploy/compose.yaml up --build`。镜像构建阶段生成 Vite 产物，运行镜像由 Gin 提供 UI 与 API。Compose 将端口发布到宿主机回环地址，并通过 `radar-data` 卷保存数据库。
 
 ## 设计文档
 

@@ -118,3 +118,27 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	}
 	request(t, router, "PATCH", patchPath, `{"status":"candidate"}`, "admin", 200)
 }
+
+func TestManuallyAddTopicPreservesEditorialStatus(t *testing.T) {
+	router, db := collectionRouter(t)
+	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	repo := storage.Repository{RepoID: 1, Owner: "fixture", Name: "project", FullName: "fixture/project",
+		TopicsJSON: "[]", NameIsCurrent: true, State: "candidate", Grade: "C"}
+	if err := db.Create(&repo).Error; err != nil {
+		t.Fatal(err)
+	}
+	const path = "/api/v1/repos/1/topic"
+	request(t, router, "POST", path, "", "", 401)
+	first := request(t, router, "POST", path, "", "admin", 200)
+	if first["status"] != "candidate" || first["reviewedAt"] == nil {
+		t.Fatal("人工选题应创建候选并记录处理时间")
+	}
+	request(t, router, "PATCH", fmt.Sprintf("/api/v1/topics/%d", int64(first["id"].(float64))),
+		`{"status":"accepted"}`, "admin", 200)
+	second := request(t, router, "POST", path, "", "admin", 200)
+	if first["id"] != second["id"] || second["status"] != "accepted" {
+		t.Fatal("重复加入不能覆盖人工选题状态")
+	}
+}

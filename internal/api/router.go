@@ -83,6 +83,7 @@ func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger
 func requireAdmin(token string) gin.HandlerFunc {
 	expected := []byte(token)
 	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store")
 		parts := strings.Fields(c.GetHeader("Authorization"))
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") ||
 			subtle.ConstantTimeCompare([]byte(parts[1]), expected) != 1 {

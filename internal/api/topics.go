@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/topics"
 )
 
 func validTopicStatus(status string) bool {
@@ -24,6 +25,19 @@ type topicCursor struct {
 	Status string `json:"status"`
 	At     int64  `json:"at"`
 	ID     int64  `json:"id"`
+}
+
+func (a *collectionAPI) addTopic(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	row, err := topics.Add(c.Request.Context(), a.db, id, time.Now())
+	if err != nil {
+		a.fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, topicView(row))
 }
 
 func (a *collectionAPI) topics(c *gin.Context) {
