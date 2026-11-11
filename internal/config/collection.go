@@ -21,16 +21,17 @@ type GitHub struct {
 
 // Scheduler 定义扫描、租约、四档容量与采样周期。
 type Scheduler struct {
-	TickMinutes          int            `yaml:"tick_minutes" json:"tickMinutes"`
-	TrendingDailyMinutes int            `yaml:"trending_daily_minutes" json:"-"`
-	TrendingOtherMinutes int            `yaml:"trending_other_minutes" json:"-"`
-	SearchRoundMinutes   int            `yaml:"search_round_minutes" json:"-"`
-	MaxHot               int            `yaml:"max_hot" json:"maxHot"`
-	MaxActive            int            `yaml:"max_active" json:"maxActive"`
-	MaxNormal            int            `yaml:"max_normal" json:"maxNormal"`
-	MaxMonitoredRepos    int            `yaml:"max_monitored_repos" json:"maxMonitoredRepos"`
-	IntervalsMinutes     map[string]int `yaml:"intervals_minutes" json:"intervalsMinutes"`
-	LeaseSeconds         int            `yaml:"lease_seconds" json:"leaseSeconds"`
+	TickMinutes            int            `yaml:"tick_minutes" json:"tickMinutes"`
+	MetricsIntervalMinutes int            `yaml:"-" json:"metricsIntervalMinutes"`
+	TrendingDailyMinutes   int            `yaml:"trending_daily_minutes" json:"-"`
+	TrendingOtherMinutes   int            `yaml:"trending_other_minutes" json:"-"`
+	SearchRoundMinutes     int            `yaml:"search_round_minutes" json:"-"`
+	MaxHot                 int            `yaml:"max_hot" json:"maxHot"`
+	MaxActive              int            `yaml:"max_active" json:"maxActive"`
+	MaxNormal              int            `yaml:"max_normal" json:"maxNormal"`
+	MaxMonitoredRepos      int            `yaml:"max_monitored_repos" json:"maxMonitoredRepos"`
+	IntervalsMinutes       map[string]int `yaml:"intervals_minutes" json:"intervalsMinutes"`
+	LeaseSeconds           int            `yaml:"lease_seconds" json:"leaseSeconds"`
 }
 
 func (s Scheduler) Interval(grade string) time.Duration {

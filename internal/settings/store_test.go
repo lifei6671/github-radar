@@ -1,6 +1,7 @@
 package settings
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -13,6 +14,39 @@ import (
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/migrations"
 )
+
+func TestPhaseTwoDefaultsAndEditsPreserveLegacySettings(t *testing.T) {
+	store, cfg := testStore(t)
+	original, err := store.Initialize(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.Exec(`UPDATE system_settings SET value_json=json_remove(
+json_set(value_json,'$.settings.server.readTimeoutSeconds',27), '$.settings.metrics',
+'$.settings.maintenance','$.settings.scheduler.metricsIntervalMinutes') WHERE key=?`, runtimeKey).Error; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Initialize(t.Context(), cfg)
+	if err != nil || snapshot.Revision != original.Revision || snapshot.Settings.Server.ReadTimeoutSeconds != 27 ||
+		snapshot.Settings.Maintenance.RawDays != 14 || snapshot.Settings.Scheduler.MetricsIntervalMinutes != 15 {
+		t.Fatalf("升级未保留旧值或补齐默认值: %+v %v", snapshot, err)
+	}
+	snapshot.Settings.Metrics.Weights[0] = .25
+	snapshot.Settings.Maintenance.RawDays = 9
+	saved, err := store.SaveRuntime(t.Context(), snapshot.Revision, snapshot.Settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row storage.SystemSetting
+	if err := store.DB.Take(&row, "key=?", runtimeKey).Error; err != nil || !json.Valid([]byte(row.ValueJSON)) {
+		t.Fatalf("设置未持久化: %v", err)
+	}
+	reopened, err := store.Initialize(t.Context(), cfg)
+	if err != nil || reopened.Revision != saved.Revision || reopened.Settings.Metrics.Weights[0] != .25 ||
+		reopened.Settings.Maintenance.RawDays != 9 {
+		t.Fatalf("重启覆盖维护设置: %+v %v", reopened, err)
+	}
+}
 
 func testStore(t *testing.T) (Store, config.Config) {
 	t.Helper()

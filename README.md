@@ -50,7 +50,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/setup/initializ
 
 | GET / PUT 路径 | PUT 请求体 | 生效方式 |
 | --- | --- | --- |
-| `/api/v1/system/settings` | `{revision,settings}` | HTTP 超时、SQLite 参数、GitHub API 和预算、并发、采样策略及 AI 配置保存到数据库。响应的 `restartRequired` 指示是否需要重启 |
+| `/api/v1/system/settings` | `{revision,settings}` | HTTP 超时、SQLite 参数、GitHub API 和预算、采样策略、增长与热度参数、保留天数及维护计划保存在数据库。响应的 `restartRequired` 指示是否需要重启 |
 | `/api/v1/system/categories` | `{revision,items:[{slug,name,anyTopics}]}` | 保存后，分类列表、计数和仓库筛选在下一次请求使用新映射。空列表仅保留自动归类的 `other` |
 | `/api/v1/system/discovery-rules` | `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}` | 修改、关闭或删除规则会撤销该规则的旧任务；新的启用规则由下次调度扫描安排 |
 
@@ -65,16 +65,25 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 | 接口 | 用途 |
 | --- | --- |
 | `GET /api/v1/repos`、`GET /api/v1/repos/:id` | 候选与仓库元数据，支持状态、分类、语言、关注、字面搜索及游标分页 |
+| `GET /api/v1/repos/:id/trend?range=7d` | 24h 和 7d 返回原始观测，30d 返回小时点，180d 返回日点 |
 | `GET /api/v1/categories` | 当前数据库分类及 active 仓库数量 |
 | `GET /api/v1/trending?period=daily&sourceKey=all` | 单来源最新完整榜单 |
 | `POST /api/v1/repos/:id/refresh` | 请求体 `{"requestId":"一次操作的唯一值"}`，返回可轮询的任务 |
 | `POST /api/v1/repos/:id/follow` | 请求体 `{"follow":true}`，取消关注使用 false |
 | `GET /api/v1/jobs/:id`、`GET /api/v1/system/jobs` | 任务结果和最近任务，错误只返回结构化码 |
 | `GET /api/v1/system/limits` | 配额、暂停时间、本地计数和等待任务数 |
+| `GET /api/v1/system/storage` | SQLite 和 WAL 大小、快照与聚合行数、维护水位 |
+| `POST /api/v1/system/maintenance/run` | 返回 202 并持久化维护请求，下次扫描执行 |
 
-`/repos` 默认只返回 active，查询候选使用 `?state=candidate`。排序支持 discovered、stars、followed、hotness、growth24h，followed 排序要求 `followed=true`。阶段 2 计算前增长和热度字段为 null，质量为 insufficient。阶段 1 的 sparkline 为空数组。
+`/repos` 默认只返回 active，查询候选使用 `?state=candidate`。排序支持 discovered、stars、followed、hotness、growth24h，followed 排序要求 `followed=true`。增长榜使用精确的 24h 净增，热度排名基于全部 active 仓库。增长窗口会返回质量及实际采样时间，缺失增量为 `null`。卡片展示最近 24 个已完成 UTC 小时的累计 Star，缺测小时保留空点。
 
 需要独立处理一批任务时运行 `go run ./cmd/radar collect-once`，支持 `-config` 选项，需要已初始化数据库和 GitHub 令牌。该命令最多处理一百个当前可领取任务，未到期或受限流影响的任务保留在数据库。按设计使用单实例，同一数据库的服务运行期间应由 HTTP 刷新接口安排任务。
+
+## 指标与数据维护
+
+服务默认每 15 分钟计算增长、热度及采样等级，整点聚合小时数据，01:00 UTC 聚合日数据，03:00 UTC 清理过期记录。原始快照、小时聚合和日聚合默认分别保留 14、60、180 天，清理前检查下一级聚合水位和实际观测锚点。趋势中的缺测点保持为 `null`。
+
+后台可通过 `/api/v1/system/settings` 的 `scheduler.metricsIntervalMinutes`、`metrics` 和 `maintenance` 修改计算、评分和保留参数，保存后重启生效。旧数据库升级会补齐新增参数的默认值，并保留已有设置。维护可在缺少 GitHub 令牌的情况下运行。离线执行一轮可使用 `go run ./cmd/radar maintenance-once`，支持 `-config`，需要数据库已完成安装。
 
 ## 迁移与验证
 

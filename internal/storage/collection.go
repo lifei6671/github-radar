@@ -19,6 +19,7 @@ type Repository struct {
 	Archived         bool    `gorm:"column:archived"`
 	Disabled         bool    `gorm:"column:disabled"`
 	Grade            string  `gorm:"column:grade"`
+	BelowGradeSince  *int64  `gorm:"column:below_grade_since"`
 	StarredByUser    bool    `gorm:"column:starred_by_user"`
 	FollowedAt       *int64  `gorm:"column:followed_at"`
 	State            string  `gorm:"column:state"`

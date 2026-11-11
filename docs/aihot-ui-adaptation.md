@@ -323,7 +323,7 @@ export type SummaryResponse =
 export interface ApiList<T> {
   items: T[];
   nextCursor: string | null;
-  updatedAt: string;
+  updatedAt: string | null; // 指标榜首轮计算成功前为 null
 }
 ~~~
 

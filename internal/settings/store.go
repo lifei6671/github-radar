@@ -37,9 +37,13 @@ func read(tx *gorm.DB) (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	var snapshot Snapshot
+	// 旧版已保存的快照没有指标与维护字段，读取时只补齐新增默认值。
+	snapshot.Settings.Metrics = config.DefaultMetrics()
+	snapshot.Settings.Maintenance = config.DefaultMaintenance()
 	if err := json.Unmarshal([]byte(row.ValueJSON), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("解析数据库运行设置: %w", err)
 	}
+	snapshot.Settings.DefaultMetricsInterval()
 	if snapshot.Revision < 1 {
 		return Snapshot{}, errors.New("数据库运行设置缺少有效修订号")
 	}

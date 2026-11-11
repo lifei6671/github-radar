@@ -22,8 +22,10 @@ type Config struct {
 	Auth           struct {
 		AdminTokenEnv string `yaml:"admin_token_env"`
 	} `yaml:"auth"`
-	AI   AI `yaml:"ai"`
-	path string
+	AI          AI          `yaml:"ai"`
+	Metrics     Metrics     `yaml:"-"`
+	Maintenance Maintenance `yaml:"-"`
+	path        string
 }
 
 // Server 保存监听地址和 HTTP 超时。
@@ -63,6 +65,7 @@ func Load(path string) (Config, error) {
 	}
 	cfg.Auth.AdminTokenEnv = "ADMIN_TOKEN"
 	cfg.GitHub, cfg.Scheduler, cfg.Discovery = collectionDefaults()
+	cfg.Metrics, cfg.Maintenance = DefaultMetrics(), DefaultMaintenance()
 	cfg.AI.Enabled = true
 	cfg.AI.BaseURLEnv = "AI_BASE_URL"
 	cfg.AI.APIKeyEnv = "AI_API_KEY"

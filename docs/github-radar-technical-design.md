@@ -741,6 +741,7 @@ GET /repos/{owner}/{repo}/readme
 | metrics_hourly 小时聚合 | 60 天 | 已具备可靠日聚合或允许缺失标记 |
 | metrics_daily 日聚合 | 180 天 | 超期分批删除 |
 | trending_observations | 30 天 | 超期分批删除 |
+| search_observations | 30 天 | 与 Trending 共用发现记录保留天数 |
 | jobs 已完成/取消/终止的普通失败记录 | 14 天 | 不删除仍待重试或 unknown 任务，关联 ai_calls 先清理 |
 | jobs dead 记录 | 30 天 | 保留错误类别便于排查 |
 | ai_summaries | 只保留每个仓库最新成功摘要 | 项目被彻底移除时清理 |
@@ -771,6 +772,8 @@ GET /repos/{owner}/{repo}/readme
 - 日 delta 同理；长时间采样缺失不能线性填充当作精确事实。
 - 早期 B/C 级仓库的历史通常比较稀疏，不能伪造小时曲线。
 - 系统初始化时自动清理超期数据，不因宕机数日而永久积压。
+
+阶段 2 使用 `metric_rollup_pending` 在采样提交时记录小时增量，合并小时桶时将本次新增样本同步传给日层。旧库迁移按实际观测时间补建待合并锚点。清理只读取已提交的水位和聚合，遇到待合并的迟到样本会保留源数据。Trending 以 `trending_batches` 记录完整批次及其实际成功时间，包含成功空榜。
 
 ### 8.1 参考清理 SQL
 
@@ -839,6 +842,8 @@ WHERE (repo_id, sample_slot) IN (
 
 三个配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending；Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。两个列表接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
 
+阶段 2 的计算周期、窗口容差、采样分级门槛、评分参数及清理计划由 `settings.scheduler.metricsIntervalMinutes`、`settings.metrics` 和 `settings.maintenance` 管理，保存后重启生效。评分权重按 24h 增长、7d 增长、加速度、持续性和 Trending 排列。维护接口返回 202，持久化请求由后台下次扫描领取。已初始化的库也可以用 `maintenance-once` 离线执行维护。
+
 异步任务契约：refresh 请求 `{requestId}`，接受后返回 `202 {jobId,statusUrl}`；summary 请求 `{force:false,requestId:"客户端生成的唯一值"}`，先查手动 dedup_key，相同请求返回原任务；其他请求遇到未决摘要任务返回 `409 {code:"summary_in_progress",existingJobId,statusUrl}`。无冲突且缓存命中返回 `200 {cached:true,summaryStatus:"ready"}`，否则返回同样的 202 结构；`force:true` 明确要求重新生成并计入手动额度。unknown 任务通过 `POST /api/v1/jobs/:id/retry`、请求 `{requestId,acceptPossibleCharge:true}` 在管理鉴权下关闭未决调用、取消旧任务并创建新的手动任务；上述变化在同一事务中完成。重试接口先按新手动 dedup_key 查重，已存在则直接返回，随后才检查旧任务必须为 unknown，保证响应丢失后的重试仍返回同一新任务。
 
 `GET /api/v1/jobs/:id` 返回 `{id,type,status,attempts,maxAttempts,errorCode,createdAt,updatedAt,repoId}`，时间为 ISO8601，状态见 4.4。succeeded/dead/canceled 停止轮询，unknown 停止自动轮询并显示人工处理入口；failed 仍可能退避重试。任务不存在/已过保留期返回 404，前端重新查询仓库结果，不宣称成功。维护期该接口可返回 503，恢复进度使用独立的 operations 接口。
@@ -855,7 +860,7 @@ Trending 专用契约：GET /api/v1/trending 的 period 为 daily/weekly/monthly
 
 /repos 默认仅列 state=active；watchlist 使用 followed=true，包含所有已关注状态，按 followedAt 降序。可显式传 state 枚举查询其他状态；q 匹配 full_name/description，language 精确匹配，重复 category 参数按 OR 匹配第 3.4 节的数据库分类。/categories 返回全部分类及 active 计数；未知分类/排序/状态返回 400。
 
-sort 可取 discovered、hotness、growth24h、stars、followed，分别以 discovered_at、hotness_score、exact 的 delta_24h、stars、followed_at 降序，repo_id 升序作唯一次键；可用性不足的排序值为 null，统一排最后。followed 排序要求 followed=true。cursor 是无填充 Base64URL 编码的 UTF-8 JSON：`{v:1,sort,filters,last:{value,repoId}}`；filters 为标准化 q/language/state/followed 和排序去重后的 category 数组，不含 limit。比较当前过滤条件及版本，非法编码/字段/不匹配返回 400 invalid_cursor。后续页以该排序键执行 keyset 查询，包括 null 段的 repo_id 续页，不使用 offset。
+sort 可取 discovered、hotness、growth24h、stars、followed，分别以 discovered_at、hotness_score、exact 的 delta_24h、stars、followed_at 降序，repo_id 升序作唯一次键；可用性不足的排序值为 null，统一排最后。followed 排序要求 followed=true。热度榜和增长榜的 updatedAt 为最近成功计算时间，首轮成功前为 null。cursor 是无填充 Base64URL 编码的 UTF-8 JSON：`{v:1,sort,filters,last:{value,repoId}}`；filters 为标准化 q/language/state/followed 和排序去重后的 category 数组，不含 limit。比较当前过滤条件及版本，非法编码/字段/不匹配返回 400 invalid_cursor。后续页以该排序键执行 keyset 查询，包括 null 段的 repo_id 续页，不使用 offset。
 
 游标只描述查询位置，不承载授权；不需要签名或服务端分页会话。热度、关注及采集数据会变动，分页为实时弱一致，前端按 repoId 去重，刷新列表重新从首页取；不承诺跨页固定快照。响应为 `{items,nextCursor,updatedAt}`，无下一页时 nextCursor=null。
 

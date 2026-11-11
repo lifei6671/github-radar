@@ -110,7 +110,12 @@ func (e *Engine) discoverTrending(ctx context.Context, p Payload) (func(*gorm.DB
 				return err
 			}
 		}
-		data, err := json.Marshal(TrendingBatch{Slot(p.PlannedAt), observed, len(entries)})
+		record := storage.TrendingBatchRecord{SourceKey: p.SourceKey, Window: p.Period,
+			ObservedSlot: Slot(p.PlannedAt), ObservedAt: observed}
+		if err := tx.Create(&record).Error; err != nil {
+			return err
+		}
+		data, err := json.Marshal(TrendingBatch{record.ObservedSlot, observed, len(entries)})
 		if err != nil {
 			return err
 		}

@@ -2,21 +2,27 @@ package api
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
+
+var errInvalidCursor = errors.New("无效分页游标")
 
 // repoFilters 与游标内的过滤快照共用同一种表示。
 type repoFilters struct {
@@ -32,8 +38,8 @@ type repoCursor struct {
 	Sort    string      `json:"sort"`
 	Filters repoFilters `json:"filters"`
 	Last    struct {
-		Value  *int64 `json:"value"`
-		RepoID int64  `json:"repoId"`
+		Value  any   `json:"value"`
+		RepoID int64 `json:"repoId"`
 	} `json:"last"`
 }
 
@@ -47,12 +53,36 @@ func (a *collectionAPI) repos(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_filter"})
 		return
 	}
+	// 排序键、全局名次及计算时间来自同一读快照，计算任务可以并发提交新一轮结果。
+	var page gin.H
+	db := a.db.WithContext(c.Request.Context())
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var err error
+		page, err = a.repoPage(c, tx, filters, sort, limit)
+		return err
+	}, &sql.TxOptions{ReadOnly: true})
+	if errors.Is(err, errInvalidCursor) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_cursor"})
+		return
+	}
+	if err != nil {
+		a.fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, page)
+}
+
+func (a *collectionAPI) repoPage(c *gin.Context, tx *gorm.DB, filters repoFilters, sort string, limit int) (gin.H, error) {
 	columns := map[string]string{
-		"discovered": "discovered_at", "stars": "stars", "followed": "followed_at",
-		"hotness": "", "growth24h": "",
+		"discovered": "repositories.discovered_at", "stars": "repositories.stars", "followed": "repositories.followed_at",
+		"hotness":   "m.hotness_score",
+		"growth24h": `CASE WHEN json_extract(m.window_details_json,'$."24h".quality')='exact' THEN m.delta_24h END`,
 	}
 	column := columns[sort]
-	db := a.db.WithContext(c.Request.Context()).Model(&storage.Repository{})
+	db := tx.Model(&storage.Repository{})
+	if sort == "hotness" || sort == "growth24h" {
+		db = db.Joins("LEFT JOIN latest_metrics m ON m.repo_id=repositories.repo_id AND repositories.state='active'")
+	}
 	if filters.State != "" {
 		db = db.Where("state = ?", filters.State)
 	}
@@ -69,61 +99,99 @@ func (a *collectionAPI) repos(c *gin.Context) {
 	db = a.filterCategories(c, db, filters.Category)
 	if raw, exists := c.GetQuery("cursor"); exists {
 		cursor, err := decodeCursor(raw, sort, filters)
-		if err != nil || (column == "" && cursor.Last.Value != nil) {
-			c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_cursor"})
-			return
+		if err != nil {
+			return nil, errInvalidCursor
 		}
 		if cursor.Last.Value == nil {
-			if column != "" {
-				db = db.Where(column + " IS NULL")
-			}
-			db = db.Where("repo_id > ?", cursor.Last.RepoID)
+			db = db.Where(column+" IS NULL").Where("repositories.repo_id > ?", cursor.Last.RepoID)
 		} else {
-			db = db.Where("("+column+" < ? OR ("+column+" = ? AND repo_id > ?) OR "+column+" IS NULL)",
-				*cursor.Last.Value, *cursor.Last.Value, cursor.Last.RepoID)
+			value, err := cursor.sortValue()
+			if err != nil {
+				return nil, errInvalidCursor
+			}
+			db = db.Where("("+column+" < ? OR ("+column+" = ? AND repositories.repo_id > ?) OR "+column+" IS NULL)",
+				value, value, cursor.Last.RepoID)
 		}
 	}
-	if column != "" {
-		db = db.Order(column + " DESC")
+	type row struct {
+		storage.Repository
+		IntegerKey *int64
+		RealKey    *float64
 	}
-	var repos []storage.Repository
-	if err := db.Order("repo_id").Limit(limit + 1).Find(&repos).Error; err != nil {
-		a.fail(c, err)
-		return
+	keyAlias := "integer_key"
+	if sort == "hotness" {
+		keyAlias = "real_key"
+	}
+	var rows []row
+	if err := db.Select("repositories.*, " + column + " AS " + keyAlias).
+		Order(column + " DESC").Order("repositories.repo_id").Limit(limit + 1).Find(&rows).Error; err != nil {
+		return nil, err
 	}
 	var next *string
-	if len(repos) > limit {
-		repos = repos[:limit]
-		last := repos[len(repos)-1]
+	if len(rows) > limit {
+		rows = rows[:limit]
+		last := rows[len(rows)-1]
 		cursor := repoCursor{Version: 1, Sort: sort, Filters: filters}
 		cursor.Last.RepoID = last.RepoID
-		switch sort {
-		case "discovered":
-			cursor.Last.Value = &last.DiscoveredAt
-		case "stars":
-			value := int64(last.Stars)
-			cursor.Last.Value = &value
-		case "followed":
-			cursor.Last.Value = last.FollowedAt
+		if last.IntegerKey != nil {
+			value := json.Number(strconv.FormatInt(*last.IntegerKey, 10))
+			cursor.Last.Value = value
+		} else if last.RealKey != nil {
+			value := json.Number(strconv.FormatFloat(*last.RealKey, 'g', -1, 64))
+			cursor.Last.Value = value
 		}
 		data, err := json.Marshal(cursor)
 		if err != nil {
-			a.fail(c, err)
-			return
+			return nil, err
 		}
 		value := base64.RawURLEncoding.EncodeToString(data)
 		next = &value
 	}
-	entries, err := a.latestEntries(c)
+	repos := make([]storage.Repository, 0, len(rows))
+	for _, row := range rows {
+		repos = append(repos, row.Repository)
+	}
+	views, err := a.metricViews(tx, repos)
 	if err != nil {
-		a.fail(c, err)
-		return
+		return nil, err
+	}
+	entries, err := a.latestEntries(tx)
+	if err != nil {
+		return nil, err
 	}
 	items := make([]gin.H, 0, len(repos))
 	for _, repo := range repos {
-		items = append(items, a.card(c, repo, entries))
+		items = append(items, a.card(c, repo, entries, views[repo.RepoID]))
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items, "nextCursor": next, "updatedAt": iso(time.Now().UnixMilli())})
+	now := iso(time.Now().UnixMilli())
+	updatedAt := &now
+	if sort == "hotness" || sort == "growth24h" {
+		var marker storage.MaintenanceState
+		if err := tx.Find(&marker, "key=?", metrics.ComputeKey).Error; err != nil {
+			return nil, err
+		}
+		updatedAt = nil
+		if marker.Key != "" {
+			updatedAt = optionalISO(&marker.UpdatedAt)
+		}
+	}
+	return gin.H{"items": items, "nextCursor": next, "updatedAt": updatedAt}, nil
+}
+
+// sortValue 保留整数键的精度，同时按原浮点值比较热度游标。
+func (c repoCursor) sortValue() (any, error) {
+	number, ok := c.Last.Value.(json.Number)
+	if !ok {
+		return nil, errors.New("排序游标必须为数值")
+	}
+	if c.Sort != "hotness" {
+		return number.Int64()
+	}
+	value, err := number.Float64()
+	if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
+		return nil, errors.New("热度游标无效")
+	}
+	return value, nil
 }
 
 func (a *collectionAPI) filters(c *gin.Context) (repoFilters, string, error) {
@@ -195,6 +263,7 @@ func decodeCursor(raw, sort string, filters repoFilters) (repoCursor, error) {
 		return cursor, err
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cursor); err != nil {
 		return cursor, err

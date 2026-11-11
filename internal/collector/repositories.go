@@ -127,7 +127,7 @@ func (q Queue) admit(tx *gorm.DB, repo *storage.Repository, at int64) error {
 	if err != nil {
 		return err
 	}
-	return tx.Model(repo).Updates(map[string]any{"state": "active", "grade": grade, "next_fetch_at": at, "updated_at": at}).Error
+	return tx.Model(repo).Updates(map[string]any{"state": "active", "grade": grade, "below_grade_since": nil, "next_fetch_at": at, "updated_at": at}).Error
 }
 
 // canActivateFollow 保护已保存的下一次启动容量，避免重启前新增关注导致设置失效。
@@ -192,7 +192,7 @@ func (q Queue) Rebalance(ctx context.Context, now time.Time) error {
 			return err
 		}
 		order := clause.OrderBy{Expression: clause.Expr{
-			SQL:  "starred_by_user DESC, EXISTS (SELECT 1 FROM trending_observations t WHERE t.repo_id = repositories.repo_id AND t.observed_slot >= ?) DESC, last_discovered_at DESC, repo_id",
+			SQL:  "starred_by_user DESC, (SELECT hotness_score FROM latest_metrics m WHERE m.repo_id=repositories.repo_id AND repositories.state='active') DESC, EXISTS (SELECT 1 FROM trending_observations t WHERE t.repo_id = repositories.repo_id AND t.observed_slot >= ?) DESC, last_discovered_at DESC, repo_id",
 			Vars: []any{now.Add(-24 * time.Hour).UnixMilli()},
 		}}
 		candidates := tx.Where("state IN ('active','candidate','paused') AND disabled = 0 AND name_is_current = 1")
@@ -244,7 +244,7 @@ func (q Queue) Rebalance(ctx context.Context, now time.Time) error {
 				if err != nil {
 					return err
 				}
-				if err := tx.Model(&repo).Updates(map[string]any{"grade": grade, "updated_at": now.UnixMilli()}).Error; err != nil {
+				if err := tx.Model(&repo).Updates(map[string]any{"grade": grade, "below_grade_since": nil, "updated_at": now.UnixMilli()}).Error; err != nil {
 					return err
 				}
 			}

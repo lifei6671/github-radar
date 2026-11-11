@@ -22,6 +22,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
 	gh "github.com/lifei6671/github-radar/internal/github"
+	"github.com/lifei6671/github-radar/internal/maintenance"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/trending"
@@ -45,8 +46,8 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command, args = args[0], args[1:]
 	}
-	if command != "server" && command != "migrate" && command != "collect-once" {
-		return fmt.Errorf("未知命令 %q，请使用 server、migrate 或 collect-once", command)
+	if command != "server" && command != "migrate" && command != "collect-once" && command != "maintenance-once" {
+		return fmt.Errorf("未知命令 %q，请使用 server、migrate、collect-once 或 maintenance-once", command)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	configPath := flags.String("config", "", "YAML 配置文件路径，省略时使用默认配置")
@@ -93,6 +94,10 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("初始化 GORM: %w", err)
 	}
+	maintainer := maintenance.Service{DB: db, Cfg: cfg, Logger: logger}
+	if command == "maintenance-once" {
+		return maintainer.Once(ctx, time.Now().UTC())
+	}
 	githubToken := strings.TrimSpace(os.Getenv(cfg.GitHub.TokenEnv))
 	var engine *collector.Engine
 	if githubToken == "" {
@@ -127,6 +132,8 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	group, serviceCtx := errgroup.WithContext(ctx)
 	group.Go(func() error { return serve(serviceCtx, server, logger) })
+	group.Go(func() error { return maintainer.RunMetrics(serviceCtx) })
+	group.Go(func() error { return maintainer.RunMaintenance(serviceCtx) })
 	if engine != nil {
 		group.Go(func() error { return engine.Run(serviceCtx) })
 	}

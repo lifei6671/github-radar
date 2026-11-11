@@ -10,16 +10,19 @@ import (
 
 // Runtime 是数据库持有的进程级设置。部署地址、库路径和密钥值不会序列化。
 type Runtime struct {
-	Server    Server    `json:"server"`
-	Storage   Storage   `json:"storage"`
-	GitHub    GitHub    `json:"github"`
-	Scheduler Scheduler `json:"scheduler"`
-	AI        AI        `json:"ai"`
+	Server      Server      `json:"server"`
+	Storage     Storage     `json:"storage"`
+	GitHub      GitHub      `json:"github"`
+	Scheduler   Scheduler   `json:"scheduler"`
+	AI          AI          `json:"ai"`
+	Metrics     Metrics     `json:"metrics"`
+	Maintenance Maintenance `json:"maintenance"`
 }
 
 // RuntimeSettings 提取正在使用的设置，排除部署字段和一次性导入字段。
 func (cfg Config) RuntimeSettings() Runtime {
-	values := Runtime{Server: cfg.Server, Storage: cfg.Storage, GitHub: cfg.GitHub, Scheduler: cfg.Scheduler, AI: cfg.AI}
+	values := Runtime{Server: cfg.Server, Storage: cfg.Storage, GitHub: cfg.GitHub, Scheduler: cfg.Scheduler, AI: cfg.AI,
+		Metrics: cfg.Metrics, Maintenance: cfg.Maintenance}
 	values.Server.Listen, values.Storage.Path = "", ""
 	values.Scheduler.TrendingDailyMinutes, values.Scheduler.TrendingOtherMinutes, values.Scheduler.SearchRoundMinutes = 0, 0, 0
 	values.AI.BaseURLEnv, values.AI.ModelEnv = "", ""
@@ -29,6 +32,7 @@ func (cfg Config) RuntimeSettings() Runtime {
 // SeedRuntime 只在旧数据库首次升级或新数据库首次启动时使用。
 func (cfg Config) SeedRuntime() Runtime {
 	values := cfg.RuntimeSettings()
+	values.DefaultMetricsInterval()
 	if values.AI.BaseURL == "" {
 		values.AI.BaseURL = strings.TrimSpace(os.Getenv(cfg.AI.BaseURLEnv))
 	}
@@ -42,6 +46,7 @@ func (cfg Config) SeedRuntime() Runtime {
 func (cfg Config) WithRuntime(values Runtime) Config {
 	values.Server.Listen, values.Storage.Path = cfg.Server.Listen, cfg.Storage.Path
 	cfg.Server, cfg.Storage, cfg.GitHub, cfg.Scheduler, cfg.AI = values.Server, values.Storage, values.GitHub, values.Scheduler, values.AI
+	cfg.Metrics, cfg.Maintenance = values.Metrics, values.Maintenance
 	return cfg
 }
 
@@ -65,7 +70,10 @@ func (r Runtime) Validate() error {
 			return errors.New("AI Base URL 须为不含凭据、查询参数或片段的 HTTP(S) 地址")
 		}
 	}
-	return r.validateCollection()
+	if err := r.validateCollection(); err != nil {
+		return err
+	}
+	return r.validateMetrics()
 }
 
 // DurationLimit 避免管理接口写入会使 time.Duration 溢出的值。
