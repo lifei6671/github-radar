@@ -1,0 +1,16 @@
+# 首次导入的分类默认值。已有数据库通过管理接口维护分类。
+- slug: agent
+  name: AI 智能体
+  any_topics: [ai-agent, ai-agents, autonomous-agents]
+- slug: coding
+  name: AI 编程
+  any_topics: [coding-agent, ai-coding, code-generation]
+- slug: mcp
+  name: MCP
+  any_topics: [mcp, mcp-server, model-context-protocol]
+- slug: media
+  name: AI 多媒体
+  any_topics: [text-to-speech, tts, text-to-image, text-to-video]
+- slug: tools
+  name: 开发工具
+  any_topics: [developer-tools, devtools, cli]

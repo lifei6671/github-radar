@@ -1,0 +1,5 @@
+# 部署入口。相对路径以启动命令的工作目录为准。
+server:
+  listen: "127.0.0.1:8080"
+storage:
+  path: "./data/github-radar.db"

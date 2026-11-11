@@ -1,0 +1,20 @@
+services:
+  radar:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?请先设置 ADMIN_TOKEN}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      # 兼容旧部署，仅在首次写入数据库配置时导入这两个值。
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_MODEL: ${AI_MODEL:-}
+    volumes:
+      - radar-data:/app/data
+
+# 保留 SQLite 数据库及同目录的 WAL 文件。
+volumes:
+  radar-data:

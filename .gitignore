@@ -28,6 +28,11 @@ go.work.sum
 # env file
 .env
 
+# 本地 SQLite 数据库及日志文件
+/data/
+
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+.codegraph/
+.workbuddy/
