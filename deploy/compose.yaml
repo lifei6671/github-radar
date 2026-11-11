@@ -8,6 +8,7 @@ services:
     environment:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       AI_API_KEY: ${AI_API_KEY:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       # 兼容旧部署，仅在首次写入数据库配置时导入这两个值。
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_MODEL: ${AI_MODEL:-}

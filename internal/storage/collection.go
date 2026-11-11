@@ -3,9 +3,17 @@ package storage
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 var ErrRepositoryBlocked = errors.New("仓库已屏蔽")
+
+// PublicRepositoryCondition 统一前台发布、相似项目及其后台生成任务的可见性规则。
+var PublicRepositoryCondition = fmt.Sprintf("%[1]s.%[2]s = 1 AND %[1]s.%[3]s=0 AND %[1]s.%[4]s = 0 AND %[1]s.%[5]s IS NULL AND %[1]s.%[6]s IN ('%[7]s','%[8]s','%[9]s')",
+	RepositoryTable, RepositoryColumns.NameIsCurrent, RepositoryColumns.Blocked, RepositoryColumns.Disabled, RepositoryColumns.FirstNotFoundAt, RepositoryColumns.State,
+	consts.StatusActive, consts.StatusCandidate, consts.StatusPaused)
 
 // Repository 保存仓库身份、当前元数据及采样调度状态。
 // 可空字段对应 SQL NULL，所有时间值使用 UTC Unix 毫秒。

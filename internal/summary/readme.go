@@ -22,6 +22,23 @@ import (
 
 var readmeMarkdown = goldmark.New(goldmark.WithExtensions(extension.GFM), goldmark.WithParserOptions(parser.WithAutoHeadingID()))
 
+// EmbeddingReadme 复用公开身份检查和 Markdown 摘录，正文不写入数据库。
+func (e *Engine) EmbeddingReadme(ctx context.Context, repo storage.Repository) (string, error) {
+	if e.GitHub == nil {
+		return "", nil
+	}
+	result, err := e.readReadme(ctx, repo, false)
+	if err != nil {
+		if withdraw := withdrawRepository(err, repo.RepoID); withdraw != nil {
+			if saveErr := withdraw(e.Queue.DB.WithContext(ctx)); saveErr != nil {
+				return "", saveErr
+			}
+		}
+		return "", err
+	}
+	return excerpts(prose(result.Body), 4096), nil
+}
+
 // readReadme 按仓库 ID 验证公开性和当前地址后临时获取 README，不写入原文。
 func (e *Engine) readReadme(ctx context.Context, repo storage.Repository, display bool) (gh.ReadmeResult, error) {
 	policy := gh.Policy{RepositoryID: repo.RepoID, Grade: repo.Grade, ReadmeBudget: e.Queue.AI.Summary.GitHubBudget, ReadmeView: display}
@@ -35,9 +52,10 @@ func (e *Engine) readReadme(ctx context.Context, repo storage.Repository, displa
 		return gh.ReadmeResult{}, &gh.Failure{Code: consts.CodeGitHubInvalidRepository}
 	}
 	result, err := e.GitHub.Readme(ctx, owner, name, "", e.Queue.AI.Summary.ReadmeMaxBytes, policy)
-	if err != nil || result.Missing {
+	if err != nil {
 		return result, err
 	}
+	// README 404 也可能源于仓库刚转私，缺失时仍须复核仓库身份。
 	remote, err = e.publicRepo(ctx, repo.RepoID, policy)
 	if err != nil {
 		return gh.ReadmeResult{}, err

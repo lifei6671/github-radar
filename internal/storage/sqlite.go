@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm/logger"
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
+	_ "modernc.org/sqlite/vec" // 在所有 SQLite 连接注册随驱动分发的向量函数。
 
 	"github.com/lifei6671/github-radar/internal/config"
 )

@@ -27,6 +27,7 @@ type Config struct {
 	CategoriesFile  string          `yaml:"categories_file"`
 	Auth            Auth            `yaml:"auth" json:"-"`
 	AI              AI              `yaml:"ai"`
+	Embedding       Embedding       `yaml:"-"`
 	Metrics         Metrics         `yaml:"-"`
 	Maintenance     Maintenance     `yaml:"-"`
 	Recommendations Recommendations `yaml:"-"`
@@ -79,6 +80,7 @@ func Load(path string) (Config, error) {
 	cfg.GitHub, cfg.Scheduler, cfg.Discovery = collectionDefaults()
 	cfg.Metrics, cfg.Maintenance = DefaultMetrics(), DefaultMaintenance()
 	cfg.AI.Summary, cfg.Recommendations = DefaultSummary(), DefaultRecommendations()
+	cfg.Embedding = DefaultEmbedding()
 	cfg.AI.Enabled = true
 	cfg.AI.BaseURLEnv = "AI_BASE_URL"
 	cfg.AI.APIKeyEnv = "AI_API_KEY"

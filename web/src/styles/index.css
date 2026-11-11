@@ -568,6 +568,11 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent-t
 .detail-side-facts > div { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 10px; min-width: 0; font-size: 12px; }
 .detail-side-facts dt { color: var(--ink-muted); }
 .detail-side-facts dd { min-width: 0; overflow-wrap: anywhere; text-align: right; }
+.detail-similar-list { display: grid; }
+.detail-similar-list li { display: grid; gap: 4px; padding-block: 9px; min-width: 0; overflow-wrap: anywhere; }
+.detail-similar-list li + li { border-top: var(--border); }
+.detail-similar-list li > p { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.detail-similar-list li > span { display: flex; align-items: center; gap: 5px; }
 .detail-origin { min-width: 0; }
 .detail-origin .external { justify-content: start; min-height: 24px; max-width: 100%; padding: 0; border-color: transparent; background: transparent; white-space: normal; overflow-wrap: anywhere; text-align: left; }
 .detail-source-list { list-style: none; padding: 0; margin: 0; }

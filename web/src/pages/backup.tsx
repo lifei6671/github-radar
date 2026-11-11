@@ -388,11 +388,11 @@ function ResumeAI() {
     onSuccess: () => { setConfirm(false); void client.invalidateQueries({ queryKey: statusKey }) },
   })
   return <section className="panel system-panel">
-    <header className="section-head"><h2>自动 AI 摘要</h2><Badge tone="warning">已暂停</Badge></header>
-    <button className="button" onClick={() => setConfirm(true)}>启用自动摘要</button>
-    {confirm && <Dialog title="启用自动 AI 摘要" onClose={() => { if (!resume.isPending) setConfirm(false) }}>
+    <header className="section-head"><h2>自动 AI 调用</h2><Badge tone="warning">已暂停</Badge></header>
+    <button className="button" onClick={() => setConfirm(true)}>恢复自动 AI 调用</button>
+    {confirm && <Dialog title="恢复自动 AI 调用" onClose={() => { if (!resume.isPending) setConfirm(false) }}>
       <div className="dialog-form">
-        <Notice>恢复前的 AI 用量记录可能不完整。后续调用按恢复库的用量记录计入预算。</Notice>
+        <Notice>恢复前的 AI 用量记录可能不完整。确认后将恢复已启用的摘要和相似项目向量生成。</Notice>
         {resume.error && <Notice error>{errorText(resume.error)}</Notice>}
         <div className="action-row">
           <button className="button" disabled={resume.isPending} onClick={() => setConfirm(false)} data-autofocus>取消</button>

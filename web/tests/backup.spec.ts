@@ -136,9 +136,9 @@ test('管理页设置、手动备份、重载和恢复后 AI 确认', async ({ p
   await expect(page.getByText('数据已恢复，加载失败。')).toBeVisible()
   await page.getByRole('button', { name: '重试加载' }).click()
   await expect(page.getByText('恢复完成。', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '启用自动摘要' }).click()
+  await page.getByRole('button', { name: '恢复自动 AI 调用' }).click()
   await page.getByRole('button', { name: '确认启用' }).click()
-  await expect(page.getByRole('button', { name: '启用自动摘要' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '恢复自动 AI 调用' })).toHaveCount(0)
   expect(resumeAI).toBeTruthy()
 })
 

@@ -132,7 +132,7 @@ SQLite Backup API 将目标写入放在一个事务里；文件和 WAL 的提交
 - pending/running/failed/unknown 的旧 jobs 全部置 canceled，清除租约，last_error_code 记 restore_reset；保留历史成功/终止记录。
 - 非终态 ai_calls 置 failed，error_code=restore_reset_unknown，明确表示调用结果不能追溯，不表示没有计费。
 - 清空旧 GitHub 配额观测，让限流器启动时重新获取；将 repositories.next_fetch_at、discovery_rules.next_run_at、summary_checks.next_check_at 置当前时间，按当前扫描槽建立新任务；保留旧任务去重键，碰到同槽终态任务时跳过该槽，下个五分钟槽再建，不能重放备份时未完成的调用。
-- 保留仓库、采样、指标、摘要和选题及聚合水位。设置 `ai.auto_resume_required=true`，持久化暂停自动 AI；普通重启也遵守该标志。
+- 保留仓库、采样、指标、摘要、选题、相似项目向量及聚合水位。设置 `ai.auto_resume_required=true`，持久化暂停自动摘要和向量生成。普通重启也遵守该标志。
 
 恢复确认框说明备份后的数据会丢失、历史 AI 调用可能已计费。用户调用 `POST /api/v1/system/ai/resume` 并提交 `{acceptIncompleteUsage:true}` 后清除暂停标志，按恢复库中可用台账继续当日预算；明确无法还原备份之后的历史费用。手动生成仍需用户主动操作，不从旧任务自动发起。普通进程重启使用主方案任务续跑规则，不执行上述清理。
 

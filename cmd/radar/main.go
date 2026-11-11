@@ -23,6 +23,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/embedding"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/maintenance"
@@ -137,6 +138,16 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	summarizer := summary.Engine{Queue: summary.Queue{DB: db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds},
 		GitHub: readmes, Provider: provider, Translate: translate, Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute}
+	var vectorWorker *embedding.Worker
+	if cfg.Embedding.Enabled {
+		key := strings.TrimSpace(os.Getenv(cfg.Embedding.APIKeyEnv))
+		if key == "" {
+			logger.Warn("相似项目向量待配置", "missingEnv", cfg.Embedding.APIKeyEnv)
+		} else {
+			model := embedding.NewProvider(cfg.Embedding, key)
+			vectorWorker = &embedding.Worker{DB: db, Config: cfg.Embedding, Embed: model.Embed, Readme: summarizer.EmbeddingReadme, Logger: logger}
+		}
+	}
 
 	group, serviceCtx := errgroup.WithContext(ctx)
 	workers := lifecycle.NewWorkers(serviceCtx, func(ctx context.Context) error {
@@ -144,6 +155,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		group.Go(func() error { return maintainer.RunMetrics(workerCtx) })
 		group.Go(func() error { return maintainer.RunMaintenance(workerCtx) })
 		group.Go(func() error { return summarizer.Run(workerCtx) })
+		if vectorWorker != nil {
+			group.Go(func() error { return vectorWorker.Run(workerCtx) })
+		}
 		if engine != nil {
 			group.Go(func() error { return engine.Run(workerCtx) })
 		}

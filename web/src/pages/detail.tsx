@@ -4,8 +4,8 @@ import { ArrowLeft, CalendarDays, Clock3, GitFork, Plus, Star } from 'lucide-rea
 import { lazy, Suspense, useEffect } from 'react'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router'
 import { api, ApiError, errorText, publicApi, useSession } from '../api/client'
-import { useAdminArea, useCategories, withdrawPublicRepo } from '../api/queries'
-import type { RepoDetail, Topic, Trend, TrendRange } from '../api/types'
+import { similarReposKey, useAdminArea, useCategories, withdrawPublicRepo } from '../api/queries'
+import type { Items, RepoDetail, Topic, Trend, TrendRange } from '../api/types'
 import { External, GrowthValue, MonitorButton, RepoBlockButton } from '../components/repo'
 import { RefreshAction, SummaryActions } from '../components/tasks'
 import { RepoReading } from '../components/readme'
@@ -189,6 +189,7 @@ function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<stri
         {repo.aiTopics.map((topic) => <span key={topic} className="context-chip">{topic}</span>)}
       </div>
     </section>}
+    {!repo.blocked && <SimilarProjects repoId={repo.id} />}
     <section className="panel detail-side-card" aria-labelledby="repo-record-title">
       <h2 id="repo-record-title">监控记录</h2>
       <dl className="detail-side-facts">
@@ -199,6 +200,28 @@ function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<stri
       {admin && !repo.blocked && <RefreshAction repoId={repo.id} />}
     </section>
   </aside>
+}
+
+type SimilarProject = Pick<RepoDetail, 'id' | 'fullName' | 'description' | 'language' | 'stars'>
+
+function SimilarProjects({ repoId }: { repoId: number }) {
+  const query = useQuery({
+    queryKey: [similarReposKey, repoId],
+    queryFn: ({ signal }) => publicApi<Items<SimilarProject>>('/repos/' + repoId + '/similar', { signal }),
+    staleTime: 0,
+  })
+  // 重新校验公开可见性时隐藏旧结果，空列表不占据详情栏。
+  if (query.isFetching || query.isError || !query.data?.items.length) return null
+  return <section className="panel detail-side-card" aria-labelledby="repo-similar-title">
+    <h2 id="repo-similar-title">相似项目</h2>
+    <ul className="detail-similar-list">
+      {query.data.items.map((repo) => <li key={repo.id}>
+        <Link className="detail-text-link" to={repoPath(repo.fullName)} state={{ repoId: repo.id }}>{repo.fullName}</Link>
+        {repo.description && <p className="minor muted">{repo.description}</p>}
+        <span className="minor muted">{repo.language && <span>{repo.language} </span>}<Star size={12} aria-hidden /> {number(repo.stars)}</span>
+      </li>)}
+    </ul>
+  </section>
 }
 
 function AddTopic({ repoId }: { repoId: number }) {

@@ -6,9 +6,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
+
+func TestEmbeddingReadmeMissingRechecksRemoteVisibility(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	source.missing = true
+	source.onRead = func() { source.private = true }
+	repo := row[storage.Repository](t, e.Queue.DB, storage.RepositoryColumns.RepoID+" = ?", 1)
+	readme, err := e.EmbeddingReadme(t.Context(), repo)
+	if !errors.Is(err, ErrRepoUnavailable) || readme != "" {
+		t.Fatalf("仓库在 README 缺失时转私有，应终止材料读取: %v", err)
+	}
+	repo = row[storage.Repository](t, e.Queue.DB, storage.RepositoryColumns.RepoID+" = ?", 1)
+	if repo.State != consts.StatusUnavailable || repo.FirstNotFoundAt == nil {
+		t.Fatal("已确认转私的仓库应撤下")
+	}
+}
 
 type sourceBlockedDuringLookup struct {
 	GitHubSource

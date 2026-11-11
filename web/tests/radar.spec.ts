@@ -1,6 +1,18 @@
 import { expect, test } from '@playwright/test'
 import { dragSetting, login, mockRadar, session } from './fixture'
 
+test('仓库详情展示相似项目，点击后进入公开详情，空列表不展示卡片', async ({ page }) => {
+  const fixture = await mockRadar(page)
+  fixture.setSimilarRepos(1, [3, 6])
+  await page.goto('/repos/vercel/ai')
+  const related = page.getByRole('region', { name: '相似项目' })
+  await expect(related.getByRole('link')).toHaveText(['pydantic/pydantic-ai', 'charmbracelet/gum'])
+  await related.getByRole('link', { name: 'pydantic/pydantic-ai' }).click()
+  await expect(page).toHaveURL(/\/repos\/pydantic\/pydantic-ai$/)
+  await expect(page.getByRole('heading', { name: 'pydantic/pydantic-ai', exact: true })).toBeVisible()
+  await expect(related).toHaveCount(0)
+})
+
 test('登录、空库初始化、业务深链接和 401 会话清理', async ({ page }) => {
   const fixture = await mockRadar(page, false)
   await page.goto('/admin/repos/vercel/ai?range=30d#star-trend')

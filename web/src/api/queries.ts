@@ -49,12 +49,15 @@ export function isRepoDetail(query: Query, id: number) {
   return query.queryKey[1] === id || (query.state.data as RepoDetail | null | undefined)?.id === id
 }
 
+export const similarReposKey = 'similar-repos'
+
 // 公开子资源确认仓库已撤回时，同步关闭所有公开详情入口的缓存。
 export async function withdrawPublicRepo(queryClient: QueryClient, id: number) {
   const aliases: QueryFilters = { queryKey: ['repo'], predicate: (query) =>
     query.queryKey[2] === 'public' && isRepoDetail(query, id) }
   await queryClient.cancelQueries(aliases)
   queryClient.setQueriesData(aliases, null)
+  await queryClient.resetQueries({ queryKey: [similarReposKey] })
 }
 
 export function refreshRepo(queryClient: QueryClient, id: number) {
@@ -99,6 +102,7 @@ export function useRepoBlock(id: number) {
         refreshRepo(client, id),
         client.invalidateQueries({ queryKey: ['categories'] }),
         client.invalidateQueries({ queryKey: ['readme', id] }),
+        ...(!blocked ? [client.invalidateQueries({ queryKey: [similarReposKey] })] : []),
         client.invalidateQueries({ queryKey: ['trend', id] }),
         client.invalidateQueries({ queryKey: ['jobs'] }),
         client.invalidateQueries({ queryKey: ['limits'] }),

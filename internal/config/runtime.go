@@ -15,6 +15,7 @@ type Runtime struct {
 	GitHub          GitHub          `json:"github"`
 	Scheduler       Scheduler       `json:"scheduler"`
 	AI              AI              `json:"ai"`
+	Embedding       Embedding       `json:"embedding"`
 	Metrics         Metrics         `json:"metrics"`
 	Maintenance     Maintenance     `json:"maintenance"`
 	Recommendations Recommendations `json:"recommendations"`
@@ -22,7 +23,7 @@ type Runtime struct {
 
 // RuntimeSettings 提取正在使用的设置，排除部署字段和一次性导入字段。
 func (cfg Config) RuntimeSettings() Runtime {
-	values := Runtime{Server: cfg.Server, Storage: cfg.Storage, GitHub: cfg.GitHub, Scheduler: cfg.Scheduler, AI: cfg.AI,
+	values := Runtime{Server: cfg.Server, Storage: cfg.Storage, GitHub: cfg.GitHub, Scheduler: cfg.Scheduler, AI: cfg.AI, Embedding: cfg.Embedding,
 		Metrics: cfg.Metrics, Maintenance: cfg.Maintenance, Recommendations: cfg.Recommendations}
 	values.Server.Listen, values.Server.SiteURL, values.Storage.Path = "", "", ""
 	values.Scheduler.TrendingDailyMinutes, values.Scheduler.TrendingOtherMinutes, values.Scheduler.SearchRoundMinutes = 0, 0, 0
@@ -49,6 +50,7 @@ func (cfg Config) WithRuntime(values Runtime) Config {
 	cfg.Server, cfg.Storage, cfg.GitHub, cfg.Scheduler, cfg.AI = values.Server, values.Storage, values.GitHub, values.Scheduler, values.AI
 	cfg.Metrics, cfg.Maintenance = values.Metrics, values.Maintenance
 	cfg.Recommendations = values.Recommendations
+	cfg.Embedding = values.Embedding
 	return cfg
 }
 
@@ -76,6 +78,9 @@ func (r Runtime) Validate() error {
 		return err
 	}
 	if err := r.validateMetrics(); err != nil {
+		return err
+	}
+	if err := r.Embedding.validate(); err != nil {
 		return err
 	}
 	return r.validateSummary()

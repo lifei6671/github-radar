@@ -48,7 +48,7 @@ test('云端后台恢复真实 R2 备份', async ({ page }) => {
     return (await result.json()).status
   }, { timeout: 35_000 }).toBe('completed')
   await expect(page.getByText('恢复完成。', { exact: true })).toBeVisible({ timeout: 35_000 })
-  await expect(page.getByRole('button', { name: '启用自动摘要' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '恢复自动 AI 调用' })).toBeVisible()
 })
 
 test('Compose 首次登录、深链接和管理页', async ({ page }) => {

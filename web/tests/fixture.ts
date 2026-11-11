@@ -130,6 +130,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
   const requests: string[] = []
   const attempts: unknown[] = []
   const repos = names.map((_, index) => repository(index))
+  const similarRepos = new Map<number, number[]>()
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -144,7 +145,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     if (publicRead) {
       expect(headers.authorization).toBeUndefined()
       expect(headers.cookie).toBeUndefined()
-      if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/\d+\/(?:trend|readme)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
+      if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/\d+\/(?:trend|readme|similar)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
         return reply(route, { code: 'not_found' }, 404)
       }
       if (query.get('followed') === 'true') return reply(route, { code: 'invalid_filter' }, 400)
@@ -251,6 +252,12 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       }
       if (!action) return reply(route, publicRead ? published(repo) : repo)
       if (action === 'readme') return reply(route, readmes.get(repo.id) ?? { state: 'unavailable', complete: false, truncated: false })
+      if (action === 'similar' && publicRead) {
+        const ids = similarRepos.get(repo.id) ?? []
+        const items = ids.map((id) => repos[id - 1]).filter((candidate) => !candidate.blocked)
+          .map(({ id, fullName, description, language, stars }) => ({ id, fullName, description, language, stars }))
+        return reply(route, { items })
+      }
       if (action === 'trend') {
         const samples = query.get('range') === '180d'
           ? Array.from({ length: 180 }, (_, index) => ({
@@ -410,6 +417,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     setRepoState: (id: number, state: RepoDetail['state']) => { repos[id - 1].state = state },
     setSummaryAvailable: (id: number, available: boolean) => { repos[id - 1].summaryAvailable = available },
     setAITopics: (id: number, topics: string[]) => { repos[id - 1].aiTopics = topics },
+    setSimilarRepos: (id: number, items: number[]) => { similarRepos.set(id, items) },
     setReadme: (id: number, readme: RepoReadme) => { readmes.set(id, readme) },
     expire: () => { authorized = false },
     conflict: () => { conflict = true },

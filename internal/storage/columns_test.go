@@ -25,6 +25,7 @@ func TestColumnMappings(t *testing.T) {
 		{ProjectThemeGroup{}, ProjectThemeGroupColumns},
 		{RateLimit{}, RateLimitColumns},
 		{RepoAITopics{}, RepoAITopicsColumns},
+		{RepoEmbedding{}, RepoEmbeddingColumns},
 		{RepoReadmeTranslation{}, RepoReadmeTranslationColumns},
 		{RepoSnapshot{}, RepoSnapshotColumns},
 		{Repository{}, RepositoryColumns},

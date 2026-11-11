@@ -70,6 +70,8 @@ Remove-Variable password
 
 Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为 GitHub 搜索式。Trending 的 `sourceType` 为 `trending`，`sourceKey` 如 `all:daily` 或 `language:go:weekly`，`query` 留空。设置 `enabled: false` 暂停单条规则，提交空列表可清空所有发现规则。
 
+在「运行状态 → 运行配置 → 相似项目」单独配置 OpenAI 兼容的 Embedding API 根地址、模型和密钥环境变量名。默认密钥名为 `EMBEDDING_API_KEY`。配置后重启，服务在后台逐批生成向量。详情最多显示五个同模型、同维数、达到门槛的公开未屏蔽仓库。向量随 SQLite 备份，README 摘录仅用于当次生成。首次生成完成前，相似项目区保持隐藏。
+
 首次用新版服务启动时导入默认设置、[默认分类](configs/categories.yaml)和初始规则。旧 YAML 的运行参数、`categories_file` 及旧 AI 地址和模型环境变量可参与这次导入。Compose 保留旧 AI 环境变量的转发用于升级。已有的发现规则、ID 和下次运行时间优先保留。导入完成后，重启直接使用数据库，旧文件中的业务值和首次导入字段不再生效。
 
 ## 采集接口
@@ -126,7 +128,7 @@ GitHub Topics 为空的活跃仓库会在同一模型预算内按调度补充主
 
 「立即备份」会更新同一天的云端对象。也可在服务运行时执行 `go run ./cmd/radar backup -config configs/radar.local.yaml`，该命令使用同一配置文件中的管理员密码登录本机 API 并等待结果。离线维护、迁移和采集命令应在停止服务后运行。
 
-恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后自动 AI 摘要保持暂停，在管理页确认用量记录可能不完整后再启用。迁移到新实例时，登录后在 `/admin/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的部署配置和环境变量。
+恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后，自动摘要和相似项目向量生成保持暂停，在管理页确认用量记录可能不完整后再恢复。迁移到新实例时，登录后在 `/admin/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的部署配置和环境变量。
 
 使用专用私有存储桶和仅限该桶的 Object Read & Write 令牌。备份包含数据库内的 R2 凭据，请限制数据库目录、暂存文件和 R2 对象的访问权限。R2 请求由 AWS SDK for Go v2 签名，接口与恢复边界见专项方案。[Cloudflare R2 令牌权限](https://developers.cloudflare.com/r2/api/tokens/)、[AWS SDK for Go v2](https://github.com/aws/aws-sdk-go-v2)、[备份专项方案](docs/backup-and-restore.md)
 

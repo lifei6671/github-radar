@@ -874,6 +874,8 @@ WHERE (repo_id, sample_slot) IN (
 
 专题独立保存在 `project_themes`，通过匹配词筛选项目。GitHub Topics 非空时以原生主题为准，原生主题为空时使用 AI Topics。公开 `/discovery` 和 `/repos` 接受 `theme` 标识，分页游标绑定该专题。
 
+仓库详情通过 `GET /api/v1/public/repos/:id/similar` 读取最多五个相似项目。后台 `settings.embedding` 单独配置 OpenAI 兼容的 Embedding 地址、模型、密钥环境变量、扫描频率和相似度门槛，重启后生效。后台分批组合 About、原生或 AI Topics、公开 README 摘录及有效摘要，将 float32 BLOB、模型空间标识和内容指纹存入 `repo_embeddings`。成功后每七天复查，内容未变时复用向量，失败后延迟一小时重试。SQLite 使用驱动随附的 sqlite-vec 计算余弦距离，同模型、同维数和可公开性条件在查询中生效。向量随数据库备份，README 摘录仅保留在本轮 Worker 内存中。
+
 专题方向保存在 `project_theme_groups`，每个方向有名称、简介和显示顺序。后台通过 `/api/v1/system/project-theme-groups` 管理方向，在专题表单选择归属。移除仍有专题的方向前，须先迁移这些专题。公开目录返回 `groups`，每个专题以 `groupSlug` 指定所属方向。
 
 专题大事记从当前数据库保留的观测中取最近 12 个自然月。收录全站 GitHub Trending 日榜前三，同仓库每月只保留最佳名次。Star 里程碑使用日聚合首末实测值跨过 1,000、5,000、10,000、50,000 或 100,000 Star 的记录，同一天跨多档时取最高档。每月最多五件，榜单按名次优先，Star 事件按档位优先。事件按北京时间分月，展示顺序为时间倒序。

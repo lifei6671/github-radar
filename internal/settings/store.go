@@ -44,6 +44,7 @@ func read(tx *gorm.DB) (Snapshot, error) {
 	snapshot.Settings.Metrics = config.DefaultMetrics()
 	snapshot.Settings.Maintenance = config.DefaultMaintenance()
 	snapshot.Settings.AI.Summary = config.DefaultSummary()
+	snapshot.Settings.Embedding = config.DefaultEmbedding()
 	snapshot.Settings.Recommendations = config.DefaultRecommendations()
 	snapshot.DiscoverySelection = defaultDiscoverySelection()
 	if err := json.Unmarshal([]byte(row.ValueJSON), &snapshot); err != nil {

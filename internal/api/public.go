@@ -1,7 +1,6 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -14,9 +13,7 @@ import (
 
 const publicReadKey = "publicRead"
 
-// 只发布仍有公开地址的仓库，首次无法确认可访问性时也暂停展示。
-var publicRepoCondition = fmt.Sprintf("%[1]s.%[2]s = 1 AND %[1]s.%[3]s=0 AND %[1]s.%[4]s = 0 AND %[1]s.%[5]s IS NULL AND %[1]s.%[6]s IN ('%[7]s','%[8]s','%[9]s')",
-	storage.RepositoryTable, storage.RepositoryColumns.NameIsCurrent, storage.RepositoryColumns.Blocked, storage.RepositoryColumns.Disabled, storage.RepositoryColumns.FirstNotFoundAt, storage.RepositoryColumns.State, consts.StatusActive, consts.StatusCandidate, consts.StatusPaused)
+var publicRepoCondition = storage.PublicRepositoryCondition
 
 func markPublicRead(c *gin.Context) {
 	c.Set(publicReadKey, true)
@@ -36,6 +33,7 @@ func (a *collectionAPI) registerPublic(public *gin.RouterGroup) {
 	public.GET("/repos/by-name/:owner/:name", a.loadCategories, a.repo)
 	public.GET("/repos/:id/trend", a.trend)
 	public.GET("/repos/:id/readme", a.readme)
+	public.GET("/repos/:id/similar", a.similar)
 	public.GET("/categories", a.loadCategories, a.categoryList)
 	public.GET("/discovery-tabs", a.publicDiscoveryTabs)
 	public.GET("/discovery", a.loadCategories, a.discovery)

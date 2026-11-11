@@ -131,9 +131,10 @@ function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields,
 
 const settingsNames: Record<string, string> = {
   server: 'HTTP 服务', storage: 'SQLite', github: 'GitHub 采集', scheduler: '调度',
-  ai: 'AI 中文摘要', metrics: '增长与热度', maintenance: '数据保留', recommendations: '每日选题',
+  ai: 'AI 中文摘要', embedding: '相似项目', metrics: '增长与热度', maintenance: '数据保留', recommendations: '每日选题',
   summary: '模型调用与来源检查', baseUrl: 'OpenAI 兼容 API Base URL', model: '模型', apiKeyEnv: '密钥环境变量名',
   tokenEnv: '访问令牌环境变量名', enabled: '启用', timeoutSeconds: '超时（秒）',
+  batchSize: '每轮处理仓库数', intervalMinutes: '扫描间隔（分钟）', minSimilarity: '最低相似度',
   workerConcurrency: '采集并发', workers: '摘要并发', apiVersion: 'GitHub API 版本',
   tickMinutes: '扫描周期（分钟）', metricsIntervalMinutes: '指标计算周期（分钟）',
   maxMonitoredRepos: '最大监控项目数', maxHot: 'S 级上限', maxActive: 'A 级上限', maxNormal: 'B 级上限',
@@ -275,6 +276,7 @@ export function RuntimeEditor() {
               <h2 id={'runtime-title-' + key}>{settingName(key)}</h2>
               {key === 'github' && <p className="minor muted">将令牌设置到服务进程的 <code>{String(fields?.tokenEnv || 'GITHUB_TOKEN')}</code> 环境变量，重启服务后启用采集。</p>}
               {key === 'ai' && <p className="minor muted">仅支持 OpenAI 兼容供应商，需支持 Chat Completions 的 JSON 模式和 <code>max_completion_tokens</code>。API Key 通过服务进程的 <code>{String(fields?.apiKeyEnv || 'AI_API_KEY')}</code> 环境变量提供。</p>}
+              {key === 'embedding' && <p className="minor muted">使用独立的 OpenAI 兼容 <code>/embeddings</code> 接口。将 API Key 设置为服务进程的 <code>{String(fields?.apiKeyEnv || 'EMBEDDING_API_KEY')}</code> 环境变量，保存后重启。</p>}
               {fields ? <Fields path={key} value={fields} update={setValue} /> : <Setting name={key} path={key} value={value} update={setValue} />}
             </div>
           </section>
