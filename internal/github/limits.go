@@ -15,18 +15,20 @@ import (
 )
 
 const (
-	Core      = "core"
-	Search    = "search"
-	repoLimit = "repo_refresh"
-	secondary = "github_secondary"
+	Core        = "core"
+	Search      = "search"
+	repoLimit   = "repo_refresh"
+	readmeLimit = "readme_check"
+	secondary   = "github_secondary"
 )
 
 // Policy 区分独立的 Search 预算、仓库详情子预算和优先请求。
 type Policy struct {
-	Resource string
-	Grade    string
-	Sample   bool
-	Priority bool
+	Resource     string
+	Grade        string
+	Sample       bool
+	Priority     bool
+	ReadmeBudget int
 }
 
 type limiter struct {
@@ -93,6 +95,14 @@ func (l limiter) reserve(ctx context.Context, p Policy, now time.Time) error {
 				return err
 			}
 			return consumeLocal(tx, &repo, l.cfg.RepoSoftBudgetPerHour, time.Hour, ms)
+		}
+		if p.ReadmeBudget > 0 {
+			// README 与公开性复核共享独立的本地预算，防止批量摘要占满采样窗口。
+			readme, err := rateState(tx, readmeLimit)
+			if err != nil {
+				return err
+			}
+			return consumeLocal(tx, &readme, p.ReadmeBudget, time.Hour, ms)
 		}
 		return nil
 	})

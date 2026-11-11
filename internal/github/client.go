@@ -126,12 +126,19 @@ func (c *Client) Search(ctx context.Context, query string, page int) (SearchPage
 }
 
 func (c *Client) get(ctx context.Context, path, etag string, p Policy, target any) (*sdk.Response, error) {
+	return c.getMedia(ctx, path, etag, p, target, "")
+}
+
+func (c *Client) getMedia(ctx context.Context, path, etag string, p Policy, target any, accept string) (*sdk.Response, error) {
 	started := time.Now()
 	req, err := c.sdk.NewRequest(context.WithValue(ctx, policyKey{}, p), http.MethodGet, path, nil, sdk.WithVersion(c.version))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
@@ -167,7 +174,7 @@ func (c *Client) get(ctx context.Context, path, etag string, p Policy, target an
 	if kind != "" {
 		return nil, &Failure{Code: "github_" + kind + "_limit", Status: status, Until: until}
 	}
-	if status == http.StatusNotModified || (status == http.StatusOK && requestErr == nil) {
+	if status == http.StatusNotModified || (status == http.StatusOK && (requestErr == nil || errors.Is(requestErr, errBodyLimit))) {
 		return response, nil
 	}
 	code := "github_invalid_response"

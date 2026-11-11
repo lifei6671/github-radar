@@ -22,7 +22,7 @@ func TestUpgradeFromPhaseZeroPreservesSettings(t *testing.T) {
 	}
 	defer pool.Close()
 	// 先用原有版本建立阶段 0 数据库，再通过正常入口升级。
-	phaseZero, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{2, 3, 4}))
+	phaseZero, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{2, 3, 4, 5}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +32,8 @@ func TestUpgradeFromPhaseZeroPreservesSettings(t *testing.T) {
 	if _, err := pool.ExecContext(t.Context(), "INSERT INTO system_settings(key,value_json,updated_at) VALUES ('existing.setting','true',1234)"); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := Up(t.Context(), pool); err != nil || count != 3 {
-		t.Fatalf("阶段 0 应追加三个迁移版本: count=%d err=%v", count, err)
+	if count, err := Up(t.Context(), pool); err != nil || count != 4 {
+		t.Fatalf("阶段 0 应追加四个迁移版本: count=%d err=%v", count, err)
 	}
 	if count, err := Up(t.Context(), pool); err != nil || count != 0 {
 		t.Fatalf("重复升级应无新迁移: count=%d err=%v", count, err)
@@ -53,7 +53,7 @@ func TestUpgradeBackfillsPhaseOneAnchors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	old, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{4}))
+	old, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{4, 5}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestUpgradeBackfillsPhaseOneAnchors(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if count, err := Up(t.Context(), pool); err != nil || count != 1 {
+	if count, err := Up(t.Context(), pool); err != nil || count != 2 {
 		t.Fatalf("旧库应只应用新增版本: count=%d err=%v", count, err)
 	}
 	db, err := storage.OpenGORM(pool)

@@ -48,6 +48,41 @@ json_set(value_json,'$.settings.server.readTimeoutSeconds',27), '$.settings.metr
 	}
 }
 
+func TestPhaseThreeUpgradePreservesAIConfiguration(t *testing.T) {
+	store, cfg := testStore(t)
+	original, err := store.Initialize(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.Exec(`UPDATE system_settings SET value_json=json_remove(
+json_set(value_json,'$.settings.ai.model','existing-model'), '$.settings.ai.summary',
+'$.settings.recommendations') WHERE key=?`, runtimeKey).Error; err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.Initialize(t.Context(), cfg)
+	if err != nil || snapshot.Revision != original.Revision || snapshot.Settings.AI.Model != "existing-model" ||
+		snapshot.Settings.AI.Summary.AutoDailyCalls != 50 || snapshot.Settings.Recommendations.Timezone != "Asia/Shanghai" {
+		t.Fatalf("升级没有保留 AI 配置或补齐新值: %+v %v", snapshot, err)
+	}
+	invalid := snapshot.Settings
+	invalid.AI.Summary.GitHubBudget = 7
+	var validation *Invalid
+	if _, err := store.SaveRuntime(t.Context(), snapshot.Revision, invalid); !errors.As(err, &validation) {
+		t.Fatalf("低于完整来源检查所需的预算应被拒绝: %v", err)
+	}
+	snapshot.Settings.AI.Summary.AutoDailyCalls = 8
+	snapshot.Settings.Recommendations.Minute = 45
+	saved, err := store.SaveRuntime(t.Context(), snapshot.Revision, snapshot.Settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := store.Initialize(t.Context(), cfg)
+	if err != nil || reopened.Revision != saved.Revision || reopened.Settings.AI.Summary.AutoDailyCalls != 8 ||
+		reopened.Settings.Recommendations.Minute != 45 {
+		t.Fatalf("重启覆盖了后台配置: %+v %v", reopened, err)
+	}
+}
+
 func testStore(t *testing.T) (Store, config.Config) {
 	t.Helper()
 	cfg, err := config.Load("")

@@ -25,6 +25,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/maintenance"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/summary"
 	"github.com/lifei6671/github-radar/internal/trending"
 	"github.com/lifei6671/github-radar/migrations"
 )
@@ -100,6 +101,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	githubToken := strings.TrimSpace(os.Getenv(cfg.GitHub.TokenEnv))
 	var engine *collector.Engine
+	var readmes summary.GitHubSource
 	if githubToken == "" {
 		if command == "collect-once" {
 			return fmt.Errorf("采集需要环境变量 %s", cfg.GitHub.TokenEnv)
@@ -110,6 +112,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		readmes = client
 		engine = &collector.Engine{
 			Queue:  collector.Queue{DB: db, Cfg: cfg.Scheduler},
 			GitHub: client, Trending: trending.New(time.Duration(cfg.GitHub.TimeoutSeconds) * time.Second),
@@ -119,9 +122,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if command == "collect-once" {
 		return engine.CollectOnce(ctx)
 	}
+	var provider summary.Provider
 	if missing := cfg.MissingAISettings(); len(missing) != 0 {
 		logger.Warn("AI 摘要待配置", "missing", missing)
+	} else if cfg.AI.Enabled && readmes != nil {
+		provider = summary.NewChatProvider(cfg.AI, strings.TrimSpace(os.Getenv(cfg.AI.APIKeyEnv)))
 	}
+	summarizer := summary.Engine{Queue: summary.Queue{DB: db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds},
+		GitHub: readmes, Provider: provider, Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute}
 
 	gin.SetMode(gin.ReleaseMode)
 	server := &http.Server{
@@ -134,6 +142,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	group.Go(func() error { return serve(serviceCtx, server, logger) })
 	group.Go(func() error { return maintainer.RunMetrics(serviceCtx) })
 	group.Go(func() error { return maintainer.RunMaintenance(serviceCtx) })
+	group.Go(func() error { return summarizer.Run(serviceCtx) })
 	if engine != nil {
 		group.Go(func() error { return engine.Run(serviceCtx) })
 	}

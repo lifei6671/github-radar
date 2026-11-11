@@ -716,12 +716,13 @@ GET /repos/{owner}/{repo}/readme
 ### 7.5 大模型预算与 Provider
 
 - 使用统一 Provider 接口（兼容 OpenAI 风格的 Chat Completions 结构化输出；具体供应商可替换）。
-- 通过环境变量提供 Base URL、API Key、Model、超时、最大输入/输出 Token。
+- Base URL、Model、超时、最大输入/输出 Token 和额度通过后台保存到数据库，重启后生效。API Key 通过环境变量提供。
 - 默认 AI 工作池并发 1～2，单日最多 50 次自动模型请求、20 次手动模型请求；包含结构修复调用，计数按下文持久化规则执行。
 - 为每次成功分析记录输入/输出 Token、估算成本与耗时（不记录原文）。
 - 高热度候选优先于普通项目；失败指数退避，达到上限转 dead 并可人工重试。
 - 缓存键使用 repo_id + source_fingerprint + provider + model + prompt_version；有 README 时 fingerprint 为 `readme:<sha>`，无 README 时为规范化 description 的 SHA-256，避免所有无 README 情况共用 null 键。readme_sha 在无 README 时仍为 null。
 - AI 分析依赖可用预算但不阻断 Star 采集和榜单展示。
+- 摘要 Worker 独立调度。README 下载及公开性复核使用 GitHub core 配额中的本地子预算，默认每小时 120 次，每个 Worker 至少预留 8 次。发送模型前再次核对数字仓库 ID、公开状态及当前地址。
 
 调用与费用边界：
 - 本地结果幂等不代表供应商只计费一次。调用前在短事务中预留当日名额并创建 ai_calls，发送前核对仍持有有效 lease_token 并持久化 sending；收到有效结果后与摘要及任务完成状态一起提交 succeeded。任何重新领取必须先检查该任务的调用记录，存在 sending/unknown 时只转 unknown，不发送新请求。数据库中只存调用标识、状态和计量，不存请求正文。
@@ -844,7 +845,9 @@ WHERE (repo_id, sample_slot) IN (
 
 阶段 2 的计算周期、窗口容差、采样分级门槛、评分参数及清理计划由 `settings.scheduler.metricsIntervalMinutes`、`settings.metrics` 和 `settings.maintenance` 管理，保存后重启生效。评分权重按 24h 增长、7d 增长、加速度、持续性和 Trending 排列。维护接口返回 202，持久化请求由后台下次扫描领取。已初始化的库也可以用 `maintenance-once` 离线执行维护。
 
-异步任务契约：refresh 请求 `{requestId}`，接受后返回 `202 {jobId,statusUrl}`；summary 请求 `{force:false,requestId:"客户端生成的唯一值"}`，先查手动 dedup_key，相同请求返回原任务；其他请求遇到未决摘要任务返回 `409 {code:"summary_in_progress",existingJobId,statusUrl}`。无冲突且缓存命中返回 `200 {cached:true,summaryStatus:"ready"}`，否则返回同样的 202 结构；`force:true` 明确要求重新生成并计入手动额度。unknown 任务通过 `POST /api/v1/jobs/:id/retry`、请求 `{requestId,acceptPossibleCharge:true}` 在管理鉴权下关闭未决调用、取消旧任务并创建新的手动任务；上述变化在同一事务中完成。重试接口先按新手动 dedup_key 查重，已存在则直接返回，随后才检查旧任务必须为 unknown，保证响应丢失后的重试仍返回同一新任务。
+阶段 3 使用 `settings.ai` 和 `settings.ai.summary` 配置供应商、模型、预算、提示词版本、来源检查和重试。`settings.recommendations` 配置每日选题时刻、时区、数量、重入阈值及保留期，保存后重启生效。选题通过 `GET /topics?status=&limit=&cursor=` 分页，`PATCH /topics/:id` 支持 `{status,feedback}`，将状态设回 `candidate` 可人工重新打开。每日任务以仓库和选题角度去重，README 指纹和功能证据同时变化或精确 24h 净增相对上次推荐达到重入门槛时，可重新进入候选并保留人工反馈。
+
+异步任务契约：refresh 请求 `{requestId}`，接受后返回 `202 {jobId,statusUrl}`；summary 请求 `{force:false,requestId:"客户端生成的唯一值"}`，先查手动 dedup_key，相同请求返回原任务；其他请求遇到未决摘要任务返回 `409 {code:"summary_in_progress",existingJobId,statusUrl}`。无冲突且缓存命中返回 `200 {cached:true,summaryStatus:"ready"}`，否则返回同样的 202 结构；`force:true` 明确要求重新生成并计入手动额度。摘要执行条件未满足时返回 503 `summary_unavailable`，已保存的摘要仍可读取。unknown 任务通过 `POST /api/v1/jobs/:id/retry`、请求 `{requestId,acceptPossibleCharge:true}` 在管理鉴权下关闭未决调用、取消旧任务并创建新的手动任务；上述变化在同一事务中完成。重试接口先按新手动 dedup_key 查重，已存在则直接返回，随后才检查旧任务必须为 unknown，保证响应丢失后的重试仍返回同一新任务。
 
 `GET /api/v1/jobs/:id` 返回 `{id,type,status,attempts,maxAttempts,errorCode,createdAt,updatedAt,repoId}`，时间为 ISO8601，状态见 4.4。succeeded/dead/canceled 停止轮询，unknown 停止自动轮询并显示人工处理入口；failed 仍可能退避重试。任务不存在/已过保留期返回 404，前端重新查询仓库结果，不宣称成功。维护期该接口可返回 503，恢复进度使用独立的 operations 接口。
 

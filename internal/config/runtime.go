@@ -10,19 +10,20 @@ import (
 
 // Runtime 是数据库持有的进程级设置。部署地址、库路径和密钥值不会序列化。
 type Runtime struct {
-	Server      Server      `json:"server"`
-	Storage     Storage     `json:"storage"`
-	GitHub      GitHub      `json:"github"`
-	Scheduler   Scheduler   `json:"scheduler"`
-	AI          AI          `json:"ai"`
-	Metrics     Metrics     `json:"metrics"`
-	Maintenance Maintenance `json:"maintenance"`
+	Server          Server          `json:"server"`
+	Storage         Storage         `json:"storage"`
+	GitHub          GitHub          `json:"github"`
+	Scheduler       Scheduler       `json:"scheduler"`
+	AI              AI              `json:"ai"`
+	Metrics         Metrics         `json:"metrics"`
+	Maintenance     Maintenance     `json:"maintenance"`
+	Recommendations Recommendations `json:"recommendations"`
 }
 
 // RuntimeSettings 提取正在使用的设置，排除部署字段和一次性导入字段。
 func (cfg Config) RuntimeSettings() Runtime {
 	values := Runtime{Server: cfg.Server, Storage: cfg.Storage, GitHub: cfg.GitHub, Scheduler: cfg.Scheduler, AI: cfg.AI,
-		Metrics: cfg.Metrics, Maintenance: cfg.Maintenance}
+		Metrics: cfg.Metrics, Maintenance: cfg.Maintenance, Recommendations: cfg.Recommendations}
 	values.Server.Listen, values.Storage.Path = "", ""
 	values.Scheduler.TrendingDailyMinutes, values.Scheduler.TrendingOtherMinutes, values.Scheduler.SearchRoundMinutes = 0, 0, 0
 	values.AI.BaseURLEnv, values.AI.ModelEnv = "", ""
@@ -47,6 +48,7 @@ func (cfg Config) WithRuntime(values Runtime) Config {
 	values.Server.Listen, values.Storage.Path = cfg.Server.Listen, cfg.Storage.Path
 	cfg.Server, cfg.Storage, cfg.GitHub, cfg.Scheduler, cfg.AI = values.Server, values.Storage, values.GitHub, values.Scheduler, values.AI
 	cfg.Metrics, cfg.Maintenance = values.Metrics, values.Maintenance
+	cfg.Recommendations = values.Recommendations
 	return cfg
 }
 
@@ -73,7 +75,10 @@ func (r Runtime) Validate() error {
 	if err := r.validateCollection(); err != nil {
 		return err
 	}
-	return r.validateMetrics()
+	if err := r.validateMetrics(); err != nil {
+		return err
+	}
+	return r.validateSummary()
 }
 
 // DurationLimit 避免管理接口写入会使 time.Duration 溢出的值。

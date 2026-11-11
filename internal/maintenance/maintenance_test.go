@@ -238,3 +238,47 @@ func TestRollupAndRetention(t *testing.T) {
 		t.Fatalf("超期日聚合未清理: %d", n)
 	}
 }
+
+func TestCleanupKeepsUnacknowledgedModelCallsAndReviewedTopics(t *testing.T) {
+	db, cfg, now := fixture(t)
+	old := now.AddDate(0, 0, -100).UnixMilli()
+	for index, status := range []string{"succeeded", "unknown"} {
+		job := storage.Job{RepoID: new(int64(1)), Type: "refresh_readme_summary", DedupKey: status,
+			Status: []string{"succeeded", "canceled"}[index], PayloadJSON: "{}", MaxAttempts: 3, UpdatedAt: old}
+		if err := db.Create(&job).Error; err != nil {
+			t.Fatal(err)
+		}
+		call := storage.AICall{CallKey: status, JobID: job.ID, Origin: "manual", Provider: "fixture",
+			Status: status, ReservedAt: old, UpdatedAt: old}
+		if err := db.Create(&call).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for id := int64(1); id <= 2; id++ {
+		topic := storage.TopicCandidate{RepoID: id, AngleKey: "project", TitleZh: "选题", Status: "candidate", UpdatedAt: old}
+		if id == 2 {
+			topic.ReviewedAt = &old
+		}
+		if err := db.Create(&topic).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Cleanup(t.Context(), db, cfg.Maintenance, now); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, db, &storage.AICall{}, "status='unknown'"); n != 1 {
+		t.Fatal("未确认调用不能随已取消任务删除")
+	}
+	if n := count(t, db, &storage.Job{}, "type='refresh_readme_summary'"); n != 1 {
+		t.Fatal("已结束的模型调用和任务未一同删除")
+	}
+	if err := cleanTopics(db, now.AddDate(0, 0, -90).UnixMilli(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, db, &storage.TopicCandidate{}, "repo_id=2"); n != 1 {
+		t.Fatal("人工审核记录不能自动清理")
+	}
+	if n := count(t, db, &storage.TopicCandidate{}, "repo_id=1"); n != 0 {
+		t.Fatal("过期普通选题应清理")
+	}
+}

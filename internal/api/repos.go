@@ -31,6 +31,8 @@ type repoFilters struct {
 	State    string   `json:"state"`
 	Followed bool     `json:"followed"`
 	Category []string `json:"category"`
+	Grade    string   `json:"grade,omitempty"`
+	Tag      string   `json:"tag,omitempty"`
 }
 
 type repoCursor struct {
@@ -91,6 +93,13 @@ func (a *collectionAPI) repoPage(c *gin.Context, tx *gorm.DB, filters repoFilter
 	}
 	if filters.Language != "" {
 		db = db.Where("primary_language = ?", filters.Language)
+	}
+	if filters.Grade != "" {
+		db = db.Where("grade=?", filters.Grade)
+	}
+	if filters.Tag != "" {
+		db = db.Where(`EXISTS (SELECT 1 FROM ai_summaries s JOIN json_each(s.value_tags_json) tag
+WHERE s.repo_id=repositories.repo_id AND tag.value=?)`, filters.Tag)
 	}
 	if filters.Q != "" {
 		// instr 按字面搜索，用户输入中的 % 和 _ 不扩展为通配符。
@@ -159,9 +168,13 @@ func (a *collectionAPI) repoPage(c *gin.Context, tx *gorm.DB, filters repoFilter
 	if err != nil {
 		return nil, err
 	}
+	summaries, err := summaryViews(tx, repos)
+	if err != nil {
+		return nil, err
+	}
 	items := make([]gin.H, 0, len(repos))
 	for _, repo := range repos {
-		items = append(items, a.card(c, repo, entries, views[repo.RepoID]))
+		items = append(items, a.card(c, repo, entries, views[repo.RepoID], summaries[repo.RepoID]))
 	}
 	now := iso(time.Now().UnixMilli())
 	updatedAt := &now
@@ -196,6 +209,10 @@ func (c repoCursor) sortValue() (any, error) {
 
 func (a *collectionAPI) filters(c *gin.Context) (repoFilters, string, error) {
 	f := repoFilters{Q: strings.TrimSpace(c.Query("q")), Language: strings.TrimSpace(c.Query("language")), Category: []string{}}
+	f.Grade, f.Tag = c.Query("grade"), strings.TrimSpace(c.Query("tag"))
+	if f.Grade != "" && !slices.Contains([]string{"S", "A", "B", "C"}, f.Grade) {
+		return f, "", errors.New("无效采样等级")
+	}
 	followed := c.DefaultQuery("followed", "false")
 	if followed != "true" && followed != "false" {
 		return f, "", errors.New("followed 必须为布尔值")

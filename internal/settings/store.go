@@ -40,6 +40,8 @@ func read(tx *gorm.DB) (Snapshot, error) {
 	// 旧版已保存的快照没有指标与维护字段，读取时只补齐新增默认值。
 	snapshot.Settings.Metrics = config.DefaultMetrics()
 	snapshot.Settings.Maintenance = config.DefaultMaintenance()
+	snapshot.Settings.AI.Summary = config.DefaultSummary()
+	snapshot.Settings.Recommendations = config.DefaultRecommendations()
 	if err := json.Unmarshal([]byte(row.ValueJSON), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("解析数据库运行设置: %w", err)
 	}

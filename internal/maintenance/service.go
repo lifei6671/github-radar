@@ -13,6 +13,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/topics"
 )
 
 const requestKey = "maintenance.request"
@@ -102,6 +103,9 @@ func (s Service) maintain(ctx context.Context, now time.Time, force bool) error 
 		if err := Cleanup(ctx, s.DB, s.Cfg.Maintenance, now); err != nil {
 			return err
 		}
+		if err := cleanTopics(db, now.AddDate(0, 0, -s.Cfg.Recommendations.RetentionDays).UnixMilli(), s.Cfg.Maintenance.BatchRows); err != nil {
+			return err
+		}
 		if err := mark(db, CleanupKey, cleanupDay.UnixMilli(), now); err != nil {
 			return err
 		}
@@ -121,7 +125,9 @@ func (s Service) maintain(ctx context.Context, now time.Time, force bool) error 
 		}
 	}
 	if request.Key != "" {
-		return db.Where("key=? AND value=?", request.Key, request.Value).Delete(&storage.MaintenanceState{}).Error
+		if err := db.Where("key=? AND value=?", request.Key, request.Value).Delete(&storage.MaintenanceState{}).Error; err != nil {
+			return err
+		}
 	}
-	return nil
+	return topics.Generate(ctx, s.DB, s.Cfg.Recommendations, now)
 }

@@ -30,10 +30,14 @@ func (a *collectionAPI) register(v1 *gin.RouterGroup) {
 	v1.GET("/repos/:id", a.loadCategories, a.repo)
 	v1.GET("/repos/:id/trend", a.trend)
 	v1.POST("/repos/:id/refresh", a.refresh)
+	v1.POST("/repos/:id/summary", a.requestSummary)
 	v1.POST("/repos/:id/follow", a.follow)
+	v1.GET("/topics", a.topics)
+	v1.PATCH("/topics/:id", a.updateTopic)
 	v1.GET("/categories", a.loadCategories, a.categoryList)
 	v1.GET("/trending", a.loadCategories, a.trending)
 	v1.GET("/jobs/:id", a.job)
+	v1.POST("/jobs/:id/retry", a.retrySummary)
 	v1.GET("/system/jobs", a.jobs)
 	v1.GET("/system/limits", a.limits)
 	v1.GET("/system/storage", a.storageStatus)
@@ -69,7 +73,7 @@ func optionalISO(ms *int64) *string {
 }
 
 // card 组合仓库元数据及本轮成功发布的增长和热度。
-func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries map[int64][]gin.H, view metricView) gin.H {
+func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries map[int64][]gin.H, view metricView, summary summaryView) gin.H {
 	var topics []string
 	_ = json.Unmarshal([]byte(repo.TopicsJSON), &topics)
 	trending := entries[repo.RepoID]
@@ -86,13 +90,14 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 	}
 	return gin.H{
 		"id": repo.RepoID, "fullName": repo.FullName, "htmlUrl": repo.HTMLURL,
-		"description": repo.Description, "titleZh": nil, "language": repo.PrimaryLanguage,
+		"description": repo.Description, "titleZh": summary.title(), "language": repo.PrimaryLanguage,
 		"categories": config.Classify(categoriesFor(c), topics), "state": repo.State,
 		"stars": repo.Stars, "forks": repo.Forks, "grade": repo.Grade,
 		"growth24h": view.window("24h"), "growth7d": view.window("7d"),
 		"hotnessScore": view.row.HotnessScore, "hotnessRank": view.rank, "trendingEntries": trending,
 		"dataQuality": quality, "metricsUpdatedAt": metricsUpdatedAt, "candidateBurst": view.row.CandidateBurst,
-		"sparkline": view.sparkline, "summaryPreview": nil, "summaryStatus": "missing", "summarySourceQuality": nil,
+		"sparkline": view.sparkline, "summaryPreview": summary.preview(), "summaryStatus": summary.state(),
+		"summarySourceQuality": textPtr(summary.row.SourceQuality), "summaryJobId": summary.jobID,
 		"followed": repo.StarredByUser, "followedAt": optionalISO(repo.FollowedAt),
 		"lastSuccessAt": optionalISO(repo.LastSuccessAt),
 	}
@@ -138,12 +143,28 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		return
 	}
 	view := views[id]
-	body := a.card(c, repo, entries, view)
+	summaries, err := summaryViews(db, []storage.Repository{repo})
+	if err != nil {
+		a.fail(c, err)
+		return
+	}
+	summary := summaries[id]
+	body := a.card(c, repo, entries, view, summary)
 	body["license"] = nil
 	if repo.LicenseSPDXID != nil || repo.LicenseName != nil {
 		body["license"] = gin.H{"spdxId": repo.LicenseSPDXID, "name": repo.LicenseName}
 	}
-	body["summaryZh"], body["sourceReadmeUrl"], body["summaryGeneratedAt"], body["summaryModel"] = nil, nil, nil, nil
+	body["summaryZh"], body["sourceReadmeUrl"], body["summaryModel"] = textPtr(summary.row.SummaryZh), summary.row.SourceReadmeURL, textPtr(summary.row.ModelName)
+	body["summaryGeneratedAt"] = nil
+	if summary.row.RepoID != 0 {
+		body["summaryGeneratedAt"] = iso(summary.row.GeneratedAt)
+	}
+	body["summarySourceLanguage"] = textPtr(summary.row.SourceLanguage)
+	for name, raw := range map[string]string{"features": summary.row.FeaturesJSON, "audience": summary.row.AudienceJSON, "valueTags": summary.row.ValueTagsJSON} {
+		tags := []string{}
+		_ = json.Unmarshal([]byte(raw), &tags)
+		body[name] = tags
+	}
 	body["growth1h"], body["growth30d"] = view.window("1h"), view.window("30d")
 	body["acceleration"], body["relativeGrowth"] = view.row.Acceleration, view.row.RelativeGrowth
 	body["persistenceScore"], body["dailyConcentration"] = view.row.PersistenceScore, view.row.DailyConcentration
@@ -267,8 +288,13 @@ func (a *collectionAPI) limits(c *gin.Context) {
 			"rateLimitedResponses": state.LimitedCount,
 		})
 	}
+	ai, err := a.aiLimits(db, time.Now())
+	if err != nil {
+		a.fail(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"githubConfigured": strings.TrimSpace(os.Getenv(a.cfg.GitHub.TokenEnv)) != "",
-		"items": items, "waitingTaskCount": waiting})
+		"items": items, "waitingTaskCount": waiting, "ai": ai})
 }
 
 func (a *collectionAPI) categoryList(c *gin.Context) {
@@ -392,9 +418,14 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		a.fail(c, err)
 		return
 	}
+	summaries, err := summaryViews(db, repos)
+	if err != nil {
+		a.fail(c, err)
+		return
+	}
 	items := make([]gin.H, 0, len(repos))
 	for _, repo := range repos {
-		items = append(items, a.card(c, repo, entries, views[repo.RepoID]))
+		items = append(items, a.card(c, repo, entries, views[repo.RepoID], summaries[repo.RepoID]))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"sourceKey": source, "period": period, "batch": gin.H{"observedSlot": batch.ObservedSlot, "observedAt": iso(batch.ObservedAt)},

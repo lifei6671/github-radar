@@ -4,10 +4,12 @@ go 1.26.0
 
 require (
 	github.com/PuerkitoBio/goquery v1.13.0
+	github.com/abadojack/whatlanggo v1.0.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/go-github/v88 v88.0.0
 	github.com/libtnb/sqlite v1.3.0
 	github.com/pressly/goose/v3 v3.30.0
+	github.com/yuin/goldmark v1.8.7
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/sync v0.25.0
 	gorm.io/gorm v1.31.2

@@ -58,10 +58,6 @@ WHERE o.observed_slot<? AND NOT EXISTS(SELECT 1 FROM trending_batches b WHERE b.
 ORDER BY o.observed_slot LIMIT ?)`, []any{discovery}},
 		{"Search 发现记录", `DELETE FROM search_observations WHERE (repo_id,source_key,observed_slot) IN (
 SELECT repo_id,source_key,observed_slot FROM search_observations WHERE observed_at<? ORDER BY observed_at LIMIT ?)`, []any{discovery}},
-		{"已完成任务", `DELETE FROM jobs WHERE id IN (
-SELECT id FROM jobs WHERE status IN ('succeeded','canceled') AND updated_at<? ORDER BY updated_at LIMIT ?)`, []any{age(cfg.FinishedJobDays)}},
-		{"死信任务", `DELETE FROM jobs WHERE id IN (
-SELECT id FROM jobs WHERE status='dead' AND updated_at<? ORDER BY updated_at LIMIT ?)`, []any{age(cfg.DeadJobDays)}},
 	}
 	if err := cleanTrending(db, discovery, min(cfg.BatchRows, 100)); err != nil {
 		return fmt.Errorf("清理 Trending 批次: %w", err)
@@ -77,7 +73,43 @@ SELECT id FROM jobs WHERE status='dead' AND updated_at<? ORDER BY updated_at LIM
 			}
 		}
 	}
+	if err := cleanJobs(db, age(cfg.FinishedJobDays), age(cfg.DeadJobDays), cfg.BatchRows); err != nil {
+		return err
+	}
 	return cleanCandidates(db, age(cfg.CandidateDays), min(cfg.BatchRows, 100))
+}
+
+// cleanJobs 先删终态台账，再删关联任务。未决调用保留到人工确认。
+func cleanJobs(db *gorm.DB, finished, dead int64, limit int) error {
+	for {
+		var ids []int64
+		err := db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&storage.Job{}).Where(`
+((status IN ('succeeded','canceled') AND updated_at<?) OR (status='dead' AND updated_at<?))
+AND NOT EXISTS(SELECT 1 FROM ai_calls a WHERE a.job_id=jobs.id AND a.status IN ('unknown','sending','reserved'))`, finished, dead).
+				Order("updated_at,id").Limit(limit).Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+				return err
+			}
+			if err := tx.Where("job_id IN ?", ids).Delete(&storage.AICall{}).Error; err != nil {
+				return err
+			}
+			return tx.Where("id IN ?", ids).Delete(&storage.Job{}).Error
+		})
+		if err != nil || len(ids) < limit {
+			return err
+		}
+	}
+}
+
+func cleanTopics(db *gorm.DB, cutoff int64, limit int) error {
+	for {
+		res := db.Exec(`DELETE FROM topic_candidates WHERE id IN (
+SELECT id FROM topic_candidates WHERE status='candidate' AND reviewed_at IS NULL AND updated_at<?
+ORDER BY updated_at,id LIMIT ?)`, cutoff, limit)
+		if res.Error != nil || res.RowsAffected < int64(limit) {
+			return res.Error
+		}
+	}
 }
 
 func cleanTrending(db *gorm.DB, cutoff int64, limit int) error {
@@ -119,6 +151,10 @@ func cleanCandidates(db *gorm.DB, cutoff int64, limit int) error {
 			if err := tx.Model(&storage.Repository{}).Where(`state='candidate' AND starred_by_user=0 AND last_discovered_at<?
 AND (last_success_at IS NULL OR last_success_at<?)
 AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.repo_id=repositories.repo_id AND j.status NOT IN ('succeeded','canceled','dead'))
+AND NOT EXISTS(SELECT 1 FROM ai_summaries s WHERE s.repo_id=repositories.repo_id)
+AND NOT EXISTS(SELECT 1 FROM topic_candidates t WHERE t.repo_id=repositories.repo_id)
+AND NOT EXISTS(SELECT 1 FROM jobs j JOIN ai_calls a ON a.job_id=j.id
+  WHERE j.repo_id=repositories.repo_id AND a.status IN ('unknown','sending','reserved'))
 AND NOT EXISTS(SELECT 1 FROM trending_observations o JOIN maintenance_state m ON m.key='trending:'||o.source_key||':'||o.window
  WHERE o.repo_id=repositories.repo_id AND json_extract(m.value,'$.observedSlot')=o.observed_slot)`, cutoff, cutoff).
 				Order("last_discovered_at,repo_id").Limit(limit).Pluck("repo_id", &ids).Error; err != nil {
@@ -129,7 +165,7 @@ AND NOT EXISTS(SELECT 1 FROM trending_observations o JOIN maintenance_state m ON
 				return nil
 			}
 			for _, model := range []any{&storage.PendingMetric{}, &storage.RepoSnapshot{}, &storage.HourlyMetric{}, &storage.DailyMetric{},
-				&storage.LatestMetric{}, &storage.TrendingObservation{}, &storage.SearchObservation{}} {
+				&storage.LatestMetric{}, &storage.TrendingObservation{}, &storage.SearchObservation{}, &storage.SummaryCheck{}} {
 				if err := tx.Where("repo_id IN ?", ids).Delete(model).Error; err != nil {
 					return err
 				}

@@ -24,7 +24,7 @@ go run ./cmd/radar
 | `GET /api/v1/setup/status` | 需要 `Authorization: Bearer <ADMIN_TOKEN>`，新库返回 `{"initialized":false}` |
 | `POST /api/v1/setup/initialize` | 使用同一令牌初始化空库，重复初始化返回 409 |
 
-服务启动时缺少管理员令牌会报错退出。缺少 `GITHUB_TOKEN` 时提示采集待配置。AI 地址、模型和开关通过管理接口配置，API 密钥由环境变量提供。AI 摘要在阶段 3 接入。
+服务启动时缺少管理员令牌会报错退出。缺少 `GITHUB_TOKEN` 时提示采集待配置。AI 地址、模型和开关通过管理接口配置，API 密钥由环境变量提供。
 
 ## 启用采集
 
@@ -84,6 +84,21 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 服务默认每 15 分钟计算增长、热度及采样等级，整点聚合小时数据，01:00 UTC 聚合日数据，03:00 UTC 清理过期记录。原始快照、小时聚合和日聚合默认分别保留 14、60、180 天，清理前检查下一级聚合水位和实际观测锚点。趋势中的缺测点保持为 `null`。
 
 后台可通过 `/api/v1/system/settings` 的 `scheduler.metricsIntervalMinutes`、`metrics` 和 `maintenance` 修改计算、评分和保留参数，保存后重启生效。旧数据库升级会补齐新增参数的默认值，并保留已有设置。维护可在缺少 GitHub 令牌的情况下运行。离线执行一轮可使用 `go run ./cmd/radar maintenance-once`，支持 `-config`，需要数据库已完成安装。
+
+## 中文摘要和选题
+
+在 `/api/v1/system/settings` 设置 `ai.baseUrl`、`ai.model` 和 `ai.summary` 后重启。Base URL 需指向支持 Chat Completions JSON 模式与 `max_completion_tokens` 的 API 根路径，例如供应商提供的 `/v1` 路径。密钥通过 `AI_API_KEY` 提供，README 检查使用 `GITHUB_TOKEN`。每个 UTC 自然日默认允许 50 次自动调用和 20 次手动调用，失败后的新调用也占预算。
+
+| 接口 | 用途 |
+| --- | --- |
+| `POST /api/v1/repos/:id/summary` | 提交 `{requestId,force}` 生成摘要或复用已验证的缓存，异步任务通过 `statusUrl` 查询 |
+| `POST /api/v1/jobs/:id/retry` | 对调用结果未知的摘要任务提交 `{requestId,acceptPossibleCharge:true}`，确认可能再次计费并重新排队 |
+| `GET /api/v1/topics` | 查询每日选题，支持状态筛选与游标分页 |
+| `PATCH /api/v1/topics/:id` | 提交 `{status,feedback}` 更新人工状态或反馈，`candidate` 可手动重新打开选题 |
+
+仓库详情返回中文摘要、来源质量、模型和生成时间。来源 SHA 及供应商、模型、提示词版本匹配时复用缓存，README 正文只在内存中处理。Markdown 提取和语言识别分别复用 [Goldmark](https://github.com/yuin/goldmark) 和 [Whatlanggo](https://github.com/abadojack/whatlanggo)。
+
+选题默认在每天北京时间 08:30 后生成，覆盖精确增长、近期上榜、日增长和关注信号。`settings.recommendations` 管理时间、数量、重新入池门槛和普通选题保留天数。已处理项目在 README 与功能证据同时变化、精确 24h 净增明显抬升或人工重新打开时回到候选，保留人工反馈。
 
 ## 迁移与验证
 

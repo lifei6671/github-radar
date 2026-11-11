@@ -22,10 +22,11 @@ type Config struct {
 	Auth           struct {
 		AdminTokenEnv string `yaml:"admin_token_env"`
 	} `yaml:"auth"`
-	AI          AI          `yaml:"ai"`
-	Metrics     Metrics     `yaml:"-"`
-	Maintenance Maintenance `yaml:"-"`
-	path        string
+	AI              AI              `yaml:"ai"`
+	Metrics         Metrics         `yaml:"-"`
+	Maintenance     Maintenance     `yaml:"-"`
+	Recommendations Recommendations `yaml:"-"`
+	path            string
 }
 
 // Server 保存监听地址和 HTTP 超时。
@@ -45,12 +46,13 @@ type Storage struct {
 
 // AI 保存可编辑的供应商设置。旧环境变量名只在首次导入时读取。
 type AI struct {
-	Enabled    bool   `yaml:"enabled" json:"enabled"`
-	BaseURL    string `yaml:"base_url" json:"baseUrl"`
-	Model      string `yaml:"model" json:"model"`
-	APIKeyEnv  string `yaml:"api_key_env" json:"apiKeyEnv"`
-	BaseURLEnv string `yaml:"base_url_env" json:"-"`
-	ModelEnv   string `yaml:"model_env" json:"-"`
+	Enabled    bool    `yaml:"enabled" json:"enabled"`
+	BaseURL    string  `yaml:"base_url" json:"baseUrl"`
+	Model      string  `yaml:"model" json:"model"`
+	APIKeyEnv  string  `yaml:"api_key_env" json:"apiKeyEnv"`
+	BaseURLEnv string  `yaml:"base_url_env" json:"-"`
+	ModelEnv   string  `yaml:"model_env" json:"-"`
+	Summary    Summary `yaml:"-" json:"summary"`
 }
 
 // Load 只解析打开数据库前需要的信息，旧业务字段留到首次导入时读取。
@@ -66,6 +68,7 @@ func Load(path string) (Config, error) {
 	cfg.Auth.AdminTokenEnv = "ADMIN_TOKEN"
 	cfg.GitHub, cfg.Scheduler, cfg.Discovery = collectionDefaults()
 	cfg.Metrics, cfg.Maintenance = DefaultMetrics(), DefaultMaintenance()
+	cfg.AI.Summary, cfg.Recommendations = DefaultSummary(), DefaultRecommendations()
 	cfg.AI.Enabled = true
 	cfg.AI.BaseURLEnv = "AI_BASE_URL"
 	cfg.AI.APIKeyEnv = "AI_API_KEY"
