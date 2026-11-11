@@ -1,8 +1,9 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Cloud, CloudUpload, DatabaseBackup, History } from 'lucide-react'
+import { CloudUpload, DatabaseBackup } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { api, ApiError, errorText } from '../api/client'
+import { AdminPanel } from '../components/admin'
 import { Badge, Dialog, Empty, More, Notice, PageError, Skeleton, Spinner } from '../components/ui'
 import { formatBytes, timestamp } from '../lib/format'
 
@@ -45,12 +46,13 @@ const statusKey = ['backup-status']
 const emptyConnection: Connection = { endpoint: '', bucket: '', prefix: 'github-radar/backups/', accessKeyId: '', secretAccessKey: '' }
 const restorePhases = { prepare: '正在下载和校验备份', drain: '正在暂停业务访问', copy: '正在恢复数据', reload: '正在加载恢复后的配置', done: '恢复完成' }
 
-export function useBackupStatus() {
+export function useBackupStatus(enabled = true) {
   return useQuery({
     queryKey: statusKey,
     queryFn: ({ signal }) => api<BackupStatus>(backupPath + '/status', { signal }),
     refetchInterval: (query) => query.state.data?.restoring ? 2000 : 10_000,
     staleTime: 0,
+    enabled,
   })
 }
 
@@ -233,8 +235,22 @@ function BackupHistory({ sessionId, disabled, onRestore }: {
   if (disabled && !list.data) return null
   if (list.isPending) return <Skeleton rows={2} />
   if (!list.data) return <PageError error={list.error} retry={() => { void list.refetch() }} />
-  if (!items.length) return <Empty title="暂无云端备份" />
+  if (!items.length) return <>{list.error && <Notice error>{errorText(list.error)}</Notice>}
+    {sessionId ? <Empty title="暂无云端备份" /> : <p className="admin-empty">暂无云端备份</p>}</>
   const selected = items.find((item) => item.objectKey === selectedKey) ?? items[0]
+  const more = !disabled && <More hasMore={list.hasNextPage} pending={list.isFetchingNextPage} onClick={() => { void list.fetchNextPage() }} />
+  // 初始化仍以单选方式选择备份，后台列表逐条提供恢复入口。
+  if (!sessionId) return <>
+    {list.error && <Notice error>{errorText(list.error)}</Notice>}
+    <div className="admin-table-scroll"><table className="admin-table">
+      <thead><tr><th scope="col">备份日期</th><th scope="col">文件大小</th><th scope="col">生成时间</th><th scope="col">结构版本</th><th scope="col">操作</th></tr></thead>
+      <tbody>{items.map((item) => <tr key={item.objectKey}>
+        <td className="numeric">{item.date}</td><td>{formatBytes(item.size)}</td><td>{timestamp(item.generatedAt)}</td><td>{item.schemaVersion || '—'}</td>
+        <td><button className="button" disabled={disabled || !item.schemaVersion} onClick={() => onRestore(item)} aria-label={'恢复 ' + item.date}>恢复</button></td>
+      </tr>)}</tbody>
+    </table></div>
+    {more}
+  </>
   return <>
     {list.error && <Notice error>{errorText(list.error)}</Notice>}
     <ul className="backup-history">
@@ -246,21 +262,19 @@ function BackupHistory({ sessionId, disabled, onRestore }: {
             <span>结构版本 {item.schemaVersion || '—'}</span>
           </div>
         </div>
-        return <li key={item.objectKey}>{sessionId ?
+        return <li key={item.objectKey}>
           <label className="backup-option">
             <input type="radio" name="setup-backup" aria-label={'选择 ' + item.date}
               disabled={disabled || !item.schemaVersion} checked={selected.objectKey === item.objectKey}
               onChange={() => setSelectedKey(item.objectKey)} />
             {record}
-          </label> : <>{record}
-            <button className="button" disabled={disabled || !item.schemaVersion} onClick={() => onRestore(item)} aria-label={'恢复 ' + item.date}>恢复</button>
-          </>}
+          </label>
         </li>
       })}
     </ul>
-    {!disabled && <More hasMore={list.hasNextPage} pending={list.isFetchingNextPage} onClick={() => { void list.fetchNextPage() }} />}
-    {sessionId && <button className="button primary" disabled={disabled || !selected.schemaVersion}
-      aria-label={'恢复 ' + selected.date} onClick={() => onRestore(selected)}>恢复所选备份</button>}
+    {more}
+    <button className="button primary" disabled={disabled || !selected.schemaVersion}
+      aria-label={'恢复 ' + selected.date} onClick={() => onRestore(selected)}>恢复所选备份</button>
   </>
 }
 
@@ -420,32 +434,35 @@ export function BackupPage() {
     {tracked && <OperationProgress key={tracked} id={tracked} published={published} />}
     {state.restartRequired && <Notice>恢复的运行配置将在重启服务后全部生效。</Notice>}
     {!state.maintenance && !state.restoring && state.autoAIResumeRequired && <ResumeAI />}
-    <div className="backup-grid">
-      <section className="panel system-panel">
-        <header className="section-head"><h2><Cloud size={18} />备份配置</h2>
-          {settings.data && <Badge tone={settings.data.r2.configured ? 'ok' : 'neutral'}>{settings.data.r2.configured ? 'R2 已配置' : 'R2 待配置'}</Badge>}
-        </header>
-        {state.maintenance ? <Notice>恢复期间暂不可访问项目数据。</Notice> : settings.data ?
-          <BackupEditor key={JSON.stringify([settings.data.enabled, settings.data.schedule, settings.data.retentionDays, settings.data.r2])}
-            settings={settings.data} disabled={busy || run.isPending} /> :
-          settings.isPending ? <Skeleton rows={2} /> : <PageError error={settings.error} retry={() => { void settings.refetch() }} />}
-      </section>
-      <section className="panel system-panel">
-        <header className="section-head"><h2><History size={18} />云端备份</h2>
-          <button className="button" disabled={busy || run.isPending || !settings.data?.r2.configured} onClick={() => run.mutate()}>
-            {run.isPending ? <Spinner /> : <CloudUpload size={16} />}立即备份
-          </button>
-        </header>
-        <dl className="definition-list">
-          <div><dt>最近成功</dt><dd>{timestamp(state.lastBackup?.generatedAt)}</dd></div>
-          <div><dt>下次备份</dt><dd>{timestamp(state.nextBackupAt)}</dd></div>
-          <div><dt>下次清理</dt><dd>{timestamp(state.nextCleanupAt)}</dd></div>
-        </dl>
-        {run.error && !uncertain(run.error) && <Notice error>{errorText(run.error)}</Notice>}
-        {state.lastCleanup?.status === 'failed' && <Notice error>最近一次保留清理失败。</Notice>}
-        {settings.data?.r2.configured && <BackupHistory disabled={busy || run.isPending} onRestore={setPicked} />}
-      </section>
+    <div className="admin-form-grid">
+      <AdminPanel title="备份配置" action={settings.data && <Badge tone={settings.data.r2.configured ? 'ok' : 'neutral'}>
+        {settings.data.r2.configured ? 'R2 已配置' : 'R2 待配置'}
+      </Badge>}>
+        <div className="admin-panel-body">
+          {state.maintenance ? <Notice>恢复期间暂不可访问项目数据。</Notice> : settings.data ?
+            <BackupEditor key={JSON.stringify([settings.data.enabled, settings.data.schedule, settings.data.retentionDays, settings.data.r2])}
+              settings={settings.data} disabled={busy || run.isPending} /> :
+            settings.isPending ? <Skeleton rows={2} /> : <PageError error={settings.error} retry={() => { void settings.refetch() }} />}
+        </div>
+      </AdminPanel>
+      <AdminPanel title="备份状态">
+        <div className="admin-panel-body">
+          <dl className="definition-list">
+            <div><dt>最近成功</dt><dd>{timestamp(state.lastBackup?.generatedAt)}</dd></div>
+            <div><dt>下次备份</dt><dd>{timestamp(state.nextBackupAt)}</dd></div>
+            <div><dt>下次清理</dt><dd>{timestamp(state.nextCleanupAt)}</dd></div>
+          </dl>
+          {state.lastCleanup?.status === 'failed' && <Notice error>最近一次保留清理失败。</Notice>}
+        </div>
+      </AdminPanel>
     </div>
+    <AdminPanel title="云端备份" action={<button className="button" disabled={busy || run.isPending || !settings.data?.r2.configured} onClick={() => run.mutate()}>
+      {run.isPending ? <Spinner /> : <CloudUpload size={16} />}立即备份
+    </button>}>
+      {run.error && !uncertain(run.error) && <Notice error>{errorText(run.error)}</Notice>}
+      {settings.data?.r2.configured ? <BackupHistory disabled={busy || run.isPending} onRestore={setPicked} /> :
+        <p className="admin-empty">{settings.isPending && !state.maintenance ? '正在读取备份配置' : state.maintenance ? '恢复期间暂停读取备份列表' : '配置 R2 后可查看备份'}</p>}
+    </AdminPanel>
     {picked && settings.data && <RestoreDialog backup={picked} saved={settings.data.r2} close={() => setPicked(null)}
       begin={() => selection.begin('restore')} rejected={selection.clear}
       accepted={(value) => { selection.select(value); void client.invalidateQueries({ queryKey: statusKey }) }} />}

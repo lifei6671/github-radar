@@ -97,7 +97,7 @@ func TestRepositoryCursorAndClassification(t *testing.T) {
 	for _, repo := range []storage.Repository{
 		{RepoID: 1, Owner: "one", Name: "repo", FullName: "one/repo", NameIsCurrent: true, HTMLURL: "https://github.com/one/repo", TopicsJSON: `["MCP","tts"]`, Grade: "A", State: "active", Stars: 100, DiscoveredAt: now, LastDiscoveredAt: now, NextFetchAt: now, UpdatedAt: now},
 		{RepoID: 2, Owner: "two", Name: "repo", FullName: "two/repo", NameIsCurrent: true, HTMLURL: "https://github.com/two/repo", TopicsJSON: `[]`, Grade: "B", State: "active", Stars: 100, DiscoveredAt: now, LastDiscoveredAt: now, NextFetchAt: now, UpdatedAt: now},
-		{RepoID: 3, Owner: "three", Name: "repo", FullName: "three/repo", NameIsCurrent: true, HTMLURL: "https://github.com/three/repo", TopicsJSON: `["mcp"]`, Grade: "A", State: "candidate", Stars: 999, DiscoveredAt: now, LastDiscoveredAt: now, NextFetchAt: now, UpdatedAt: now},
+		{RepoID: 3, Owner: "three", Name: "repo", FullName: "three/repo", NameIsCurrent: true, HTMLURL: "https://github.com/three/repo", TopicsJSON: `["mcp"]`, Grade: "A", State: "candidate", Stars: 999, DiscoveredAt: now + 60000, LastDiscoveredAt: now + 60000, NextFetchAt: now, UpdatedAt: now},
 	} {
 		if err := db.Create(&repo).Error; err != nil {
 			t.Fatal(err)
@@ -123,6 +123,39 @@ func TestRepositoryCursorAndClassification(t *testing.T) {
 	other := request(t, router, "GET", "/api/v1/repos?category=other", "", "admin", 200)
 	if len(other["items"].([]any)) != 1 || other["items"].([]any)[0].(map[string]any)["id"] != float64(2) {
 		t.Fatalf("other 回退不符: %+v", other)
+	}
+	// 主题卡片采用与项目列表一致的 active 集合，多分类项目可以同时预览。
+	if err := db.Create(&storage.Repository{
+		RepoID: 4, Owner: "older", Name: "repo", FullName: "older/repo", NameIsCurrent: true,
+		HTMLURL: "https://github.com/older/repo", TopicsJSON: `["mcp"]`, Grade: "A", State: "active",
+		DiscoveredAt: now - 60000, LastDiscoveredAt: now - 60000, NextFetchAt: now, UpdatedAt: now,
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	categories := request(t, router, "GET", "/api/v1/categories", "", "admin", 200)
+	wantLatest := map[string]float64{"mcp": 1, "media": 1, "other": 2}
+	for _, raw := range categories["items"].([]any) {
+		category := raw.(map[string]any)
+		slug := category["slug"].(string)
+		want, hasRepo := wantLatest[slug]
+		if !hasRepo {
+			if category["count"] != float64(0) || category["latestRepo"] != nil {
+				t.Fatalf("空主题不能返回项目预览: %+v", category)
+			}
+			continue
+		}
+		preview, ok := category["latestRepo"].(map[string]any)
+		count := float64(1)
+		if slug == "mcp" {
+			count = 2
+		}
+		if !ok || category["count"] != count || preview["id"] != want || preview["discoveredAt"] != iso(now) {
+			t.Fatalf("主题预览应来自最近发现的监控仓库: %+v", category)
+		}
+		delete(wantLatest, slug)
+	}
+	if len(wantLatest) != 0 {
+		t.Fatalf("分类响应缺少预期主题: %+v", wantLatest)
 	}
 	request(t, router, "GET", "/api/v1/repos?category=unknown", "", "admin", 400)
 	request(t, router, "GET", "/api/v1/repos?sort=followed", "", "admin", 400)

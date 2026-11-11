@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -17,6 +19,71 @@ func jsonBody(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func TestDiscoveryTabsPersistWithoutChangingGlobalCategories(t *testing.T) {
+	router, db := collectionRouter(t)
+	const admin = "/api/v1/system/discovery-tabs"
+	const public = "/api/v1/public/discovery-tabs"
+	request(t, router, http.MethodGet, admin, "", "", 401)
+	request(t, router, http.MethodPut, admin, "{}", "", 401)
+	request(t, router, http.MethodGet, public, "", "", 503)
+	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
+	before := request(t, router, http.MethodGet, "/api/v1/public/categories", "", "", 200)
+	defaults := request(t, router, http.MethodGet, public, "", "", 200)
+	if len(defaults["items"].([]any)) != len(before["items"].([]any)) {
+		t.Fatalf("旧库默认应跟随分类映射: %+v", defaults)
+	}
+	for _, invalid := range []string{
+		`{"revision":1,"items":[{"slug":"unknown","label":"无效"}]}`,
+		`{"revision":1,"items":[{"slug":"other"},{"slug":"other"}]}`,
+		`{"revision":1,"items":null}`,
+	} {
+		request(t, router, http.MethodPut, admin, invalid, "admin", 400)
+	}
+	const custom = `{"revision":1,"items":[{"slug":"other","label":" 更多项目 "},{"slug":"mcp","label":""}]}`
+	request(t, router, http.MethodPut, admin, custom, "admin", 200)
+	request(t, router, http.MethodPut, admin, custom, "admin", 409)
+	// 复用启动时的初始化入口，确认保存的标签和修订号没有被默认配置覆盖。
+	if _, err := (settings.Store{DB: db}).Initialize(t.Context(), config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	result := request(t, router, http.MethodGet, public, "", "", 200)
+	if got := jsonBody(t, result); got != `{"items":[{"name":"更多项目","slug":"other"},{"name":"MCP","slug":"mcp"}]}` {
+		t.Fatalf("公开响应应只返回排序后的显示字段: %s", got)
+	}
+	after := request(t, router, http.MethodGet, "/api/v1/public/categories", "", "", 200)
+	if jsonBody(t, before) != jsonBody(t, after) {
+		t.Fatal("发现页配置改变了全部项目的分类")
+	}
+	request(t, router, http.MethodPut, "/api/v1/system/categories", `{"revision":2,"items":[]}`, "admin", 200)
+	result = request(t, router, http.MethodGet, public, "", "", 200)
+	if got := jsonBody(t, result); got != `{"items":[{"name":"更多项目","slug":"other"}]}` {
+		t.Fatalf("被删除的分类仍在标签中: %s", got)
+	}
+	request(t, router, http.MethodPut, admin, `{"revision":3,"items":[]}`, "admin", 200)
+	result = request(t, router, http.MethodGet, public, "", "", 200)
+	if got := jsonBody(t, result); got != `{"items":[]}` {
+		t.Fatalf("空配置应保留为空数组: %s", got)
+	}
+}
+
+func TestPublicDiscoveryTabsReadDuringWrite(t *testing.T) {
+	router, db := collectionRouter(t)
+	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
+	// 保持一个未提交的写事务，前台仍可从 WAL 读取已提交的设置和分类。
+	write := db.WithContext(t.Context()).Begin()
+	if write.Error != nil {
+		t.Fatal(write.Error)
+	}
+	defer write.Rollback()
+	if err := write.Model(&storage.CategorySetting{}).Where("slug = ?", "mcp").Update("name", "未提交名称").Error; err != nil {
+		t.Fatal(err)
+	}
+	result := request(t, router, http.MethodGet, "/api/v1/public/discovery-tabs", "", "", 200)
+	if body := jsonBody(t, result); !strings.Contains(body, `"name":"MCP","slug":"mcp"`) || strings.Contains(body, "未提交名称") {
+		t.Fatalf("公开标签应从已提交的快照读取: %s", body)
+	}
 }
 
 func TestAdminConfigurationIsAuthenticatedAndApplied(t *testing.T) {

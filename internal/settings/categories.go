@@ -67,9 +67,20 @@ func (s Store) SaveCategories(ctx context.Context, revision int64, items []confi
 	if err != nil {
 		return 0, nil, &Invalid{Err: err}
 	}
-	snapshot, err := s.update(ctx, revision, func(tx *gorm.DB, _ *Snapshot) error {
+	snapshot, err := s.update(ctx, revision, func(tx *gorm.DB, snapshot *Snapshot) error {
 		if err := tx.Where("1 = 1").Delete(&storage.CategorySetting{}).Error; err != nil {
 			return err
+		}
+		if snapshot.DiscoveryTabs != nil {
+			// 删除分类时同步移除标签，未来同名分类不继承旧的展示设置。
+			options := discoveryCategoryNames(normalized)
+			tabs := snapshot.DiscoveryTabs[:0]
+			for _, tab := range snapshot.DiscoveryTabs {
+				if _, ok := options[tab.Slug]; ok {
+					tabs = append(tabs, tab)
+				}
+			}
+			snapshot.DiscoveryTabs = tabs
 		}
 		return insertCategories(tx, normalized)
 	})

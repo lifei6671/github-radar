@@ -122,7 +122,7 @@ func (a *collectionAPI) trend(c *gin.Context) {
 	}
 	db := a.db.WithContext(c.Request.Context())
 	var repo storage.Repository
-	if err := db.Take(&repo, "repo_id=?", id).Error; err != nil {
+	if err := publicRepos(c, db).Take(&repo, "repo_id=?", id).Error; err != nil {
 		a.fail(c, err)
 		return
 	}

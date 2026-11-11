@@ -211,7 +211,7 @@ GitHub 2026-03-10 API 版本提供 GET /repos/{owner}/{repo}/stargazers/history�
 | media | AI 多媒体 | text-to-speech, tts, text-to-image, text-to-video |
 | tools | 开发工具 | developer-tools, devtools, cli |
 
-原始 topics 保存在 repositories.topics_json。后台保存后，后续请求按数据库里的当前映射派生分类。GET /api/v1/categories 返回 `{items:[{slug,name,count}]}`，count 只统计 active 仓库，包含 other。列表 category 支持重复参数，多选取并集，未知 slug 返回 400。同一请求用同一份映射生成筛选条件和展示字段。
+原始 topics 保存在 repositories.topics_json。后台保存后，后续请求按数据库里的当前映射派生分类。GET /api/v1/categories 返回 `{items:[{slug,name,count,latestRepo}]}`。count 只统计 active 仓库，包含 other。latestRepo 返回同一分类下最新发现的 active 仓库，字段为 id、fullName、description 和 discoveredAt。没有仓库时返回 null。列表 category 支持重复参数，多选取并集，未知 slug 返回 400。同一请求用同一份映射生成筛选条件和展示字段。
 
 ## 4. 采样等级、请求预算与调度
 
@@ -810,15 +810,16 @@ WHERE (repo_id, sample_slot) IN (
 | GET /healthz | 存活检查 |
 | GET /readyz | 数据库与运行环境就绪 |
 | GET /api/v1/repos | 按增长、热度、语言、AI 标签、等级、收藏状态筛选排序 |
-| GET /api/v1/categories | 数据库分类与 active 仓库数量 |
+| GET /api/v1/categories | 数据库分类、active 仓库数量与最新仓库预览 |
 | GET /api/v1/repos/:id | 仓库详情、中文摘要、采集状态 |
 | GET /api/v1/repos/:id/trend?range=24h/7d/30d/180d | 自适应返回原始/小时/日级点位和质量 |
 | POST /api/v1/repos/:id/refresh | 手动调度采集，遵守配额 |
 | POST /api/v1/repos/:id/summary | 手动安排/复用 AI 总结 |
-| POST /api/v1/repos/:id/follow | 关注或取消关注 |
+| POST /api/v1/repos/:id/follow | 加入或移出重点监控 |
 | POST /api/v1/repos/:id/topic | 幂等加入选题池，返回原有或新建选题的状态 |
 | GET /api/v1/trending?period=daily&sourceKey=all | 单来源最新完整 Trending 榜单及批次，返回 TrendingResponse；本地增长榜使用 /repos?sort=growth24h |
 | GET /api/v1/topics | 候选选题及人工状态 |
+| GET /api/v1/topics/days | 按入池日期返回版面索引 |
 | PATCH /api/v1/topics/:id | 修改 shortlisted/accepted/ignored/published |
 | GET /api/v1/system/jobs | 任务状态、排队、失败详情（不含 README） |
 | GET /api/v1/jobs/:id | 管理鉴权的单任务查询，供手动采集/摘要轮询 |
@@ -828,6 +829,8 @@ WHERE (repo_id, sample_slot) IN (
 | GET/PUT /api/v1/system/settings | 读取或保存进程级配置，返回是否需要重启 |
 | GET/PUT /api/v1/system/categories | 读取或替换分类映射 |
 | GET/PUT /api/v1/system/discovery-rules | 读取或替换 Trending 和 Search 规则 |
+| GET/PUT /api/v1/system/discovery-tabs | 读取或保存发现页分类标签的可见范围、顺序及名称 |
+| GET /api/v1/public/discovery-tabs | 读取发现页分类标签，按展示顺序返回分类标识和显示名称 |
 | GET /api/v1/system/storage | SQLite 大小、快照条数、清理水位 |
 | POST /api/v1/system/maintenance/run | 鉴权后手动启动维护任务 |
 | GET /api/v1/system/backup/settings | 读取后台备份配置（凭据脱敏） |
@@ -842,11 +845,13 @@ WHERE (repo_id, sample_slot) IN (
 
 首次安装另提供 POST /api/v1/setup/r2/test、r2/session、restore、initialize，GET /api/v1/setup/backups、status、operations/:id，均使用 ADMIN_TOKEN。R2 会话仅保存在内存，恢复后的数据库包含本次新配置；已初始化时关闭 setup 写接口，状态和操作查询仍可用。维护期间健康检查、setup/status 和操作进度只读内存；重载入口仅在复制已结束且 databaseApplied=true 的加载失败状态下，受恢复互斥保护读取数据库。鉴权优先；恢复期间设置写入及冲突操作先返回 409，其余业务 API 返回 503。详见[专项方案](./backup-and-restore.md)。
 
-三个配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending；Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。两个列表接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
+四个配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending；Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。分类和发现规则接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
+
+发现页标签 PUT 传 `{revision,items:[{slug,label}]}`，标签选自现有分类，按数组顺序展示，空 `label` 沿用分类名称。保存后立即生效，首次保存前跟随分类映射。前台固定显示「全部」，保存空数组只保留「全部」。
 
 阶段 2 的计算周期、窗口容差、采样分级门槛、评分参数及清理计划由 `settings.scheduler.metricsIntervalMinutes`、`settings.metrics` 和 `settings.maintenance` 管理，保存后重启生效。评分权重按 24h 增长、7d 增长、加速度、持续性和 Trending 排列。维护接口返回 202，持久化请求由后台下次扫描领取。已初始化的库也可以用 `maintenance-once` 离线执行维护。
 
-阶段 3 使用 `settings.ai` 和 `settings.ai.summary` 配置供应商、模型、预算、提示词版本、来源检查和重试。`settings.recommendations` 配置每日选题时刻、时区、数量、重入阈值及保留期，保存后重启生效。选题通过 `GET /topics?status=&limit=&cursor=` 分页，`PATCH /topics/:id` 支持 `{status,feedback}`，将状态设回 `candidate` 可人工重新打开。每日任务以仓库和选题角度去重，README 指纹和功能证据同时变化或精确 24h 净增相对上次推荐达到重入门槛时，可重新进入候选并保留人工反馈。
+阶段 3 使用 `settings.ai` 和 `settings.ai.summary` 配置供应商、模型、预算、提示词版本、来源检查和重试。`settings.recommendations` 配置每日选题时刻、时区、数量、重入阈值及保留期，保存后重启生效。选题通过 `GET /topics?status=&day=&limit=&cursor=` 分页。提供 `day=YYYY-MM-DD` 时按选题时区和入池时间列出当天选题，游标绑定状态与日期。`GET /topics/days` 提供同一时区下的日期、首条标题和条目数。`PATCH /topics/:id` 支持 `{status,feedback}`，将状态设回 `candidate` 可人工重新打开。每日任务以仓库和选题角度去重，README 指纹和功能证据同时变化或精确 24h 净增相对上次推荐达到重入门槛时，可重新进入候选并保留人工反馈。
 
 异步任务契约：refresh 请求 `{requestId}`，接受后返回 `202 {jobId,statusUrl}`；summary 请求 `{force:false,requestId:"客户端生成的唯一值"}`，先查手动 dedup_key，相同请求返回原任务；其他请求遇到未决摘要任务返回 `409 {code:"summary_in_progress",existingJobId,statusUrl}`。无冲突且缓存命中返回 `200 {cached:true,summaryStatus:"ready"}`，否则返回同样的 202 结构；`force:true` 明确要求重新生成并计入手动额度。摘要执行条件未满足时返回 503 `summary_unavailable`，已保存的摘要仍可读取。unknown 任务通过 `POST /api/v1/jobs/:id/retry`、请求 `{requestId,acceptPossibleCharge:true}` 在管理鉴权下关闭未决调用、取消旧任务并创建新的手动任务；上述变化在同一事务中完成。重试接口先按新手动 dedup_key 查重，已存在则直接返回，随后才检查旧任务必须为 unknown，保证响应丢失后的重试仍返回同一新任务。
 
@@ -856,9 +861,9 @@ Trending 专用契约：GET /api/v1/trending 的 period 为 daily/weekly/monthly
 
 ### 9.1 单管理员认证
 
-环境变量 ADMIN_TOKEN 必填，由部署者生成随机高强度值；缺失则启动报错。所有 /api/v1（包括读取、setup、恢复进度）必须带 Authorization: Bearer，服务端统一验证，不存在本地访问自动免鉴权。静态资源、/healthz、/readyz 可公开，健康响应不含业务或配置详情；对外部署使用 HTTPS。
+环境变量 ADMIN_TOKEN 必填，由部署者生成随机高强度值。缺失时启动报错。现有 /api/v1 管理接口（包括原读取接口、setup、恢复进度）均通过 Authorization: Bearer 认证。前台通过 /api/v1/public 的独立 GET 路由获取仓库列表、详情、Star 趋势、分类、官方榜单及来源标识。公开读取仅展示当前可发布仓库，摘要仅展示已生成内容与来源，关注记录、摘要任务编号及模型配置留在管理接口。两组业务路由共用初始化与恢复门禁。静态资源、/healthz、/readyz 可公开，健康响应只提供就绪状态。对外部署使用 HTTPS。
 
-前端首次访问输入令牌，只存当前标签页 sessionStorage，不放 URL、构建变量或 localStorage；统一 API client 添加请求头。401 清除令牌和查询缓存，返回输入界面；退出只清理浏览器状态。无用户表、Cookie、JWT、后端登录会话或单独 setup token。轮换通过修改环境变量并重启服务完成；数据库恢复不改变管理员令牌。
+首次进入后台时输入令牌，令牌仅保存在当前标签页的 sessionStorage，由 API client 随管理请求发送。管理接口返回 401 时清除令牌和查询缓存，后台返回登录页。退出时清理浏览器会话。轮换通过修改环境变量并重启服务完成，数据库恢复沿用当前实例的管理员令牌。
 
 ### 9.2 列表与游标
 
@@ -878,12 +883,15 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 | --- | --- | --- |
 | / | 精选首页 / 时间线 | 最近发现的增长项目、精选候选与热度领跑 |
 | /trending | 热点榜 | 24h/7d Star 净增、排名、上榜与走势 |
-| /repos | 全部动态 | 仓库筛选、技术语言、主题、等级 |
+| /repos | 全部动态 | 仓库筛选、技术语言、主题、等级和浏览器收藏 |
 | /repos/:id | 新闻详情 | Star 曲线、200～500 字中文摘要、来源和选题 |
 | /categories、/categories/:slug | 主题页 | AI 智能体、AI 编程、MCP、AI 多媒体、开发工具及其他 |
-| /topics | 日报与精选 | 候选选题、读者收益、审核状态、导出 |
-| /watchlist | 收藏 | 用户关注仓库与后续跟踪 |
-| /system | 管理后台 | GitHub 限流、调度任务、SQLite 清理与备份恢复状态 |
+| /admin/topics | 日报与精选 | 候选选题、读者收益、审核状态、导出 |
+| /starred | 收藏 | 当前浏览器收藏的仓库 |
+| /admin/watchlist | 重点监控 | 管理员指定优先跟踪的仓库 |
+| /admin/runs | 管理后台 | GitHub 限流、调度任务、SQLite 清理与备份恢复状态 |
+| /admin/repos、/admin/repos/:id | 后台仓库管理 | 加入或移出重点监控、刷新采样、摘要任务与加入选题池 |
+| /admin/login、/admin/setup | 后台登录与首次安装 | 验证管理员令牌、初始化空库或从 R2 恢复 |
 
 ### 10.2 视觉系统与可复用组件
 
@@ -902,7 +910,7 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 - 手动刷新、AI 总结、候选审核均是异步/持久化操作；API 接受后展示排队/运行/成功/失败状态，不提前宣布成功。
 - 前端不请求、缓存或展示 README 完整正文；只读取后端保存的 AI 中文摘要和来源链接。
 - 响应式和可用性至少覆盖 390×844、768×1024、1440×900 和 1920×1080，亮暗主题和键盘导航均须验收。
-- 系统后台增加可编辑的“备份与恢复”页，支持 R2 设置、每天备份时间、实际保留期（默认五天）的备份列表与一键恢复；新 VPS /setup 使用同一恢复引擎。
+- 系统后台增加可编辑的“备份与恢复”页，支持 R2 设置、每天备份时间、实际保留期（默认五天）的备份列表与一键恢复；新 VPS 的 /admin/setup 使用同一恢复引擎。
 
 ### 10.4 接口契约与开发顺序
 
@@ -931,7 +939,7 @@ storage:
 - GitHub API 接口使用 api.github.com，Trending 使用 github.com；网络超时/重试分别设置。
 - Docker 镜像可多阶段编译 Go + React；SQLite 数据目录 ./data 挂载持久化卷。
 - 运行单实例；可选 Caddy/Nginx 反向代理并配置 HTTPS/访问控制。
-- 已初始化应用从 SQLite 的 system_settings 读取/保存 R2 与备份策略，后台修改后热更新调度；首次安装从 /setup 仅以进程内存临时配置 R2，恢复成功才写回数据库。
+- 已初始化应用从 SQLite 的 system_settings 读取/保存 R2 与备份策略，后台修改后热更新调度；首次安装从 /admin/setup 仅以进程内存临时配置 R2，恢复成功才写回数据库。
 - 正常恢复在同一 Go 进程内通过 SQLite 原生 Backup API 完成，复用原连接池；临时文件在受限 staging/，不建立文件交换日志。
 - 支持优雅停止和版本化迁移。`migrate` 仅升级表结构，首次运行服务时导入初始配置及种子查询。
 - 运行命令应支持 server、migrate、collect-once、maintenance-once、backup；便于本地测试和故障演练。
@@ -989,10 +997,10 @@ storage:
 - 按 [备份与恢复专项方案](./backup-and-restore.md) 增加 Go backup 模块、SQLite `VACUUM INTO` 快照、Gzip/SHA-256、R2 S3 API 连接与每日备份。
 - 备份保留最近 5 个自然日，每天一个对象；超期按独立定时清理任务删除，同日手动备份替换当日对象。
 - 将可编辑的 R2 设置与备份策略写入 SQLite `system_settings`；后台保存后无须重启进程即可更新调度与 R2 连接。
-- 实施 UI-08，新增管理后台备份配置/列表/恢复页面；空数据库首次安装时通过 /setup 在内存中暂存 R2，选择备份，成功恢复后写入 SQLite。
+- 实施 UI-08，新增管理后台备份配置/列表/恢复页面；空数据库首次安装时通过 /admin/setup 在内存中暂存 R2，选择备份，成功恢复后写入 SQLite。
 - 恢复采用临时库预校验及配置/任务整理、排空业务访问、modernc NewRestore 原生事务复制、读取验证及重载配置；沿用同一 sql.DB，正常路径 Go PID 保持不变。
 
-验收：连续 6 天备份后仅存在最近 5 个自然日的每日对象；修改时间和 R2 设置重启后仍有效；新 VPS 从 /setup 一键恢复完整仓库、摘要和选题；异常备份不破坏已有对象。
+验收：连续 6 天备份后仅存在最近 5 个自然日的每日对象；修改时间和 R2 设置重启后仍有效；新 VPS 从 /admin/setup 一键恢复完整仓库、摘要和选题；异常备份不破坏已有对象。
 
 ## 13. 自动化测试与验收用例
 
@@ -1030,7 +1038,7 @@ storage:
 30. **单实例构建**：Vite 构建产物与 Gin API 可由一个 Go 进程对外提供，生产运行无需 Node SSR。
 31. **五天备份**：每天一份，连续六天备份后仅保留最近五个自然日；同日手动备份不增加对象数量。
 32. **配置热更新**：后台更改 R2 连接、备份时间和保留天数后立即生效，配置在 SQLite system_settings 中持久化，重启仍可读取。
-33. **首次部署恢复**：空数据库可通过受保护 /setup 在内存会话输入新 R2 连接、选择云端备份，恢复库中旧 R2 配置由新连接完整覆盖并成功验证后才标记完成。旧 VPS 不参与。
+33. **首次部署恢复**：空数据库可通过受保护的 /admin/setup 在内存会话输入新 R2 连接、选择云端备份，恢复库中旧 R2 配置由新连接完整覆盖并成功验证后才标记完成。旧 VPS 不参与。
 34. **同进程原生恢复**：同一 PID/sql.DB 完成恢复，多连接与 WAL 场景可读新数据；校验失败不改旧库，复制未完成原生回滚，具体边界见专项验收。
 35. **恢复后的运行状态**：数据库恢复后仓库、Star 指标、AI 摘要、选题及调度正常；新 R2 连接覆盖旧连接，后台和后续备份都使用新配置，管理后台能查看真实恢复结果。
 36. **租约过期**：两个领取批次竞争同一任务时，旧 lease_token 无法提交结果；续租失败取消执行，未知 AI 请求不自动重发。

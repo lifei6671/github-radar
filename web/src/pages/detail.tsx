@@ -1,104 +1,166 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, FileText, GitFork, Plus, Star } from 'lucide-react'
-import { lazy, Suspense } from 'react'
-import { Link, useLocation, useParams, useSearchParams } from 'react-router'
-import { api, errorText } from '../api/client'
-import { useCategories } from '../api/queries'
+import type { UseQueryResult } from '@tanstack/react-query'
+import { ArrowLeft, CalendarDays, Clock3, GitFork, Plus, Star } from 'lucide-react'
+import { lazy, Suspense, useEffect } from 'react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router'
+import { api, ApiError, errorText, publicApi, useSession } from '../api/client'
+import { useAdminArea, useCategories } from '../api/queries'
 import type { RepoDetail, Topic, Trend, TrendRange } from '../api/types'
-import { External, FollowButton, GrowthValue } from '../components/repo'
+import { External, GrowthValue, MonitorButton } from '../components/repo'
 import { RefreshAction, SummaryActions } from '../components/tasks'
 import { Badge, Empty, Notice, PageError, Skeleton, Spinner } from '../components/ui'
-import { decimal, number, qualityLabel, repoState, resolutionLabel, sourceLabel, summaryLabel, timestamp } from '../lib/format'
+import { decimal, number, qualityLabel, relativeTime, repoState, resolutionLabel, sourceLabel, summaryLabel, timestamp } from '../lib/format'
 
 const TrendChart = lazy(() => import('../components/trend-chart'))
 const ranges: [TrendRange, string][] = [['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天'], ['180d', '180 天']]
+const sections = [['#summary', '仓库概览'], ['#star-trend', 'Star 趋势']] as const
+const periodLabel = { daily: '日榜', weekly: '周榜', monthly: '月榜' }
+const repoNotFound = new ApiError(404, { code: 'not_found' })
 
 export function Detail() {
   const { id } = useParams()
+  const admin = useAdminArea()
+  const { token } = useSession()
   const location = useLocation()
   const from: unknown = location.state?.from
-  const back = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') ? from : '/repos'
-  const detail = useQuery({
-    queryKey: ['repo', id],
-    queryFn: ({ signal }) => api<RepoDetail>('/repos/' + id, { signal }),
+  const back = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') ? from : admin ? '/admin/repos' : '/repos'
+  const read = admin ? api : publicApi
+  const scope = admin ? 'admin' : 'public'
+  const queryClient = useQueryClient()
+  const detailKey = ['repo', id, scope] as const
+  const detail = useQuery<RepoDetail | null>({
+    queryKey: detailKey,
+    queryFn: async ({ signal }) => {
+      try {
+        return await read<RepoDetail>('/repos/' + id, { signal })
+      } catch (error) {
+        if (!admin && error instanceof ApiError && error.status === 404) return null
+        throw error
+      }
+    },
+  })
+  const requestedRange = new URLSearchParams(location.search).get('range')
+  const range = ranges.find(([key]) => key === requestedRange)?.[0] ?? '7d'
+  const withdrawn = detail.data === null
+  const loadedRepoId = detail.data?.id
+  const trend = useQuery({
+    queryKey: ['trend', id, range, scope],
+    enabled: loadedRepoId !== undefined && !withdrawn,
+    queryFn: async ({ signal }) => {
+      try {
+        return await read<Trend>('/repos/' + loadedRepoId + '/trend?range=' + range, { signal })
+      } catch (error) {
+        if (!admin && error instanceof ApiError && error.status === 404) {
+          // 公开趋势确认撤回后，整个仓库的旧缓存都不能再用于返回或切换时段。
+          await queryClient.cancelQueries({ queryKey: detailKey, exact: true })
+          queryClient.setQueryData(detailKey, null)
+        }
+        throw error
+      }
+    },
   })
   const categories = useCategories()
+  const hash = location.hash
+  const activeAnchor = hash === '#star-trend' ? hash : '#summary'
+  useEffect(() => {
+    // 深链接打开时先加载仓库数据，章节挂载后再定位。
+    if (loadedRepoId !== undefined && sections.some(([anchor]) => anchor === hash)) {
+      document.getElementById(hash.slice(1))?.scrollIntoView()
+    }
+  }, [loadedRepoId, hash])
   if (detail.isPending) return <Skeleton />
+  if (withdrawn) return <PageError error={repoNotFound} retry={() => { void detail.refetch() }} />
   if (!detail.data) return <PageError error={detail.error} retry={() => { void detail.refetch() }} />
   const repo = detail.data
   const names = new Map(categories.data?.items.map((item) => [item.slug, item.name]))
-  return <>
-    <Link className="back-link" to={back}><ArrowLeft size={16} />返回列表</Link>
-    <header className="detail-head">
-      <div className="detail-identity">
-        <div className="repo-tags">{repo.language && <span className="language"><span />{repo.language}</span>}<Badge>{repo.grade} 级</Badge>
-          {repo.state !== 'active' && <Badge tone="warning">{repoState[repo.state]}</Badge>}</div>
-        <h1>{repo.fullName}</h1>
-        {repo.description && <p className="muted">{repo.description}</p>}
+  return <div className="repo-detail">
+    <nav className="detail-breadcrumbs" aria-label="当前位置">
+      <Link to={back}><ArrowLeft size={14} />返回列表</Link><span aria-current="page">仓库详情</span>
+      {!admin && token && <Link className="detail-text-link" to={'/admin/repos/' + repo.id + location.search + location.hash}>管理仓库</Link>}
+    </nav>
+    <header className="article-head">
+      <div className="repo-tags">
+        {repo.language && <span className="language"><span />{repo.language}</span>}<Badge>{repo.grade} 级</Badge>
+        {repo.state !== 'active' && <Badge tone="warning">{repoState[repo.state]}</Badge>}
       </div>
-      <div className="action-row"><FollowButton repo={repo} full /><External href={repo.htmlUrl} /></div>
+      <h1>{repo.fullName}</h1>
+      <div className="detail-stats minor muted">
+        <span><Star size={14} aria-hidden /><strong className="numeric">{number(repo.stars)}</strong> Star</span>
+        <span><GitFork size={14} aria-hidden /><strong className="numeric">{number(repo.forks)}</strong> Fork</span>
+        <span><CalendarDays size={14} aria-hidden /><time dateTime={repo.discoveredAt}>{timestamp(repo.discoveredAt)}</time> 发现</span>
+        {repo.lastSuccessAt && <span><Clock3 size={14} aria-hidden /><time dateTime={repo.lastSuccessAt} title={timestamp(repo.lastSuccessAt)}>{relativeTime(repo.lastSuccessAt)}</time> 采样</span>}
+      </div>
     </header>
     {detail.error && <Notice error>{errorText(detail.error)} 上次采样 {timestamp(repo.lastSuccessAt)}</Notice>}
+    <nav className="reading-links" aria-label="仓库详情章节">
+      <div className="pills">{sections.map(([anchor, label]) => <Link key={anchor} to={{ search: location.search, hash: anchor }}
+        state={location.state} preventScrollReset aria-current={activeAnchor === anchor ? 'location' : undefined}>{label}</Link>)}</div>
+    </nav>
     <div className="detail-grid">
-      <div className="detail-main">
-        <section className="panel detail-panel">
-          <div className="detail-stats">
-            <div><span className="metric-label"><Star size={15} />累计 Star</span><strong className="numeric">{number(repo.stars)}</strong></div>
-            <GrowthValue value={repo.growth24h} label="24h 净增" />
-            <GrowthValue value={repo.growth7d} label="7d 净增" />
-            <GrowthValue value={repo.growth30d} label="30d 净增" />
-          </div>
-          <TrendSection id={repo.id} />
-        </section>
-        <section className="panel detail-panel summary-panel">
-          <header className="section-head"><h2>AI 中文摘要</h2><Badge tone={repo.summaryStatus === 'ready' ? 'ok' : 'warning'}>{summaryLabel[repo.summaryStatus]}</Badge></header>
-          {repo.summaryZh ? <p className="summary-body">{repo.summaryZh}</p> :
-            <p className="muted">{repo.description ?? '暂无项目简介'}</p>}
-          {repo.summaryZh && <div className="summary-meta">
-            {repo.summarySourceQuality && <Badge tone={repo.summarySourceQuality === 'sufficient' ? 'neutral' : 'warning'}>{sourceLabel[repo.summarySourceQuality]}</Badge>}
-            {repo.summaryGeneratedAt && <time dateTime={repo.summaryGeneratedAt}>{timestamp(repo.summaryGeneratedAt)}</time>}
-            {repo.summaryModel && <span>{repo.summaryModel}</span>}
-            <External href={repo.sourceReadmeUrl}>README 来源</External>
-          </div>}
-          {repo.features.length > 0 && <div className="topic-links summary-tags">
-            {repo.features.map((tag) => <Badge key={tag}>{tag}</Badge>)}
-          </div>}
-          <SummaryActions key={repo.id} repo={repo} repoUpdatedAt={detail.dataUpdatedAt} />
-        </section>
-      </div>
-      <aside className="detail-aside">
-        <section className="panel detail-panel">
-          <header className="section-head"><h2>仓库信息</h2></header>
-          <dl className="definition-list">
-            <div><dt><GitFork size={15} />Fork</dt><dd className="numeric">{number(repo.forks)}</dd></div>
-            <div><dt><FileText size={15} />许可证</dt><dd>{repo.license === null ? '未声明' : repo.license.spdxId === 'NOASSERTION' ? '未识别许可' : repo.license.name ?? repo.license.spdxId ?? '未声明'}</dd></div>
-            <div><dt>最近采样</dt><dd>{timestamp(repo.lastSuccessAt)}</dd></div>
-            <div><dt>发现时间</dt><dd>{timestamp(repo.discoveredAt)}</dd></div>
-            {repo.followedAt && <div><dt>关注时间</dt><dd>{timestamp(repo.followedAt)}</dd></div>}
-          </dl>
-          <div className="topic-links">
-            {repo.categories.map((slug) => <Link key={slug} className="context-chip" to={'/categories/' + encodeURIComponent(slug)}>{names.get(slug) ?? slug}</Link>)}
-            {repo.valueTags.map((tag) => <Link key={tag} className="context-chip" to={'/repos?' + new URLSearchParams({ tag })}>{tag}</Link>)}
-          </div>
-          <RefreshAction key={repo.id} repoId={repo.id} />
-        </section>
-        <section className="panel detail-panel">
-          <header className="section-head"><h2>热点信号</h2></header>
-          <dl className="definition-list">
-            <div><dt>全局热度</dt><dd className="numeric">{repo.hotnessScore === null ? '待观察' : decimal(repo.hotnessScore)}</dd></div>
-            <div><dt>热度排名</dt><dd className="numeric">{repo.hotnessRank === null ? '—' : '#' + repo.hotnessRank}</dd></div>
-            <div><dt>评分质量</dt><dd>{qualityLabel[repo.dataQuality]}</dd></div>
-            <div><dt>最近计算</dt><dd>{timestamp(repo.metricsUpdatedAt)}</dd></div>
-            {repo.trendingEntries.map((entry) => <div key={entry.sourceKey + entry.period}>
-              <dt title={timestamp(entry.observedAt)}>GitHub {entry.sourceKey === 'all' ? '全站' : entry.sourceKey.replace('language:', '')} {entry.period === 'daily' ? '日榜' : entry.period === 'weekly' ? '周榜' : '月榜'}</dt>
-              <dd className="numeric">#{entry.rank}</dd>
-            </div>)}
-          </dl>
-          <AddTopic key={repo.id} repoId={repo.id} />
-        </section>
-      </aside>
+      <section id="summary" className="panel detail-panel summary-panel" aria-labelledby="repo-summary-title">
+        <header className="section-head"><h2 id="repo-summary-title">AI 中文摘要</h2><span className="minor muted">{summaryLabel[repo.summaryStatus]}</span></header>
+        <p className="summary-body">{repo.summaryZh || repo.description || '暂无项目简介'}</p>
+        {repo.features.length > 0 && <div className="topic-links">
+          {repo.features.map((tag) => <Badge key={tag}>{tag}</Badge>)}
+        </div>}
+        {repo.summaryZh && <div className="summary-meta">
+          {repo.summarySourceQuality && <span>{sourceLabel[repo.summarySourceQuality]}</span>}
+          {repo.summaryGeneratedAt && <time dateTime={repo.summaryGeneratedAt}>{timestamp(repo.summaryGeneratedAt)} 更新</time>}
+          {repo.summaryModel && <span>{repo.summaryModel}</span>}
+          <External href={repo.sourceReadmeUrl}>README 来源</External>
+        </div>}
+        {admin && <footer className="summary-footer"><SummaryActions key={repo.id} repo={repo} repoUpdatedAt={detail.dataUpdatedAt} /></footer>}
+      </section>
+      <DetailAside key={repo.id} repo={repo} names={names} admin={admin} />
+      <TrendSection repo={repo} range={range} trend={trend} />
     </div>
-  </>
+  </div>
+}
+
+function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<string, string>; admin: boolean }) {
+  const license = repo.license?.spdxId === 'NOASSERTION' ? '未识别许可' : repo.license?.name ?? repo.license?.spdxId ?? '未声明'
+  return <aside className="detail-aside" aria-label="仓库信息栏">
+    <section className="panel detail-side-card" aria-labelledby="repo-heat-title">
+      <h2 id="repo-heat-title">热点信号</h2>
+      <dl className="detail-side-facts">
+        <div><dt>全局热度</dt><dd className="numeric">{repo.hotnessScore === null ? '待观察' : decimal(repo.hotnessScore)}</dd></div>
+        <div><dt>评分质量</dt><dd>{qualityLabel[repo.dataQuality]}</dd></div>
+        {repo.metricsUpdatedAt && <div><dt>最近计算</dt><dd><time dateTime={repo.metricsUpdatedAt}>{timestamp(repo.metricsUpdatedAt)}</time></dd></div>}
+      </dl>
+      {repo.hotnessRank !== null && <Link className="detail-text-link minor" to="/trending?view=hotness">热点榜第 {repo.hotnessRank} 名</Link>}
+    </section>
+    <section className="panel detail-side-card" aria-labelledby="repo-source-title">
+      <h2 id="repo-source-title">GitHub 仓库</h2>
+      <div className="detail-origin"><External href={repo.htmlUrl}>{repo.fullName}</External></div>
+      {repo.summaryZh && repo.description && <p className="minor muted">{repo.description}</p>}
+      <dl className="detail-side-facts"><div><dt>许可证</dt><dd>{license}</dd></div></dl>
+      {repo.trendingEntries.length > 0 && <ul className="detail-source-list" aria-label="GitHub Trending 排名">
+        {repo.trendingEntries.map((entry) => <li key={entry.sourceKey + ':' + entry.period}>
+          <Link to={'/trending?' + new URLSearchParams({ view: 'official', source: entry.sourceKey + ':' + entry.period })}>
+            <span title={timestamp(entry.observedAt)}>{entry.sourceKey === 'all' ? '全站' : entry.sourceKey.replace('language:', '')} {periodLabel[entry.period]}</span>
+            <strong className="numeric">#{entry.rank}</strong>
+          </Link>
+        </li>)}
+      </ul>}
+      {admin && <div className="detail-side-actions"><MonitorButton repo={repo} full /><AddTopic repoId={repo.id} /></div>}
+    </section>
+    {(repo.categories.length > 0 || repo.valueTags.length > 0) && <section className="panel detail-side-card" aria-labelledby="repo-topics-title">
+      <h2 id="repo-topics-title">相关主题</h2>
+      <div className="topic-links">
+        {repo.categories.map((slug) => <Link key={slug} className="context-chip" to={'/categories/' + encodeURIComponent(slug)}>{names.get(slug) ?? slug}</Link>)}
+        {repo.valueTags.map((tag) => <Link key={'tag:' + tag} className="context-chip" to={'/repos?' + new URLSearchParams({ tag })}>{tag}</Link>)}
+      </div>
+    </section>}
+    <section className="panel detail-side-card" aria-labelledby="repo-record-title">
+      <h2 id="repo-record-title">监控记录</h2>
+      <dl className="detail-side-facts">
+        <div><dt>发现时间</dt><dd><time dateTime={repo.discoveredAt}>{timestamp(repo.discoveredAt)}</time></dd></div>
+        <div><dt>最近采样</dt><dd>{repo.lastSuccessAt ? <time dateTime={repo.lastSuccessAt}>{timestamp(repo.lastSuccessAt)}</time> : '等待采样'}</dd></div>
+        {repo.followedAt && <div><dt>加入重点监控时间</dt><dd><time dateTime={repo.followedAt}>{timestamp(repo.followedAt)}</time></dd></div>}
+      </dl>
+      {admin && <RefreshAction repoId={repo.id} />}
+    </section>
+  </aside>
 }
 
 function AddTopic({ repoId }: { repoId: number }) {
@@ -108,7 +170,7 @@ function AddTopic({ repoId }: { repoId: number }) {
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['topics'] }) },
   })
   return <div className="task-area">
-    {add.data ? <Link to="/topics" className="button">查看选题池</Link> :
+    {add.data ? <Link to="/admin/topics" className="button">查看选题池</Link> :
       <button className="button" onClick={() => add.mutate()} disabled={add.isPending}>
         {add.isPending ? <Spinner /> : <Plus size={17} />}加入选题池
       </button>}
@@ -116,20 +178,26 @@ function AddTopic({ repoId }: { repoId: number }) {
   </div>
 }
 
-function TrendSection({ id }: { id: number }) {
-  const [params, setParams] = useSearchParams()
-  const range = ranges.find(([key]) => key === params.get('range'))?.[0] ?? '7d'
-  const trend = useQuery({
-    queryKey: ['trend', id, range],
-    queryFn: ({ signal }) => api<Trend>('/repos/' + id + '/trend?range=' + range, { signal }),
-  })
+function TrendSection({ repo, range, trend }: { repo: RepoDetail; range: TrendRange; trend: UseQueryResult<Trend> }) {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const params = new URLSearchParams(location.search)
   const hasPoints = trend.data?.points.some(({ stars }) => stars !== null)
-  return <section className="trend-section">
-    <header className="section-head trend-head">
-      <h2>Star 趋势</h2>
-      <div className="pills wrap" aria-label="趋势范围">{ranges.map(([key, label]) => <button key={key} aria-pressed={range === key}
-        onClick={() => setParams({ range: key }, { preventScrollReset: true })}>{label}</button>)}</div>
-    </header>
+  return <section id="star-trend" className="panel detail-panel trend-section" aria-labelledby="repo-trend-title">
+    <h2 id="repo-trend-title">Star 趋势</h2>
+    <div className="trend-toolbar">
+      <div className="trend-stats">
+        <GrowthValue value={repo.growth24h} label="24h 净增" />
+        <GrowthValue value={repo.growth7d} label="7d 净增" />
+        <GrowthValue value={repo.growth30d} label="30d 净增" />
+      </div>
+      <div className="pills" role="group" aria-label="趋势范围">{ranges.map(([key, label]) => <button key={key} aria-pressed={range === key}
+        onClick={() => {
+          const next = new URLSearchParams(params)
+          next.set('range', key)
+          navigate({ search: next.toString(), hash: location.hash }, { preventScrollReset: true, state: location.state })
+        }}>{label}</button>)}</div>
+    </div>
     {trend.isPending ? <Skeleton rows={1} /> : trend.error && !trend.data
       ? <PageError error={trend.error} retry={() => { void trend.refetch() }} /> : hasPoints && trend.data
         ? <Suspense fallback={<Skeleton rows={1} />}><TrendChart data={trend.data} /></Suspense>

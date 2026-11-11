@@ -26,11 +26,15 @@ import (
 )
 
 type fixtureGitHub struct {
-	get    func() (gh.RepositoryResult, error)
-	search func(string, int) (gh.SearchPage, error)
+	get         func() (gh.RepositoryResult, error)
+	getWithETag func(string) (gh.RepositoryResult, error)
+	search      func(string, int) (gh.SearchPage, error)
 }
 
-func (f fixtureGitHub) Repository(context.Context, string, string, string, gh.Policy) (gh.RepositoryResult, error) {
+func (f fixtureGitHub) Repository(_ context.Context, _, _, etag string, _ gh.Policy) (gh.RepositoryResult, error) {
+	if f.getWithETag != nil {
+		return f.getWithETag(etag)
+	}
 	return f.get()
 }
 func (f fixtureGitHub) RepositoryByID(context.Context, int64, gh.Policy) (gh.RepositoryResult, error) {
@@ -271,6 +275,45 @@ func TestNotFoundConfirmationAndFailureNoSamples(t *testing.T) {
 	e.Queue.DB.Model(&storage.RepoSnapshot{}).Count(&count)
 	if count != 0 {
 		t.Fatal("失败请求不应生成样本")
+	}
+}
+
+func TestOldSampleAndRediscoveryKeepRepositoryWithdrawn(t *testing.T) {
+	e := newEngine(t)
+	src := source(1, "repo", 100)
+	discover(t, e, src)
+	e.GitHub = fixtureGitHub{get: func() (gh.RepositoryResult, error) {
+		// 模拟其他任务在这次采样已发出后确认仓库不可访问。
+		checked := time.Now().Add(time.Second).UnixMilli()
+		err := e.Queue.DB.Model(&storage.Repository{}).Where("repo_id=1").
+			Updates(map[string]any{"state": "unavailable", "first_not_found_at": checked, "last_checked_at": checked}).Error
+		return gh.RepositoryResult{Repository: src}, err
+	}}
+	manual(t, e, 1, "previously-started", time.Now())
+	step(t, e)
+	if repo := repository(t, e, 1); repo.State != "unavailable" || repo.FirstNotFoundAt == nil || repo.LastSuccessAt != nil {
+		t.Fatalf("已撤回的仓库不应被旧采样重新公开: %+v", repo)
+	}
+	discover(t, e, src)
+	if repo := repository(t, e, 1); repo.FirstNotFoundAt == nil {
+		t.Fatalf("发现结果不能清除不可访问标记: %+v", repo)
+	}
+	if err := e.Queue.DB.Model(&storage.Repository{}).Where("repo_id=1").Updates(map[string]any{
+		"last_checked_at": time.Now().Add(-time.Minute).UnixMilli(),
+		"last_success_at": time.Now().Add(-time.Hour).UnixMilli(), "metadata_etag": "previous-public-etag",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	e.GitHub = fixtureGitHub{getWithETag: func(etag string) (gh.RepositoryResult, error) {
+		if etag != "" {
+			t.Error("已撤回仓库重新确认时不应发送旧 ETag")
+		}
+		return gh.RepositoryResult{Repository: src}, nil
+	}}
+	manual(t, e, 1, "newly-confirmed", time.Now().Add(5*time.Minute))
+	step(t, e)
+	if repo := repository(t, e, 1); repo.FirstNotFoundAt != nil || repo.LastSuccessAt == nil {
+		t.Fatalf("新一次成功采样应恢复展示资格: %+v", repo)
 	}
 }
 

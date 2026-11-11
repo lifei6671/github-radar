@@ -1,7 +1,8 @@
 # 前端第三方许可与参考
 
-界面以 AIHOT 的导航外壳、阅读信息流和小趋势图为视觉与交互参考，固定上游提交为 `269765738daf6b15316fa69e504087a73f54738b`。本项目自行实现 React 组件、数据绑定、主题样式和品牌图标。 [AIHOT 源码与许可证](https://github.com/KKKKhazix/AIHOT/tree/269765738daf6b15316fa69e504087a73f54738b)
+界面以 AIHOT 的主题层次、导航外壳、阅读信息流和小趋势图为视觉与交互参考，固定上游提交为 `269765738daf6b15316fa69e504087a73f54738b`。本项目自行实现 React 组件、数据绑定、主题样式和品牌图标。 [AIHOT 源码与许可证](https://github.com/KKKKhazix/AIHOT/tree/269765738daf6b15316fa69e504087a73f54738b)
 
+- 主题层次参考 `apps/web/app/app.css` 的亮暗色语义。
 - 导航参考 `apps/web/app/components/shell`。
 - 信息流参考 `apps/web/app/features/feed`。
 - 小趋势图参考 `apps/web/app/features/hot/Sparkline.tsx` 的缺测断线表现。

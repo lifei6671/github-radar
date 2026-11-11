@@ -20,6 +20,8 @@ func (a *collectionAPI) registerSettings(system *gin.RouterGroup) {
 	system.PUT("/categories", a.putCategorySettings)
 	system.GET("/discovery-rules", a.getDiscoveryRules)
 	system.PUT("/discovery-rules", a.putDiscoveryRules)
+	system.GET("/discovery-tabs", a.getDiscoveryTabSettings)
+	system.PUT("/discovery-tabs", a.putDiscoveryTabSettings)
 }
 
 // decodeSettings 避免拼错字段时悄悄丢弃管理员设置。
@@ -65,7 +67,10 @@ func (a *collectionAPI) getRuntime(c *gin.Context) {
 }
 
 func (a *collectionAPI) putRuntime(c *gin.Context) {
-	var input settings.Snapshot
+	var input struct {
+		Revision int64          `json:"revision"`
+		Settings config.Runtime `json:"settings"`
+	}
 	if !decodeSettings(c, &input) {
 		return
 	}
@@ -137,4 +142,33 @@ func (a *collectionAPI) putDiscoveryRules(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"revision": revision, "items": items})
+}
+
+func (a *collectionAPI) getDiscoveryTabSettings(c *gin.Context) {
+	result, err := (settings.Store{DB: a.db}).DiscoveryTabSettings(c.Request.Context())
+	if err != nil {
+		a.settingsFailure(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (a *collectionAPI) putDiscoveryTabSettings(c *gin.Context) {
+	var input struct {
+		Revision int64                   `json:"revision"`
+		Items    []settings.DiscoveryTab `json:"items"`
+	}
+	if !decodeSettings(c, &input) {
+		return
+	}
+	if input.Revision < 1 || input.Items == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings"})
+		return
+	}
+	result, err := (settings.Store{DB: a.db}).SaveDiscoveryTabs(c.Request.Context(), input.Revision, input.Items)
+	if err != nil {
+		a.settingsFailure(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }

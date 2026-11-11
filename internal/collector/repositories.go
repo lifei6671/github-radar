@@ -89,9 +89,9 @@ func (q Queue) discover(tx *gorm.DB, source *sdk.Repository, at int64) error {
 		values = metadata(source)
 		values["last_discovered_at"], values["updated_at"] = max(at, repo.LastDiscoveredAt), at
 		values["name_is_current"], values["metadata_etag"] = true, nil
+		// 只有成功采样才能清除不可访问标记，避免搜索索引提前恢复公开展示。
 		if repo.State == "unavailable" || repo.State == "address_pending" {
 			values["state"] = "paused"
-			values["first_not_found_at"] = nil
 		}
 	}
 	if source.GetDisabled() {

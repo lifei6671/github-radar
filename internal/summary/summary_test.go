@@ -456,12 +456,16 @@ func TestReadmeVisibilityChangesBeforeModel(t *testing.T) {
 	schedule(t, e)
 	step(t, e)
 	job := row[storage.Job](t, e.Queue.DB, "repo_id=1 AND type=?", JobType)
+	repo := row[storage.Repository](t, e.Queue.DB, "repo_id=1")
 	var calls int64
 	if err := e.Queue.DB.Model(&storage.AICall{}).Count(&calls).Error; err != nil {
 		t.Fatal(err)
 	}
 	if job.Status != "dead" || job.LastErrorCode == nil || *job.LastErrorCode != "summary_repo_unavailable" || calls != 0 {
 		t.Fatalf("仓库在获取正文期间转私有，应终止且不计费: %+v calls=%d", job, calls)
+	}
+	if repo.State != "unavailable" || repo.FirstNotFoundAt == nil {
+		t.Fatalf("已确认变私有的仓库应撤回公开展示: %+v", repo)
 	}
 }
 

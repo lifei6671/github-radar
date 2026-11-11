@@ -1,16 +1,16 @@
 import { expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
-import type { Job, Quality, RepoDetail, Topic } from '../src/api/types'
+import type { CategorySetting, DiscoveryTab, Job, Limits, ListSettings, Quality, RepoDetail, RuleSetting, Topic } from '../src/api/types'
 
 const at = '2026-11-11T12:00:00Z'
 const admin = 'fixture-token'
 const categories = [
-  { slug: 'agent', name: 'AI 智能体', count: 102 },
-  { slug: 'coding', name: 'AI 编程', count: 85 },
-  { slug: 'mcp', name: 'MCP', count: 43 },
-  { slug: 'media', name: 'AI 多媒体', count: 28 },
-  { slug: 'tools', name: '开发者工具', count: 71 },
-  { slug: 'other', name: '其他', count: 22 },
+  { slug: 'agent', name: 'AI 智能体' },
+  { slug: 'coding', name: 'AI 编程' },
+  { slug: 'mcp', name: 'MCP' },
+  { slug: 'media', name: 'AI 多媒体' },
+  { slug: 'tools', name: '开发者工具' },
+  { slug: 'other', name: '其他' },
 ]
 const names = ['vercel/ai', 'openai/codex', 'pydantic/pydantic-ai', 'modelcontextprotocol/servers', 'astral-sh/ruff', 'charmbracelet/gum']
 const titles = ['用于构建 AI 应用的 TypeScript 工具包', '在终端中运行的开源代码智能体', '面向生产应用的 Python 智能体框架', 'Model Context Protocol 服务端实现集合', '以 Rust 编写的 Python 代码检查工具', '用于构建交互式 Shell 脚本的组件']
@@ -56,27 +56,51 @@ function reply(route: Route, json: unknown, status = 200) {
   return route.fulfill({ status, json })
 }
 
+function published(repo: RepoDetail) {
+  const item = { ...repo, summaryStatus: repo.summaryStatus === 'stale' ? 'stale' : repo.summaryZh ? 'ready' : 'missing' }
+  delete item.followed
+  delete item.followedAt
+  delete item.summaryJobId
+  delete item.summaryModel
+  return item
+}
+
 function barrier() {
   let resolve!: () => void
   const promise = new Promise<void>((release) => { resolve = release })
   return { promise, resolve }
 }
 
-export async function mockRadar(page: Page, startInitialized = true) {
+export async function mockRadar(page: Page, startInitialized = true, withTopicArchive = false) {
   let initialized = startInitialized
   let authorized = true
   let revision = 1
   let conflict = false
+  let systemLimits: Limits = {
+    githubConfigured: true, waitingTaskCount: 2, items: [{ resource: 'core', limit: 5000, remaining: 4837, resetAt: at, pausedUntil: null, localRequests: 163 }],
+    ai: { auto: { used: 9, limit: 50 }, manual: { used: 0, limit: 20 }, resetAt: at },
+  }
   let delayedSave: { status: 200 | 401; started: () => void; gate: Promise<void> } | null = null
   let delayedFeedback: { started: () => void; gate: Promise<void> } | null = null
   let runtime = { ai: { enabled: true, baseUrl: '', model: 'fixture-model', summary: { workers: 1 } }, recommendations: { enabled: true, hour: 8, minute: 30 } }
+  let ruleSettings: ListSettings<RuleSetting> = { revision: 1, items: [
+    { sourceType: 'trending', sourceKey: 'all:daily', query: '', enabled: true, intervalMinutes: 60, priority: 20 },
+    { sourceType: 'search', sourceKey: 'coding', query: 'topic:code-assistant stars:>50', enabled: false, intervalMinutes: 30, priority: 20 },
+  ] }
+  let categorySettings: ListSettings<CategorySetting> = { revision: 1, items: [{ slug: 'agent', name: 'AI 智能体', anyTopics: ['agent'] }] }
+  let discoveryTabs = categories.map(({ slug }) => ({ slug, label: '' }))
   let topic: Topic = {
     id: 1, repoId: 1, fullName: names[0], titleZh: titles[0], readerValue: '工具调用与流式输出',
     sourceUrl: 'https://github.com/vercel/ai', summaryZh: repository(0).summaryZh, valueTags: ['开发工具'],
     reason: '24 小时精确净增长', topicScore: 81, hotnessScore: 93.8, recommendationScore: 86.1,
-    status: 'candidate', feedback: null, reviewedAt: null, updatedAt: at,
+    status: 'candidate', feedback: null, reviewedAt: null, createdAt: at, updatedAt: at,
   }
+  const archivedTopics: Topic[] = withTopicArchive ? [
+    { ...topic, id: 2, repoId: 2, titleZh: titles[1], fullName: names[1], status: 'accepted', createdAt: '2026-11-11T11:00:00Z' },
+    { ...topic, id: 3, repoId: 3, titleZh: titles[2], fullName: names[2], createdAt: '2026-10-31T12:00:00Z' },
+  ] : []
   let job: Job | null = null
+  let recentJobs: Job[] = []
   let jobPolls = 0
   const requests: string[] = []
   const attempts: unknown[] = []
@@ -84,11 +108,19 @@ export async function mockRadar(page: Page, startInitialized = true) {
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
-    const path = url.pathname.slice('/api/v1'.length)
+    const relative = url.pathname.slice('/api/v1'.length)
+    const publicRead = relative.startsWith('/public/')
+    const path = publicRead ? relative.slice('/public'.length) : relative
     const method = request.method()
     const query = url.searchParams
     requests.push(method + ' ' + path + url.search)
-    if (!authorized || request.headers().authorization !== 'Bearer ' + admin) return reply(route, { code: 'unauthorized' }, 401)
+    if (publicRead) {
+      expect(request.headers().authorization).toBeUndefined()
+      if (method !== 'GET' || !/^\/(?:categories|discovery-tabs|trending(?:\/sources)?|repos(?:\/\d+(?:\/trend)?)?)$/.test(path)) {
+        return reply(route, { code: 'not_found' }, 404)
+      }
+      if (query.get('followed') === 'true') return reply(route, { code: 'invalid_filter' }, 400)
+    } else if (!authorized || request.headers().authorization !== 'Bearer ' + admin) return reply(route, { code: 'unauthorized' }, 401)
     if (path === '/setup/status') return reply(route, { initialized })
     if (path === '/system/backup/status') return reply(route, { initialized, restoring: false, maintenance: false })
     if (path === '/setup/initialize' && method === 'POST') {
@@ -96,26 +128,38 @@ export async function mockRadar(page: Page, startInitialized = true) {
       return reply(route, { initialized })
     }
     if (!initialized) return reply(route, { code: 'setup_required' }, 503)
-    if (path === '/categories') return reply(route, { items: categories })
+    if (path === '/discovery-tabs') return reply(route, { items: discoveryTabs.map(({ slug, label }) => ({
+      slug, name: label || categories.find((option) => option.slug === slug)?.name,
+    })) })
+    if (path === '/categories') return reply(route, { items: categories.map((category) => {
+      const matches = repos.filter((repo) => repo.categories.includes(category.slug))
+      const latest = matches[0]
+      const latestRepo = latest ? { id: latest.id, fullName: latest.fullName, description: latest.description, discoveredAt: latest.discoveredAt } : null
+      return { ...category, count: matches.length, latestRepo }
+    }) })
     if (path === '/repos') {
       const categoriesWanted = query.getAll('category')
       const filtered = repos.filter((repo) =>
         (!query.get('q') || repo.fullName.includes(query.get('q')!)) &&
         (!categoriesWanted.length || repo.categories.some((category) => categoriesWanted.includes(category))) &&
         (!query.get('grade') || repo.grade === query.get('grade')) &&
+        (!query.get('state') || repo.state === query.get('state')) &&
         (!query.get('language') || repo.language === query.get('language')) &&
         (query.get('followed') !== 'true' || repo.followed))
       const limit = query.get('limit') === '6' ? 6 : 5
       const offset = query.get('cursor') === 'opaque+cursor=1' ? limit : 0
-      return reply(route, { items: filtered.slice(offset, offset + limit), nextCursor: offset + limit < filtered.length ? 'opaque+cursor=1' : null, updatedAt: at })
+      const items = filtered.slice(offset, offset + limit)
+      return reply(route, { items: publicRead ? items.map(published) : items, nextCursor: offset + limit < filtered.length ? 'opaque+cursor=1' : null, updatedAt: at })
     }
-    if (path === '/trending') return reply(route, { sourceKey: 'all', period: 'daily', updatedAt: at, batch: { observedSlot: 1, observedAt: at }, items: repos.slice(0, 3) })
+    if (path === '/trending/sources') return reply(route, { items: [{ sourceKey: 'all:daily' }] })
+    if (path === '/trending') return reply(route, { sourceKey: 'all', period: 'daily', updatedAt: at,
+      batch: { observedSlot: 1, observedAt: at }, items: publicRead ? repos.slice(0, 3).map(published) : repos.slice(0, 3) })
     const match = path.match(/^\/repos\/(\d+)(?:\/(.+))?$/)
     if (match) {
       const repo = repos[Number(match[1]) - 1]
       if (!repo) return reply(route, { code: 'not_found' }, 404)
       const action = match[2]
-      if (!action) return reply(route, repo)
+      if (!action) return reply(route, publicRead ? published(repo) : repo)
       if (action === 'trend') {
         const samples = query.get('range') === '180d'
           ? Array.from({ length: 180 }, (_, index) => ({
@@ -155,7 +199,23 @@ export async function mockRadar(page: Page, startInitialized = true) {
       jobPolls = 0
       return reply(route, { jobId: job.id, statusUrl: '/api/v1/jobs/' + job.id }, 202)
     }
-    if (path === '/topics') return reply(route, { items: !query.get('status') || query.get('status') === topic.status ? [topic] : [], nextCursor: null, updatedAt: at })
+    if (path === '/topics/days' || path === '/topics') {
+      const matching = [topic, ...archivedTopics].filter((item) => !query.get('status') || query.get('status') === item.status)
+      if (path === '/topics/days') {
+        const days = new Map<string, { day: string; title: string; count: number }>()
+        for (const item of matching) {
+          const day = item.createdAt.slice(0, 10)
+          const entry = days.get(day)
+          if (entry) entry.count++
+          else days.set(day, { day, title: item.titleZh, count: 1 })
+        }
+        return reply(route, { items: [...days.values()] })
+      }
+      return reply(route, {
+        items: matching.filter((item) => !query.get('day') || item.createdAt.startsWith(query.get('day')!)),
+        nextCursor: null, updatedAt: at,
+      })
+    }
     if (path === '/topics/1' && method === 'PATCH') {
       if (delayedFeedback) {
         const pending = delayedFeedback
@@ -189,13 +249,33 @@ export async function mockRadar(page: Page, startInitialized = true) {
       }
       return reply(route, { revision, settings: runtime, restartRequired: revision > 2 })
     }
-    if (path === '/system/discovery-rules') return reply(route, { revision, items: [{ sourceType: 'trending', sourceKey: 'all:daily', query: '', enabled: true, intervalMinutes: 60, priority: 20 }] })
-    if (path === '/system/categories') return reply(route, { revision, items: [{ slug: 'agent', name: 'AI 智能体', anyTopics: ['agent'] }] })
-    if (path === '/system/jobs') return reply(route, { items: job ? [job] : [] })
-    if (path === '/system/limits') return reply(route, {
-      githubConfigured: true, waitingTaskCount: 2, items: [{ resource: 'core', limit: 5000, remaining: 4837, resetAt: at, pausedUntil: null, localRequests: 163 }],
-      ai: { auto: { used: 9, limit: 50 }, manual: { used: 0, limit: 20 }, resetAt: at },
-    })
+    if (path === '/system/discovery-rules') {
+      if (method === 'PUT') {
+        const body: ListSettings<RuleSetting> = request.postDataJSON()
+        if (body.revision !== ruleSettings.revision) return reply(route, { code: 'settings_conflict' }, 409)
+        ruleSettings = { items: body.items, revision: body.revision + 1 }
+      }
+      return reply(route, ruleSettings)
+    }
+    if (path === '/system/categories') {
+      if (method === 'PUT') {
+        const body: ListSettings<CategorySetting> = request.postDataJSON()
+        if (body.revision !== categorySettings.revision) return reply(route, { code: 'settings_conflict' }, 409)
+        categorySettings = { items: body.items, revision: body.revision + 1 }
+      }
+      return reply(route, categorySettings)
+    }
+    if (path === '/system/discovery-tabs') {
+      if (method === 'PUT') {
+        const body: ListSettings<DiscoveryTab> = request.postDataJSON()
+        if (body.revision !== revision) return reply(route, { code: 'settings_conflict' }, 409)
+        discoveryTabs = body.items
+        revision++
+      }
+      return reply(route, { revision, items: discoveryTabs, options: categories })
+    }
+    if (path === '/system/jobs') return reply(route, { items: (job ? [job, ...recentJobs] : recentJobs.slice()).sort((a, b) => b.id - a.id) })
+    if (path === '/system/limits') return reply(route, systemLimits)
     if (path === '/system/storage') return reply(route, {
       databaseBytes: 4_096_000, walBytes: 0, pageCount: 1000, freelistCount: 12,
       counts: { raw: 4000, hourly: 1200, daily: 52 }, watermarks: { hourly: at, daily: at, cleanedAt: at, metricsUpdatedAt: at },
@@ -206,13 +286,19 @@ export async function mockRadar(page: Page, startInitialized = true) {
 
   return {
     requests, attempts,
+    setLimits: (values: Partial<Limits>) => { systemLimits = { ...systemLimits, ...values } },
+    setRecentJobs: (items: Job[]) => { recentJobs = items },
     completeSetup: () => { initialized = true },
     renameFirstRepo: (fullName: string) => { repos[0].fullName = fullName },
+    setRepoState: (id: number, state: RepoDetail['state']) => { repos[id - 1].state = state },
     expire: () => { authorized = false },
     conflict: () => { conflict = true },
-    unknown: (id = 31) => {
+    updateRule: (key: string, change: Partial<RuleSetting>) => {
+      ruleSettings = { revision: ruleSettings.revision + 1, items: ruleSettings.items.map((item) => item.sourceKey === key ? { ...item, ...change } : item) }
+    },
+    unknown: (id = 31, updatedAt = at) => {
       job = { id, type: 'refresh_readme_summary', status: 'unknown', attempts: 1, maxAttempts: 4, errorCode: 'ai_delivery_unknown',
-        repoId: 1, createdAt: at, updatedAt: at }
+        repoId: 1, createdAt: at, updatedAt }
       repos[0].summaryJobId = id
       repos[0].summaryStatus = 'unknown'
     },
@@ -233,7 +319,7 @@ export async function mockRadar(page: Page, startInitialized = true) {
 
 export async function login(page: Page, token = admin) {
   await page.getByLabel('管理员令牌').fill(token)
-  await page.getByRole('button', { name: '连接', exact: true }).click()
+  await page.getByRole('button', { name: '登录', exact: true }).click()
 }
 
 export async function session(page: Page) {

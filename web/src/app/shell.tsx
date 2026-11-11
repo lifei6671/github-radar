@@ -1,57 +1,98 @@
 import { QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, ArrowDownRight, ArrowRight, ChartNoAxesCombined, CircleUserRound, Command, FolderOpen,
-  Layers3, ListFilter, LogOut, Moon, Radar, Search, Star, Sun, Workflow,
+  Activity, ArrowDownRight, ArrowRight, Bookmark, ChartNoAxesCombined, Crosshair, Ellipsis, FolderOpen, Github, LayoutDashboard,
+  Layers3, ListFilter, LogOut, Monitor, Moon, Radar, Search, Sun, Workflow,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useNavigate } from 'react-router'
+import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router'
 import { api, ApiError, errorText, setToken, useSession } from '../api/client'
 import { BackToTop, Dialog, Notice, PageError, Skeleton, Spinner } from '../components/ui'
 import { SetupBackup, useBackupStatus, useRestoredData } from '../pages/backup'
 
-const navigation = [
+const publicNav = [
   { path: '/', label: '发现', icon: Radar },
-  { path: '/trending', label: '热点榜', icon: ChartNoAxesCombined },
   { path: '/repos', label: '全部项目', icon: Layers3 },
+  { path: '/trending', label: '热点榜', icon: ChartNoAxesCombined },
   { path: '/categories', label: '技术主题', icon: FolderOpen },
-  { path: '/topics', label: '选题池', icon: Workflow },
-  { path: '/watchlist', label: '我的关注', icon: Star },
-  { path: '/system', label: '运行状态', icon: Activity },
+  { path: '/starred', label: '收藏', icon: Bookmark },
 ]
+const adminNav = [
+  { path: '/admin/repos', label: '仓库管理', icon: Layers3 },
+  { path: '/admin/watchlist', label: '重点监控', icon: Crosshair },
+  { path: '/admin/topics', label: '选题池', icon: Workflow },
+  { path: '/admin/runs', label: '运行状态', icon: Activity },
+]
+const adminEntry = { path: '/admin', label: '后台管理', icon: LayoutDashboard }
+const publicMobile = [publicNav[0], { ...publicNav[1], label: '项目' }, publicNav[2], publicNav[4]]
+const publicMore = [publicNav[3], adminEntry]
 
-function Brand() {
+function Brand({ admin = false }: { admin?: boolean }) {
   return <div className="brand">
     <img src="/radar.svg" alt="" width="34" height="34" />
-    <span>GitHub 雷达</span>
+    <span>{admin ? 'GitHub 雷达后台' : 'GitHub 雷达'}</span>
   </div>
 }
 
-function ThemeButton() {
+function useTheme() {
   const [dark, setDark] = useState(() => document.documentElement.classList.contains('dark'))
-  const label = dark ? '切换浅色主题' : '切换深色主题'
+  const [preference, setPreference] = useState(() => {
+    try { return localStorage.getItem('radar.theme') } catch { return null }
+  })
   useEffect(() => {
     const media = matchMedia('(prefers-color-scheme: dark)')
     const sync = () => {
-      try { if (localStorage.getItem('radar.theme')) return } catch { /* 按系统偏好显示。 */ }
+      if (preference) return
       setDark(media.matches)
       document.documentElement.className = media.matches ? 'dark' : 'light'
     }
     media.addEventListener('change', sync)
     return () => media.removeEventListener('change', sync)
-  }, [])
-  function toggle() {
-    const theme = dark ? 'light' : 'dark'
-    document.documentElement.className = theme
-    try { localStorage.setItem('radar.theme', theme) } catch { /* 当前页面仍切换主题。 */ }
-    setDark(!dark)
+  }, [preference])
+  function choose(mode: 'dark' | 'light' | null) {
+    const nextDark = mode === null ? matchMedia('(prefers-color-scheme: dark)').matches : mode === 'dark'
+    document.documentElement.className = nextDark ? 'dark' : 'light'
+    try {
+      if (mode === null) localStorage.removeItem('radar.theme')
+      else localStorage.setItem('radar.theme', mode)
+    } catch { /* 当前页面仍可切换主题。 */ }
+    setPreference(mode)
+    setDark(nextDark)
   }
-  return <button className="icon-button" onClick={toggle} aria-label={label} title={label}>
+  return { dark, preference, choose }
+}
+
+function ThemeButton() {
+  return <ThemeControl theme={useTheme()} />
+}
+
+function ThemeControl({ theme: { dark, preference, choose }, segmented = false }: {
+  theme: ReturnType<typeof useTheme>; segmented?: boolean
+}) {
+  const label = dark ? '切换浅色主题' : '切换深色主题'
+  if (segmented) return <div className="side-theme" role="group" aria-label="显示主题">
+    <button className="icon-button" aria-label="切换深色主题" title="深色" aria-pressed={preference === 'dark'} onClick={() => choose('dark')}><Moon size={15} /></button>
+    <button className="icon-button" aria-label="跟随系统主题" title="跟随系统" aria-pressed={preference === null} onClick={() => choose(null)}><Monitor size={15} /></button>
+    <button className="icon-button" aria-label="切换浅色主题" title="浅色" aria-pressed={preference === 'light'} onClick={() => choose('light')}><Sun size={15} /></button>
+  </div>
+  return <button className="icon-button" onClick={() => choose(dark ? 'light' : 'dark')} aria-label={label} title={label}>
     {dark ? <Sun size={18} /> : <Moon size={18} />}
   </button>
 }
 
-function Login() {
+function adminReturn(raw: string | null, allowSetup = false) {
+  if (!raw?.startsWith('/admin')) return '/admin/runs'
+  const url = new URL(raw, window.location.origin)
+  if (url.pathname !== '/admin' && !url.pathname.startsWith('/admin/')) return '/admin/runs'
+  const path = url.pathname.replace(/\/+$/, '')
+  if (path === '/admin/login' || (!allowSetup && path === '/admin/setup')) return '/admin/runs'
+  return url.pathname + url.search + url.hash
+}
+
+export function AdminLogin() {
+  const { token } = useSession()
+  const [params] = useSearchParams()
+  const destination = adminReturn(params.get('return'), true)
   const [input, setInput] = useState('')
   const auth = useMutation({
     mutationFn: (credential: string) => api<{ initialized: boolean }>('/setup/status', { token: credential }),
@@ -61,17 +102,12 @@ function Login() {
     event.preventDefault()
     if (input.trim() && !auth.isPending) auth.mutate(input.trim())
   }
+  if (token) return <Navigate to={destination} replace />
   return <main className="login-page">
-    <div className="login-top"><Brand /><ThemeButton /></div>
+    <div className="login-top"><Link to="/"><Brand /></Link><ThemeButton /></div>
     <div className="login-layout">
-      <div className="login-visual" aria-hidden="true">
-        <div className="radar-grid"><div className="radar-ring" /><div className="radar-ring" /><div className="radar-ring" /><div className="radar-ring" />
-          <i className="radar-point radar-point-a" /><i className="radar-point radar-point-b" /><i className="radar-point radar-point-c" />
-          <div className="radar-axis" /><div className="radar-ray" />
-        </div>
-      </div>
-      <form className="login-form" onSubmit={submit}>
-        <h1>连接 GitHub 雷达</h1>
+      <form className="panel login-form" onSubmit={submit}>
+        <h1>登录雷达后台</h1>
         <label className="field">
           管理员令牌
           <input type="password" name="adminToken" autoComplete="off" spellCheck={false}
@@ -79,21 +115,22 @@ function Login() {
         </label>
         {auth.error && <Notice error>{errorText(auth.error)}</Notice>}
         <button className="button primary" disabled={auth.isPending || !input.trim()}>
-          {auth.isPending ? <Spinner /> : <ArrowRight size={17} />}连接
+          {auth.isPending ? <Spinner /> : <ArrowRight size={17} />}登录
         </button>
+        <Link to="/" className="admin-link">返回前台</Link>
       </form>
     </div>
   </main>
 }
 
-function SearchBox({ close }: { close: () => void }) {
+function SearchBox({ close, admin }: { close: () => void; admin: boolean }) {
   const navigate = useNavigate()
   const [q, setQ] = useState('')
   function submit(event: FormEvent) {
     event.preventDefault()
     if (!q.trim()) return
     close()
-    navigate('/repos?' + new URLSearchParams({ q: q.trim() }))
+    navigate((admin ? '/admin/repos?' : '/repos?') + new URLSearchParams({ q: q.trim() }))
   }
   return <Dialog title="搜索仓库" onClose={close}>
     <form className="dialog-form" onSubmit={submit}>
@@ -103,12 +140,15 @@ function SearchBox({ close }: { close: () => void }) {
   </Dialog>
 }
 
-function Shell({ maintenance }: { maintenance: boolean }) {
+function Shell({ admin = false, maintenance = false }: { admin?: boolean; maintenance?: boolean }) {
   const [search, setSearch] = useState(false)
+  const [more, setMore] = useState(false)
+  const theme = useTheme()
   const location = useLocation()
-  const mobile = [navigation[0], navigation[1], navigation[4], navigation[5], { ...navigation[6], label: '更多', icon: CircleUserRound }]
-  const page = navigation.find(({ path }) => path !== '/' && location.pathname.startsWith(path))?.label
-  const showMaintenance = maintenance && (location.pathname !== '/system' || new URLSearchParams(location.search).get('tab') !== 'backup')
+  const system = location.pathname.replace(/\/+$/, '') === '/admin/runs'
+  const navigation = admin ? adminNav : publicNav
+  const page = navigation.find(({ path }) => path !== '/' && (location.pathname === path || location.pathname.startsWith(path + '/')))?.label
+  const showMaintenance = maintenance && (!system || new URLSearchParams(location.search).get('tab') !== 'backup')
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -121,74 +161,110 @@ function Shell({ maintenance }: { maintenance: boolean }) {
   }, [])
   return <>
     <a className="skip-link" href="#main">跳到主要内容</a>
-    <aside className="sidebar">
-      <Link to="/" className="brand-link" aria-label="GitHub 雷达首页"><Brand /></Link>
-      <button className="side-search" onClick={() => setSearch(true)} aria-label="搜索仓库" title="搜索仓库">
-        <Search size={17} /><span>搜索仓库</span><kbd><Command size={12} />K</kbd>
-      </button>
+    <aside className={'sidebar' + (admin ? ' admin-sidebar' : '')}>
+      <Link to={admin ? '/admin/runs' : '/'} className="brand-link" aria-label={admin ? 'GitHub 雷达后台首页' : 'GitHub 雷达首页'}><Brand admin={admin} /></Link>
       <nav aria-label="主导航" className="side-nav">
-        {navigation.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'} title={label}>
-          <Icon size={19} strokeWidth={1.7} /><span>{label}</span>
-        </NavLink>)}
+        <div className="side-nav-group">
+          {navigation.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'} title={label}>
+            <Icon size={17} strokeWidth={1.7} /><span>{label}</span>
+          </NavLink>)}
+        </div>
       </nav>
-      <div className="side-bottom"><ThemeButton /><button className="icon-button" aria-label="退出会话" title="退出会话" onClick={() => setToken(null)}><LogOut size={18} /></button></div>
+      <div className="side-bottom">
+        <Link to={admin ? '/' : adminEntry.path} className="side-action" aria-label={admin ? '返回前台' : adminEntry.label} title={admin ? '返回前台' : adminEntry.label}>
+          {admin ? <Radar size={16} /> : <LayoutDashboard size={16} />}<span>{admin ? '返回前台' : adminEntry.label}</span>
+        </Link>
+        <a href="https://github.com/lifei6671/github-radar" target="_blank" rel="noopener noreferrer" className="side-action"
+          aria-label="GitHub 开源" title="GitHub 开源"><Github size={16} aria-hidden /><span>GitHub 开源</span></a>
+        <div className="side-utility"><ThemeControl theme={theme} segmented />{admin && <button className="icon-button" aria-label="退出会话" title="退出会话" onClick={() => setToken(null)}><LogOut size={17} /></button>}</div>
+      </div>
     </aside>
     <header className="mobile-bar">
-      <Link to="/" aria-label="GitHub 雷达首页"><Brand /></Link>
+      <Link to="/" aria-label={admin ? '返回前台' : 'GitHub 雷达首页'}><Brand admin={admin} /></Link>
       <div className="mobile-actions">
         <button className="icon-button" aria-label="搜索仓库" onClick={() => setSearch(true)}><Search size={19} /></button>
-        <ThemeButton />
-        {location.pathname === '/system' && <button className="icon-button" aria-label="退出会话" onClick={() => setToken(null)}><LogOut size={18} /></button>}
+        <ThemeControl theme={theme} />
+        {admin && <button className="icon-button" aria-label="退出会话" onClick={() => setToken(null)}><LogOut size={18} /></button>}
       </div>
     </header>
     <main id="main" className="main" aria-label={page ?? '发现'} tabIndex={-1}><div className="content">
       {showMaintenance ? <section className="panel system-panel">
         <Notice>恢复期间暂不可访问项目数据。</Notice>
-        <Link className="button" to="/system?tab=backup">查看恢复进度</Link>
+        {admin && <Link className="button" to="/admin/runs?tab=backup">查看恢复进度</Link>}
       </section> : <Outlet />}
     </div></main>
     <nav aria-label="手机导航" className="mobile-nav">
-      {mobile.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'}>
+      {(admin ? adminNav : publicMobile).map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'}>
         <Icon size={20} strokeWidth={1.7} /><span>{label}</span>
       </NavLink>)}
+      {!admin && <button className={publicMore.some(({ path }) => location.pathname.startsWith(path)) ? 'active' : undefined}
+        aria-haspopup="dialog" onClick={() => setMore(true)}><Ellipsis size={20} /><span>更多</span></button>}
     </nav>
-    {search && <SearchBox close={() => setSearch(false)} />}
+    {more && <Dialog title="更多" onClose={() => setMore(false)}>
+      <nav className="side-nav" aria-label="更多页面">
+        {publicMore.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} onClick={() => setMore(false)}><Icon size={17} />{label}</NavLink>)}
+      </nav>
+    </Dialog>}
+    {search && <SearchBox admin={admin} close={() => setSearch(false)} />}
     <BackToTop />
-    <ScrollRestoration getKey={({ pathname, search }) => pathname + search} />
+    <ScrollRestoration getKey={({ key, pathname, search }) =>
+      // 仓库章节可以共享同一路径和查询，历史条目需要各自保存滚动位置。
+      pathname.startsWith('/repos/') || pathname.startsWith('/admin/repos/') ? key : pathname + search
+    } />
   </>
 }
 
 export function Root() {
   const { token, client, generation } = useSession()
-  return <QueryClientProvider key={generation} client={client}>{token ? <Authenticated /> : <Login />}</QueryClientProvider>
+  return <QueryClientProvider key={generation} client={client}><SessionContent authenticated={Boolean(token)} /></QueryClientProvider>
 }
 
-function Authenticated() {
-  const location = useLocation()
-  const backup = useBackupStatus()
+function SessionContent({ authenticated }: { authenticated: boolean }) {
+  const backup = useBackupStatus(authenticated)
   useRestoredData(backup.data)
+  return <Outlet context={Boolean(backup.data?.maintenance)} />
+}
+
+export function PublicLayout() {
+  return <Shell maintenance={useOutletContext<boolean>()} />
+}
+
+export function LegacyAdminPage({ to }: { to: string }) {
+  const { search, hash } = useLocation()
+  return <Navigate to={to + search + hash} replace />
+}
+
+export function AdminLayout() {
+  const { token } = useSession()
+  const { pathname, search, hash } = useLocation()
+  const maintenance = useOutletContext<boolean>()
+  const destination = pathname + search + hash
+  const setup = pathname.replace(/\/+$/, '') === '/admin/setup'
   const status = useQuery({
     queryKey: ['setup'],
     queryFn: ({ signal }) => api<{ initialized: boolean }>('/setup/status', { signal }),
+    enabled: Boolean(token),
     staleTime: 60_000,
   })
+  // 管理页面只有通过会话检查后才挂载，并继续保留原来的深链接。
+  if (!token) return <Navigate to={'/admin/login?' + new URLSearchParams({ return: destination })} replace />
   if (status.isPending) return <main className="standalone"><Brand /><Skeleton rows={1} /></main>
   if (status.error) return <main className="standalone"><Brand /><PageError error={status.error} retry={() => { void status.refetch() }} /></main>
-  if (!status.data.initialized && location.pathname !== '/setup') {
-    return <Navigate to="/setup" replace state={{ from: location.pathname + location.search }} />
+  if (!status.data.initialized && !setup) {
+    return <Navigate to={'/admin/setup?' + new URLSearchParams({ return: destination })} replace />
   }
-  if (location.pathname === '/setup') return <Outlet />
-  return <Shell maintenance={Boolean(backup.data?.maintenance)} />
+  if (setup) return <Outlet />
+  return <Shell admin maintenance={maintenance} />
 }
 
 export function Setup() {
-  const location = useLocation()
+  const [params] = useSearchParams()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const state = queryClient.getQueryData<{ initialized: boolean }>(['setup'])
   const [restoring, setRestoring] = useState(false)
-  const from: unknown = location.state?.from
-  const destination = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') && from !== '/setup' ? from : '/'
+  const returnTo = params.get('return')
+  const destination = returnTo ? adminReturn(returnTo) : '/'
   const setup = useMutation({
     mutationFn: () => api<{ initialized: boolean }>('/setup/initialize', { method: 'POST' }),
     onSuccess: () => {

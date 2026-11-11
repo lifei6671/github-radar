@@ -66,9 +66,9 @@ interface RequestOptions {
 }
 
 // API 仅使用同源请求。迟到的旧会话 401 不应清除新会话。
-export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function request<T>(path: string, options: RequestOptions, anonymous: boolean): Promise<T> {
   const requestedSession = session
-  const usedToken = options.token ?? requestedSession.token
+  const usedToken = anonymous ? null : options.token ?? requestedSession.token
   const headers = new Headers({ Accept: 'application/json' })
   if (usedToken) headers.set('Authorization', 'Bearer ' + usedToken)
   if (options.setupSession) headers.set('X-Setup-Session', options.setupSession)
@@ -77,7 +77,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
   let response: Response
   try {
-    response = await fetch('/api/v1' + path, {
+    response = await fetch('/api/v1' + (anonymous ? '/public' : '') + path, {
       method: options.method,
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
@@ -90,7 +90,7 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
     throw new ApiError(0, { code: timeout.aborted ? 'timeout' : 'network_error' })
   }
   if (requestedSession !== session) throw new ApiError(409, { code: 'session_changed' })
-  if (response.status === 401 && options.token === undefined) {
+  if (response.status === 401 && !anonymous && options.token === undefined) {
     setToken(null)
     throw new ApiError(401, { code: 'unauthorized' })
   }
@@ -99,6 +99,15 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   if (!response.ok) throw new ApiError(response.status, payload ?? {})
   if (payload === null) throw new ApiError(500, { code: 'invalid_response' })
   return payload as T
+}
+
+export function api<T>(path: string, options: RequestOptions = {}) {
+  return request<T>(path, options, false)
+}
+
+// 即使同一浏览器已登录，公开页面也不发送管理凭据。
+export function publicApi<T>(path: string, options: Pick<RequestOptions, 'signal'> = {}) {
+  return request<T>(path, options, true)
 }
 
 const messages: Record<string, string> = {
@@ -111,7 +120,7 @@ const messages: Record<string, string> = {
   github_not_configured: '请先配置 GitHub 访问令牌。',
   summary_unavailable: '摘要服务未配置或手动摘要额度已关闭。',
   summary_repo_unavailable: '此仓库当前无法生成摘要。',
-  monitoring_capacity_full: '关注容量已满，请取消一项关注或调整容量。',
+  monitoring_capacity_full: '重点监控容量已满，请移出一个仓库或调整容量。',
   settings_conflict: '配置已被其他操作更新，当前编辑已保留。',
   possible_charge_not_accepted: '请确认再次调用可能产生费用。',
   not_found: '记录不存在或已过保留期。',

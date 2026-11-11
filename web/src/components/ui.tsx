@@ -1,4 +1,4 @@
-import { AlertCircle, ArrowUp, CircleHelp, LoaderCircle, X } from 'lucide-react'
+import { AlertCircle, ArrowUp, CircleHelp, LoaderCircle, Search, X } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { errorText } from '../api/client'
@@ -33,6 +33,15 @@ export function Skeleton({ rows = 3 }: { rows?: number }) {
 }
 
 export function Spinner() { return <LoaderCircle size={15} className="spinner" aria-hidden /> }
+
+export function InlineSearch({ value, onSearch }: { value: string; onSearch: (value: string) => void }) {
+  const [input, setInput] = useState(value)
+  return <form className="inline-search" onSubmit={(event) => { event.preventDefault(); onSearch(input.trim()) }}>
+    <Search size={16} /><input aria-label="搜索仓库名或简介" placeholder="搜索仓库名或简介" value={input} onChange={(event) => setInput(event.target.value)} />
+    {value && <button type="button" className="text-button" onClick={() => onSearch('')}>清除</button>}
+    <button type="submit" className="text-button">搜索</button>
+  </form>
+}
 
 export function More({ hasMore, pending, onClick }: { hasMore: boolean; pending: boolean; onClick: () => void }) {
   if (!hasMore) return null

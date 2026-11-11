@@ -240,7 +240,8 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	if errors.Is(verifyErr, ErrRepoUnavailable) {
 		// 已不可见的仓库不保存本轮新摘要，调用账目仍按实际结果提交。
 		return e.settleAfterCall(ctx, job, outcome{status: "dead", code: "summary_repo_unavailable",
-			attempts: job.Attempts, call: &call, model: result, duration: duration})
+			attempts: job.Attempts, call: &call, model: result, duration: duration,
+			apply: withdrawRepository(verifyErr, repo.RepoID)})
 	}
 	if record.SummaryStatus == "stale" && old.RepoID != 0 && verifyErr == nil {
 		record = old
@@ -284,17 +285,20 @@ func saveObserved(tx *gorm.DB, old storage.AISummary, check storage.SummaryCheck
 // publicRepo 用数字 ID 确认可见性、仓库身份及当前地址。
 func (e *Engine) publicRepo(ctx context.Context, id int64, p gh.Policy) (*sdk.Repository, error) {
 	remote, err := e.GitHub.RepositoryByID(ctx, id, p)
+	observed := time.Now().UnixMilli()
 	if err != nil {
 		var upstream *gh.Failure
 		if errors.As(err, &upstream) && (upstream.Status == 404 || upstream.Status == 410) {
-			return nil, ErrRepoUnavailable
+			return nil, &visibilityFailure{observed: observed, gone: upstream.Status == 410}
 		}
 		return nil, err
 	}
 	r := remote.Repository
-	if r == nil || r.GetID() != id || r.GetPrivate() || r.GetDisabled() ||
-		(r.GetVisibility() != "" && r.GetVisibility() != "public") {
+	if r == nil || r.GetID() != id {
 		return nil, ErrRepoUnavailable
+	}
+	if r.GetPrivate() || r.GetDisabled() || (r.GetVisibility() != "" && r.GetVisibility() != "public") {
+		return nil, &visibilityFailure{observed: observed, gone: true}
 	}
 	return r, nil
 }

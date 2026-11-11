@@ -18,13 +18,40 @@ func retryAt(job storage.Job, now time.Time) int64 {
 
 func (e *Engine) sourceFailed(ctx context.Context, job storage.Job, err error) error {
 	if errors.Is(err, ErrRepoUnavailable) {
-		return e.fail(ctx, job, "summary_repo_unavailable", false, 0, false)
+		return e.Queue.settle(ctx, job, outcome{status: "dead", code: "summary_repo_unavailable", attempts: job.Attempts,
+			apply: withdrawRepository(err, *job.RepoID)})
 	}
 	var upstream *gh.Failure
 	if errors.As(err, &upstream) {
 		return e.fail(ctx, job, upstream.Code, true, upstream.Until, upstream.Status == 0 && upstream.Until > 0)
 	}
 	return err
+}
+
+type visibilityFailure struct {
+	observed int64
+	gone     bool
+}
+
+func (*visibilityFailure) Error() string { return ErrRepoUnavailable.Error() }
+func (*visibilityFailure) Unwrap() error { return ErrRepoUnavailable }
+
+// 使用已有的仓库可见状态撤下已确认不可访问的内容，并保留管理员的历史记录。
+func withdrawRepository(err error, repoID int64) func(*gorm.DB) error {
+	var observation *visibilityFailure
+	if !errors.As(err, &observation) {
+		return nil
+	}
+	return func(tx *gorm.DB) error {
+		at := observation.observed
+		values := map[string]any{"last_checked_at": at, "updated_at": gorm.Expr("MAX(updated_at, ?)", at),
+			"first_not_found_at": gorm.Expr("COALESCE(first_not_found_at, ?)", at)}
+		if observation.gone {
+			values["state"] = "unavailable"
+		}
+		return tx.Model(&storage.Repository{}).Where("repo_id=? AND COALESCE(last_checked_at,0)<=? AND COALESCE(last_success_at,0)<=?", repoID, at, at).
+			Updates(values).Error
+	}
 }
 
 func (e *Engine) fail(ctx context.Context, job storage.Job, code string, retry bool, until int64, deferOnly bool) error {

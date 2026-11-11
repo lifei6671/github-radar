@@ -27,11 +27,14 @@ func (e *Engine) refresh(ctx context.Context, job storage.Job, p Payload) (func(
 	policy := gh.Policy{Resource: gh.Core, Sample: true, Grade: baseline.Grade, Priority: p.Manual || baseline.Grade == "S"}
 	var result gh.RepositoryResult
 	var requestErr error
+	started := time.Now()
 	if !baseline.NameIsCurrent {
 		result, requestErr = e.GitHub.RepositoryByID(ctx, baseline.RepoID, policy)
 	} else {
 		etag := ""
-		if baseline.MetadataETag != nil && baseline.LastSuccessAt != nil {
+		// 曾不可访问的仓库需要新的 200 来确认公开性。
+		if baseline.MetadataETag != nil && baseline.LastSuccessAt != nil &&
+			baseline.FirstNotFoundAt == nil && baseline.State != "unavailable" {
 			etag = *baseline.MetadataETag
 		}
 		result, requestErr = e.GitHub.Repository(ctx, baseline.Owner, baseline.Name, etag, policy)
@@ -50,6 +53,10 @@ func (e *Engine) refresh(ctx context.Context, job storage.Job, p Payload) (func(
 		// 快照归属计划槽，元数据只接受更新的观察；两者分别判断。
 		updateCurrent := (current.LastSuccessAt == nil || *current.LastSuccessAt < at) &&
 			strings.EqualFold(current.FullName, baseline.FullName)
+		// 采样发出后若已观测到仓库不可访问，先前发出的请求不能恢复公开展示。
+		if current.FirstNotFoundAt != nil && current.LastCheckedAt != nil && *current.LastCheckedAt >= started.UnixMilli() {
+			updateCurrent = false
+		}
 		if failure != nil {
 			if !updateCurrent {
 				return nil
@@ -58,6 +65,9 @@ func (e *Engine) refresh(ctx context.Context, job storage.Job, p Payload) (func(
 			switch {
 			case failure.Status == 410:
 				values["state"] = "unavailable"
+				if current.FirstNotFoundAt == nil {
+					values["first_not_found_at"] = at
+				}
 			case current.FirstNotFoundAt != nil && at-*current.FirstNotFoundAt >= time.Hour.Milliseconds():
 				values["state"] = "unavailable"
 			case current.FirstNotFoundAt == nil:

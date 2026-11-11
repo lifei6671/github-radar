@@ -17,7 +17,7 @@
 
 - 桌面保留固定侧边导航、居中的内容区、信息流和热点榜卡片；窄桌面切换精简导航轨道。
 - 手机保留顶部操作条、底部导航、抽屉式过滤、列表卡片和合理的触控面积。
-- 亮暗主题统一使用 Radix UI Colors：中性色承担背景/正文，青绿色承担强调；借鉴 AIHOT 阅读布局，不直接沿用其颜色常量。
+- 亮色使用暖白背景、近白内容面和蓝灰墨色。暗色使用蓝灰背景和浅墨色。蓝青用于导航、焦点和趋势线，暖色用于榜单名次与状态。色值映射自 Radix UI Colors。
 - 保留柔和分割线、圆角卡片、胶囊选择、有限的动效、清晰的信息等级和紧凑的数字展示。
 - 用户打开首页首先看见“哪些 GitHub 项目正在增长”，点击项目后看到 Star 趋势、中文 200～500 字摘要、仓库链接与选题价值。
 
@@ -36,7 +36,7 @@ AIHOT 的原业务是“新闻/事件/多信源讨论”；github-radar 的核�
 - Go + Gin 提供的 HTTP JSON API、GitHub 采集器、限流器、定时调度、任务恢复和 AI 摘要。
 - SQLite 仓库模型、原始 Star 快照、小时/日聚合、候选选题。
 - 页面路由和客户端 API 状态管理；不保留 AIHOT 的服务端 React Router loader、Node SSR 进程。
-- 仓库详情、增长榜单、技术主题、关注项目、选题池、采集管理的业务逻辑。
+- 仓库详情、增长榜单、技术主题、重点监控、选题池、采集管理的业务逻辑。
 - 自有站名、Logo、favicon、产品文案和部署脚本。
 
 **第一期不迁移**
@@ -75,7 +75,7 @@ AIHOT 的原业务是“新闻/事件/多信源讨论”；github-radar 的核�
 | apps/web/app/components/shell/TabBar.tsx | 手机底部导航 | **保留外观，重写入口** | “热榜/发现/选题/关注/我的”按实际页面定制 |
 | apps/web/app/components/shell/ThemeSwitch.tsx | 深浅色切换 | **重用行为概念** | 设置存浏览器，本项目独立 theme 状态和首屏无闪烁 |
 | apps/web/app/features/feed/FeedItem.tsx | 文章卡片的密度和分层 | **参考样式，重写组件** | 用 RepositoryCard 显示仓库/Star/摘要，不保留新闻类型 |
-| apps/web/app/features/feed/Timeline.tsx | 日期分组、时间线、增量列表 | **参考布局，重写数据绑定** | 改为最近发现/最近涨幅，数据分页加载 |
+| apps/web/app/features/feed/Timeline.tsx | 日期分组、时间线、增量列表 | **参考布局，重写数据绑定** | 按分类展示项目发现时间流，数据分页加载 |
 | apps/web/app/features/feed/Filters.tsx | 分类与筛选交互 | **保留交互模式，重写规则** | 主题、编程语言、增长窗口、等级、多选处理 |
 | apps/web/app/features/feed/HotTopics.tsx | 热点内容展示 | **参考可视布局** | 改为增长领跑仓库和主题热点 |
 | apps/web/app/features/hot/Sparkline.tsx | 空值断线、24h 小曲线 | **优先适配** | 使用 Star 净增或累计 Star 序列，保持 null 断线 |
@@ -102,13 +102,13 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 
 | 语义 | Radix 色阶 | 用途 |
 |---|---|---|
-| --bg / --surface | sand-1 / sand-2 | 页面、侧栏与内容表面 |
-| --ink / --ink-3 | sand-12 / sand-11 | 主文字与次级文字 |
-| --control / --control-hover / --control-selected | sand-3 / sand-4 / sand-5 | 控件默认、悬停和选中背景 |
-| --line / --control-line | sand-6 / sand-7 | 分隔线与交互控件边框 |
-| --focus | teal-8 | 可见焦点轮廓 |
-| --accent / --accent-hover / --accent-text | teal-9 / teal-10 / teal-11 | 实色按钮、悬停和强调文字 |
-| --hot / --ok / --warning | tomato-11 / green-11 / amber-11 | 热度、成功、警示文字；配各自 3 级底色 |
+| --bg / --surface / --sidebar | 亮色 sand、brown、whiteA，暗色 slate、cyan | 区分页面底色、内容卡与导航 |
+| --ink / --ink-muted | slate-12 / slate-11 | 主文字和次级文字 |
+| --control / --raised | 亮色 sand、sage、whiteA，暗色 slate | 搜索底色、筛选底轨和选中面 |
+| --line / --control-line | 亮色 sage-5/7，暗色 slate-5/7 | 分隔线与控件边框 |
+| --accent / --accent-text / --focus | cyan-11/12 | 导航、可见焦点和主要操作 |
+| --hot / --ok / --warning | tomato-11 / green-11 / amber-11 | 热度、成功和警示 |
+| --rank-first / --rank-second / --rank-third | tomato、brown、amber | 榜单前三名 |
 | --overlay / --shadow | blackA 色阶 | 仅必要弹层的遮罩/阴影，按对比度选取级别 |
 
 优先用留白和字体层级组织界面，不为每条信息增加卡片、阴影或左侧彩色边线。需要圆角时默认控件 8px、容器 12px，嵌套圆角结合内间距保持同心；胶囊仅用于选择控件。移动端点击区域尽量不低于 44×44px，数字使用等宽数字特性。
@@ -117,7 +117,7 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 - 全站文字默认 12/14/20px 三档，最小 12px，不超过四档；优先用字重、颜色、间距表达层级。按钮文字、图标与数字进行光学对齐。
 - 默认无装饰动画；必要状态过渡以 ease-out、250ms 为基准，尊重 prefers-reduced-motion。
 - 文案不使用中点分隔，不添加重复眉题、装饰性英文标签或解释性长描述；采样不足、可能计费、恢复影响等会改变用户决策的信息保留在对应操作处。
-- 不照搬 AIHOT 截图的具体配色/字号作为验收标准；以本项目色阶、可读性、信息层级、对齐及响应式规则验收。实色按钮前景使用 Radix 提供的对比色，并检查亮暗模式对比度。
+- 对照 AIHOT 官网确认页面、内容面和导航的层次。实色按钮前景使用 Radix 提供的对比色，并检查亮暗模式对比度。
 
 设计断点取 AIHOT 的布局思想：
 - 小于 700px：手机顶栏 + 底部导航，详情主列优先。
@@ -133,57 +133,60 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 ### 3.1 统一导航
 
 **桌面侧栏**（保留 AIHOT 样式和层级）：
-- 首页 /：热门发现，展示精选增长项目和时间线。
+- 首页 /：展示当前热点和项目时间线，顶部标签可在后台配置，右侧提供搜索。
 - 热点榜 /trending：24h/7d 增长排名与官方 Trending 上榜标签。
-- 全部项目 /repos：已监控仓库列表、筛选、排序。
+- 全部项目 /repos：已监控仓库按发现时间展示，顶部分类标签从数据库读取，右侧提供搜索。
 - 技术主题 /categories：从后台维护的 topics 映射获取分类，默认含 AI 智能体、AI 编程、MCP、AI 多媒体、开发工具及其他。
-- 选题池 /topics：AI 推荐选题与人工状态。
-- 我的关注 /watchlist：人工关注、待写候选。
-- 运行状态 /system：采集任务、限流、数据库状态和“备份与恢复”设置（受管理权限保护）。
-- 初始化 /setup：首次部署时通过临时内存会话配置 R2，从前缀内可用备份中选择并恢复；成功后关闭 setup 写入口，状态与进度仍可查询。
+- 收藏 /starred：展示当前浏览器收藏的仓库，按收藏时间倒序排列，支持取消收藏。
+- 选题池 /admin/topics：按入池日期展示选题版面，往期索引、状态筛选和反馈使用已保存的仓库数据。
+- 重点监控 /admin/watchlist：按加入时间展示重点监控仓库，顶部提供搜索和结果数量。
+- 运行状态 /admin/runs：与其他后台页面共用主区宽度。侧栏保留一级入口，标题下方的横向导航用于切换概览、任务、运行配置、分类映射、发现规则、发现页标签和备份恢复，窄屏自动换行。概览展示采集与模型额度、队列、各类任务最近状态、任务时间线和 SQLite 维护。发现规则与分类映射可搜索，条目有独立表单链接。
+- 仓库管理 /admin/repos：参考后台信源列表，在同一张表格内提供仓库搜索、分类、排序和高级筛选。点击仓库名称进入 /admin/repos/:id，详情复用图表，并提供加入或移出重点监控、刷新采样、生成摘要和加入选题池。返回列表时保留搜索和筛选条件。
+- 初始化 /admin/setup：登录后通过临时内存会话配置 R2，从前缀内可用备份中选择并恢复。成功后关闭安装写入口，状态与进度仍可查询。
 
-**手机底部导航**（控制 4～5 个入口）：发现、热榜、选题、关注、我的；“全部项目/分类/管理”从我的或顶部入口进入。
+**前台**公开浏览。手机底栏提供发现、项目、热点榜、收藏和更多，更多菜单提供技术主题和后台入口。**后台**从 /admin/login 登录，桌面与手机均提供仓库管理、重点监控、选题池、运行状态。
 
 ### 3.2 页面映射与展示目标
 
 | AIHOT 原页面/概念 | 新路由 | 对应 UI | 主要数据 |
 |---|---|---|---|
 | 精选 / 首页 | / | AIHOT 时间线、精选卡、热点推荐 | 最近发现 + 热度 Top + 最近新上榜 |
-| 热点榜 | /trending | Top 3 强调卡 + 排名列表 + 迷你趋势 | 自算热度/增长、原始 Trending 上榜 |
-| 全部动态 | /repos | 条目列表、筛选胶囊、搜索 | repositories 分页 |
-| 文章/事件详情 | /repos/:id | 阅读型详情、侧栏、历史曲线 | repo + metrics + ai_summary |
-| 主题列表/主题页 | /categories、/categories/:slug | 分类导航、主题简介、关联项目 | 分类统计 + 过滤仓库 |
-| 收藏 | /watchlist | 收藏列表、关注时间 | starred_by_user + repo |
-| 日报/精选 | /topics | 选题卡片、状态分组、导出 | topic_candidates |
-| 后台 | /system | 管理页面/任务列表/备份与恢复 | jobs/limits/storage + R2 配置、备份列表和恢复状态 |
-| 首次部署 | /setup | 初始化向导/云端恢复 | 连接 R2、列出备份、选择恢复 |
+| 热点榜 | /trending | 榜首跨两行、右侧叠放第二第三名，后续排名按同一列宽展示 | 自算热度/净增、累计 Star 和原始 Trending 名次 |
+| 全部动态 | /repos | 分类标签、搜索、日期流和右侧书签 | 分类映射、repositories 分页与浏览器收藏 |
+| 文章/事件详情 | /repos/:id | 面包屑、粘性章节导航、摘要与趋势正文、分卡信息栏 | repo + metrics + ai_summary |
+| 主题列表/主题页 | /categories、/categories/:slug | 宽屏四列卡片、窄桌面三列、手机列表、近期发现与日期流 | 分类统计、最新仓库预览与筛选列表 |
+| 收藏 | /starred | 浏览器存储提示、桌面阅读卡片、手机分隔线列表 | 浏览器 localStorage |
+| 重点监控 | /admin/watchlist | 顶部搜索、仓库数量，与收藏共用阅读卡片和手机分隔线布局 | starred_by_user、followed_at 和仓库摘要 |
+| 日报/精选 | /admin/topics | 往期索引、日期报头、头条、状态分版、反馈与导出 | topic_candidates 的入池日期与已保存内容 |
+| MyHOT 后台运行与信源 | /admin/runs | 五格运行指标、双栏监控面板、任务表格、可筛选的发现规则及分类映射列表、独立编辑表单 | jobs/limits/storage、数据库配置、R2 备份与恢复 |
+| 首次部署 | /admin/setup | 初始化向导/云端恢复 | 连接 R2、列出备份、选择恢复 |
 
 ### 3.3 项目卡片 RepositoryCard
 
 将 AIHOT FeedItem 的视觉结构迁移为：
 
-- 第一行：排名/上榜状态、仓库 owner/name、主语言、项目主题。
-- 第二行：后端 titleZh（已有中文摘要首句，最多 40 个 Unicode 字符，超长追加省略号）；null 时显示原始 description，均无内容则省略该行。没有中文摘要时标“待总结”。
-- 第三行：中文摘要预览 80～120 字；完整 200～500 字放仓库详情。
+- 发现时间流按日期分组，卡片左侧时间轨标记时刻。收藏和重点监控默认按添加时间倒序，卡片顶部展示仓库元数据、添加时间和移除入口。
+- 卡片顶部展示主语言和上榜信号。全部项目的卡片右侧提供收藏按钮。仓库 owner/name 作为正文标题，接着展示后端 titleZh（已有中文摘要首句，最多 40 个 Unicode 字符，超长追加省略号）。缺少 titleZh 时展示原始 description。摘要状态随仓库数据展示。
+- 第三行：中文摘要预览 80～120 字；摘要以标题开头时只展示一次。完整 200～500 字放仓库详情。
 - 第四行：Star 总数、24h 净增长、7d 净增长、相对增长率（有质量保障才显示）。
-- 第五行：迷你曲线、最后采集时间、数据质量标签、收藏操作。
+- 底部展示迷你曲线、最后采样时间和数据质量。
 - 卡片点击进 /repos/:id；仓库原站单独外链（新窗口并带 rel=noopener noreferrer），避免整卡跳到 GitHub。
 - “官方 Trending 排名”、“自算热度排名”、“AI 选题评分”分别标示，不用同一个数字暗示同一种分数。
 - 24h 增长未知时显示“采样不足”，不能用 0 或虚构数据填充；S/A/B/C 等级以状态标签展示。
 
 ### 3.4 仓库详情 RepoDetail
 
-- 标题、GitHub 外链、当前 Star/Fork、主语言、License（license=null 显示“未声明”；spdxId=NOASSERTION 显示“未识别许可”；其他优先 name）。
+- 面包屑、仓库名和 GitHub 指标条位于章节导航上方。左栏展示中文摘要与 Star 趋势，右栏依次展示热点信号、GitHub 仓库及 Trending 名次、相关主题和监控记录。License 缺失时显示“未声明”，NOASSERTION 显示“未识别许可”，其余优先显示名称。
 - 24h/7d/30d 增长、数据质量和上次采集时间。
 - 24h/7d/30d/180d 趋势：按 API 返回粒度自动切换原始/小时/日聚合，并标明缺失点。
 - **AI 中文总结**：只显示持久化的合格结果（目标 200～500 字，来源不足允许更短）、模型/时间/来源链接及来源质量；README 原文不在站点展示也不作为静态资源。
 - “生成总结”允许命中有效缓存；“重新总结”发送 force=true 并计入手动预算。页面显示 queued/running/ready/failed/stale/unknown，unknown 明确说明可能已计费，仅在管理员选择再次调用时确认这一影响。
-- 收藏、加入选题池、备注（如第一版无备注接口则暂不显示），人工操作反馈明确。
-- 小屏时侧栏折入下方，避免 200～500 字摘要造成横向溢出。
+- 后台仓库详情提供加入或移出重点监控，以及加入选题池，人工操作反馈明确。
+- 小屏按摘要、仓库信息、Star 趋势的顺序单列展示。章节链接保留已选择的趋势范围。
 
 ### 3.5 热点榜 HotRanking
 
-保留 AIHOT “首位重点卡 + 排名列表 + 增长曲线”的表达方式，核心指标改为仓库增长：
+首页的「全部」标签展示热点前五名、热度分、小趋势图和最近成功计算时间。切换分类时展示对应的项目时间线。完整榜单的榜首使用大卡和 Star 趋势，第二、第三名在右侧叠放。后续排名对齐名次、仓库信息、Star 趋势和当前榜单指标。窄屏依次展示前三卡片与排名列表。
 
 - 可切换 24h 净增长、7d 净增长、热度综合分、最近上榜。
 - 显示每条数据对应的时间窗口和采样质量；增长不完整时降级显示。
@@ -194,6 +197,7 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 ### 3.6 主题和选题池
 
 - 分类多选、关键词搜索，支持“AI 智能体 / AI 编程 / MCP / AI 多媒体 / 开发者工具”等。
+- 技术主题目录展示每个分类的最新监控仓库、简介、发现时间和仓库数。主题详情在日期流前列出近期发现。
 - 分类以仓库标签与规则为基础，中文摘要仅用于增强说明，不作为唯一分类证据。
 - 选题卡片保留“用户收益、可演示程度、复现要求、技术亮点、证据链接、人工状态”。
 - status 操作：candidate → shortlisted / accepted / ignored / published；状态变化在 API 成功后更新。
@@ -219,7 +223,12 @@ export type SourceQuality = "sufficient" | "incomplete_source" | "insufficient_s
 export type Resolution = "raw" | "hourly" | "daily" | "mixed";
 export type RepoGrade = "S" | "A" | "B" | "C";
 export type RepoState = "candidate" | "active" | "paused" | "unavailable" | "address_pending";
-export interface CategoryView { slug: string; name: string; count: number; }
+export interface CategoryView {
+  slug: string;
+  name: string;
+  count: number;
+  latestRepo: { id: number; fullName: string; description: string | null; discoveredAt: string } | null;
+}
 
 export interface GrowthWindow {
   delta: number | null;       // 净变化，不是新增收藏人数
@@ -344,16 +353,17 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 | 全部项目检索 | GET /api/v1/repos?q=...&category=...&language=...&cursor=... | URL 驱动过滤/分页 |
 | 项目详情 | GET /api/v1/repos/:id | 返回 RepositoryDetailView |
 | Star 曲线 | GET /api/v1/repos/:id/trend?range=7d | TrendResponse，含点位、真实边界与粒度 |
-| 点击关注 | POST /api/v1/repos/:id/follow | 请求体 {follow:true/false}；更新后返回状态，容量占满返回 409 monitoring_capacity_full |
+| 加入或移出重点监控 | POST /api/v1/repos/:id/follow | 请求体 {follow:true/false}；更新后返回状态，容量占满返回 409 monitoring_capacity_full |
 | 点击刷新 | POST /api/v1/repos/:id/refresh | {requestId}；202 + jobId/statusUrl，异步查询结果 |
 | 点击生成/重新总结 | POST /api/v1/repos/:id/summary | {force,requestId}；200 缓存命中或 202 + jobId/statusUrl；其他请求已有未决任务时 409 + existingJobId/statusUrl |
 | 查询采集/摘要任务 | GET /api/v1/jobs/:id | 管理鉴权，返回 JobView；维护期可 503 |
 | 确认再次调用模型 | POST /api/v1/jobs/:id/retry | 仅 unknown 摘要，{requestId,acceptPossibleCharge:true}，原子取消旧任务并创建手动任务 |
 | 恢复后启用自动 AI | POST /api/v1/system/ai/resume | {acceptIncompleteUsage:true}，提示恢复日计量不完整 |
 | 主题页 | GET /api/v1/repos?category=agent | 使用当前数据库的 topics 映射，重复 category 参数为 OR |
-| 分类列表 | GET /api/v1/categories | {items:CategoryView[]}，active 计数含 other |
-| 我的关注 | GET /api/v1/repos?followed=true&sort=followed | 包含已关注的全部仓库状态，followedAt 降序 |
+| 分类列表 | GET /api/v1/categories | {items:CategoryView[]}，每项包含 active 计数和可为空的最新仓库预览 |
+| 重点监控 | GET /api/v1/repos?followed=true&sort=followed | 包含重点监控名单中的全部仓库状态，followedAt 降序 |
 | 选题池 | GET /api/v1/topics | 返回候选、得分和状态 |
+| 往期选题 | GET /api/v1/topics/days | 按选题时区返回入池日期、首条标题和计数，可按状态筛选 |
 | 加入选题池 | POST /api/v1/repos/:id/topic | 幂等加入并保留已有审核状态 |
 | 改变选题状态 | PATCH /api/v1/topics/:id | 成功后更新，本地失败恢复 |
 | 管理页任务 | GET /api/v1/system/jobs | 鉴权，绝不返回 README 内容 |
@@ -372,7 +382,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 | 安装/恢复状态 | GET /api/v1/setup/status、GET /api/v1/setup/operations/:id | ADMIN_TOKEN 鉴权，初始化完成后仍可读取进度 |
 | 重试配置加载 | POST /api/v1/system/backup/reload | databaseApplied=true 且重载失败时只重试加载，不再次复制 |
 
-查询参数、分类和游标严格使用主方案第 3.4、9.2 节契约；cursor 由后端生成，前端原样透传，修改筛选/排序后清空游标与分页结果。所有 API（含读取和 setup）经统一 Bearer 鉴权。License 无对象时为 null；NOASSERTION 原样传递但显示“未识别许可”，不生成许可标识链接；其他有效对象优先显示 name。
+查询参数、分类和游标使用主方案第 3.4、9.2 节契约。cursor 由后端生成，前端原样透传，修改筛选或排序后清空游标与分页结果。前台使用 /api/v1/public 的只读接口，后台和安装接口统一经 Bearer 鉴权。两类仓库响应分别缓存。License 无对象时为 null，NOASSERTION 原样传递并显示“未识别许可”，其他有效对象优先显示 name。
 
 ### 4.4 加载、失败和异步状态
 
@@ -381,12 +391,12 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 - 手动刷新：后端接受任务后显示“已排队”并可查看任务状态；前端只轮询任务查询接口，不因按钮点击直接修改星数。
 - failed 是仍可能退避重试的任务状态；succeeded/dead/canceled 为终态。unknown 停止自动轮询并提示人工处理；404 表示任务不存在或已过保留期，重新查询仓库结果，不能直接显示成功。
 - 已有摘要的更新任务失败或 unknown 时继续展示上次成功摘要及生成时间；任务状态与摘要内容有效性分开，不清空旧摘要。
-- /setup 与普通页面共用令牌。恢复 completed 后清空查询缓存、重新加载数据；若 databaseApplied=true 但重载失败，显示“数据已恢复，加载失败”及重试加载操作。进程重启后操作 404 表示无法确认，刷新安装/系统状态，不自动再次恢复。
+- /admin/setup 使用管理员令牌。恢复 completed 后清空查询缓存、重新加载数据。若 databaseApplied=true 但重载失败，显示“数据已恢复，加载失败”及重试加载操作。进程重启后操作 404 表示无法确认，刷新安装状态和系统状态。
 - 429/503：显示上次成功采集时间与可重试提示；不用旧值冒充实时数据。
 - 退出页面取消无关 GET 请求；对 POST/PATCH 避免重复提交；网络超时对用户可解释。
 - 手动采集/摘要的 requestId 按用户操作生成，网络重试沿用，明确再次操作才更新；409 summary_in_progress 时转而查询 existingJobId，不自动生成新 ID 连续重试。
 - 使用 TanStack Query 管理分页缓存和轮询，401 时清空令牌与缓存；不复制 AIHOT Node SSR 页面缓存。POST/PATCH 默认不自动重试，GET 依错误类别有限重试；503 维护期恢复进度仍可轮询。
-- 本地收藏显示最终以后端 SQLite 状态为准；浏览器缓存只能用于界面体验。
+- 前台收藏通过浏览器 localStorage 保存，刷新和同源标签页共享收藏列表。后台重点监控使用 SQLite 存储，用于后续采集与跟踪。
 
 ## 5. 交互验收细节
 
@@ -394,8 +404,8 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 
 - 390×844：顶部栏、底部标签，内容卡单列，24h/7d 增长清楚可读，无横向滚动。
 - 768×1024：紧凑导航轨道或折叠布局，不出现侧栏挤压主内容。
-- 1440×900：桌面固定侧栏、居中内容列表；热榜右侧可放辅助统计。
-- 1920×1080：内容限制最大宽度，避免长行难读。
+- 1440×900：桌面固定侧栏，主区从侧栏后按固定边距铺开，主题目录为四列。
+- 1920×1080 及更宽：主区沿用相同边距，阅读页由页内布局安排主栏和侧栏。
 - 亮/暗主题组件色彩一致；主题切换后刷新保持；系统减少动态效果时关闭复杂动画。
 - 允许键盘 Tab 导航，筛选弹层有焦点管理与 Esc 关闭，按钮有文本或 aria-label。
 - 主题对比度、聚焦状态、空态和错误态需在亮暗主题分别检查。
@@ -465,7 +475,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 
 ### UI-06 选题池、关注与业务管理（阶段 4）
 
-- 完成 /topics、/watchlist、/system 的业务状态页面和操作。
+- 完成 /admin/topics、/admin/watchlist、/admin/runs 的业务状态页面和操作。
 - 接入关注及 followedAt、选题状态、系统配额、采集积压、清理水位。
 - 接入阶段 1 的配置管理接口。保存时携带 revision，收到 settings_conflict 时重新加载，保留用户的未保存输入供核对。
 - 统一令牌输入、请求鉴权、退出及 401 失效处理。
@@ -485,7 +495,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 ### UI-08 备份与恢复（阶段 5）
 
 - 实现后台 R2 设置、备份时间/时区/保留期、云端列表、立即备份和一键恢复。
-- 实现 /setup 的内存 R2 会话、全新初始化和恢复入口，共用 ADMIN_TOKEN。
+- 实现 /admin/setup 的内存 R2 会话、全新初始化和恢复入口，共用 ADMIN_TOKEN。
 - 实现独立操作轮询、维护状态、配置重载失败后的重试及自动 AI 重新启用。
 - 对新增页面补做 UI-07 的响应式、亮暗主题与交互回归。
 
@@ -544,7 +554,7 @@ github-radar/
 - 备份配置区：开关、每日执行时间、时区、保留天数（默认 5）、R2 端点、存储桶、对象前缀和可更新的访问凭据；“测试连接”“保存设置”两种操作状态独立。
 - 列表区：按日期倒序展示实际保留期内的备份（默认五天）、大小、时间、数据库版本与恢复按钮，并允许分页查看未清理旧对象；当前对象由后端 R2 列表返回，不依赖本地 SQLite 索引。首次安装不固定限制五天。
 - 任务区：“立即备份”“从 R2 恢复”均显示异步操作状态；恢复前确认后端将短暂停止数据库访问。Go HTTP 进程保持运行，原生事务复制期间展示维护状态并继续轮询。
-- 新 VPS 的 /setup：填写**本次新的 R2 连接**（仅当前 Go 内存会话）、加载云端最近备份、默认选择最新、点击恢复、展示进度；恢复库的旧 R2 连接必须被当前新连接**整体覆盖并校验**，完成后才显示成功。空库时可用，使用同一管理员令牌。
+- 新 VPS 的 /admin/setup：填写**本次新的 R2 连接**（仅当前 Go 内存会话）、加载云端最近备份、默认选择最新、点击恢复、展示进度；恢复库的旧 R2 连接必须被当前新连接**整体覆盖并校验**，完成后才显示成功。空库时可用，使用同一管理员令牌。
 - 后台保存配置后更新 SQLite system_settings 并即时重设定时调度；运行中恢复时优先使用本次操作提交的新 R2 连接，没有新连接则使用当前实例生效配置；临时库复制前完成旧 R2 连接覆盖和校验，原生复制提交后加载配置再重新调度。
 - 恢复进行中设置区禁止保存，后端仍以 409 拒绝并发修改；恢复完成提示自动 AI 暂停，用户在该处明确选择重新启用。Go/SQLite 等实现细节只用于技术文档，产品页面用“恢复期间暂不可访问项目数据”等与决策有关的文案。
 - 验收界限、HTTP 接口与恢复安全顺序见 [备份专项方案](./backup-and-restore.md)。

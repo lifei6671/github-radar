@@ -134,7 +134,7 @@ func textPtr(s string) *string {
 func (v summaryView) title() *string { return textPtr(summary.Title(v.row.SummaryZh)) }
 
 // summaryViews 批量读取最近成功摘要及当前任务状态，避免列表逐仓库查询。
-func summaryViews(db *gorm.DB, repos []storage.Repository) (map[int64]summaryView, error) {
+func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (map[int64]summaryView, error) {
 	views := make(map[int64]summaryView, len(repos))
 	if len(repos) == 0 {
 		return views, nil
@@ -149,6 +149,9 @@ func summaryViews(db *gorm.DB, repos []storage.Repository) (map[int64]summaryVie
 	}
 	for _, row := range rows {
 		views[row.RepoID] = summaryView{row: row}
+	}
+	if !includeJobs {
+		return views, nil
 	}
 	var jobs []struct {
 		ID, RepoID int64

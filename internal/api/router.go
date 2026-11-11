@@ -19,7 +19,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
-// NewRouter 注册公开健康检查与需要管理员令牌的安装状态接口。
+// NewRouter 分别注册公开只读接口与需要管理员令牌的业务接口。
 func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger, cfg config.Config, backups ...*backup.Manager) *gin.Engine {
 	var manager *backup.Manager
 	if len(backups) > 0 {
@@ -87,7 +87,7 @@ func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger
 		c.JSON(http.StatusOK, gin.H{"initialized": true})
 	})
 	collection := &collectionAPI{db: db, cfg: cfg, logger: logger}
-	business := v1.Group("", func(c *gin.Context) {
+	requireBusiness := func(c *gin.Context) {
 		if manager != nil {
 			release, err := manager.Enter(settingsWrite(c))
 			if err != nil {
@@ -112,7 +112,10 @@ func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger
 			return
 		}
 		c.Next()
-	})
+	}
+	business := v1.Group("", requireBusiness)
+	// 两套读取接口共用安装与恢复门禁，公开接口只登记允许发布的读取操作。
+	collection.registerPublic(router.Group("/api/v1/public", markPublicRead, requireBusiness))
 	collection.register(business)
 	collection.registerSettings(business.Group("/system"))
 	if manager != nil {

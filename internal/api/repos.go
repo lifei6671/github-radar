@@ -55,6 +55,10 @@ func (a *collectionAPI) repos(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_filter"})
 		return
 	}
+	if c.GetBool(publicReadKey) && filters.Followed {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_filter"})
+		return
+	}
 	// 排序键、全局名次及计算时间来自同一读快照，计算任务可以并发提交新一轮结果。
 	var page gin.H
 	db := a.db.WithContext(c.Request.Context())
@@ -82,7 +86,7 @@ func (a *collectionAPI) repoPage(c *gin.Context, tx *gorm.DB, filters repoFilter
 		"growth7d":  `CASE WHEN json_extract(m.window_details_json,'$."7d".quality')='exact' THEN m.delta_7d END`,
 	}
 	column := columns[sort]
-	db := tx.Model(&storage.Repository{})
+	db := publicRepos(c, tx.Model(&storage.Repository{}))
 	if metricSort(sort) {
 		db = db.Joins("LEFT JOIN latest_metrics m ON m.repo_id=repositories.repo_id AND repositories.state='active'")
 	}
@@ -169,7 +173,7 @@ WHERE s.repo_id=repositories.repo_id AND tag.value=?)`, filters.Tag)
 	if err != nil {
 		return nil, err
 	}
-	summaries, err := summaryViews(tx, repos)
+	summaries, err := summaryViews(tx, repos, !c.GetBool(publicReadKey))
 	if err != nil {
 		return nil, err
 	}

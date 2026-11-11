@@ -28,8 +28,13 @@ func TestSPAAndStaticRouteBoundaries(t *testing.T) {
 		{"GET", "/", "GitHub 雷达", "no-cache", 200},
 		{"GET", "/repos/42?range=30d", "GitHub 雷达", "no-cache", 200},
 		{"GET", "/categories/mcp", "GitHub 雷达", "no-cache", 200},
-		{"GET", "/system?tab=rules", "GitHub 雷达", "no-cache", 200},
-		{"HEAD", "/setup", "", "no-cache", 200},
+		{"GET", "/starred", "GitHub 雷达", "no-cache", 200},
+		{"GET", "/admin", "GitHub 雷达", "no-store", 200},
+		{"GET", "/admin/login?return=%2Fadmin%2Fruns", "GitHub 雷达", "no-store", 200},
+		{"GET", "/admin/repos/42", "GitHub 雷达", "no-store", 200},
+		{"GET", "/admin/repos/42/missing.js", "", "", 404},
+		{"GET", "/system?tab=rules", "GitHub 雷达", "no-store", 200},
+		{"HEAD", "/setup", "", "no-store", 200},
 		{"GET", "/assets/index-TEST.js", "console.log", "immutable", 200},
 		{"GET", "/radar.svg", "<svg", "no-cache", 200},
 		{"GET", "/assets/missing.js", "", "", 404},
@@ -48,6 +53,9 @@ func TestSPAAndStaticRouteBoundaries(t *testing.T) {
 			}
 			if (tc.method == "HEAD" || tc.status == 404) && strings.Contains(rec.Body.String(), "GitHub 雷达") {
 				t.Fatal("API 或缺失文件不能被 SPA 入口吞掉")
+			}
+			if strings.HasPrefix(tc.url, "/admin") && tc.status == 200 && rec.Header().Get("X-Robots-Tag") != "noindex, nofollow" {
+				t.Fatal("后台页面应排除搜索索引")
 			}
 		})
 	}

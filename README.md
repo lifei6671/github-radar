@@ -24,12 +24,14 @@ go run ./cmd/radar
 
 服务默认监听 `127.0.0.1:8080`，在 `./data/github-radar.db` 建库并自动迁移。需要改变监听地址或数据库路径时，复制 [configs/example.yaml](configs/example.yaml) 并运行 `go run ./cmd/radar server -config <文件路径>`。相对路径以命令的工作目录为准。
 
-在浏览器打开 `http://127.0.0.1:8080`，用当前终端的 `$env:ADMIN_TOKEN` 登录。空库会进入初始化页面。Gin 从 `web/dist` 提供页面与静态资源，运行时只需 Go 服务。开发前端时可另开终端执行 `npm --prefix web run dev`，Vite 默认将 API 转发到本地 8080 端口。
+在浏览器打开 `http://127.0.0.1:8080` 即可浏览前台。从「后台管理」或 `/admin` 进入后台，用当前终端的 `$env:ADMIN_TOKEN` 登录。空库首次登录后进入 `/admin/setup`。Gin 从 `web/dist` 提供页面与静态资源，运行时只需 Go 服务。开发前端时可另开终端执行 `npm --prefix web run dev`，Vite 默认将 API 转发到本地 8080 端口。
 
 | 接口 | 行为 |
 | --- | --- |
 | `GET /healthz` | 公开存活检查 |
 | `GET /readyz` | 公开数据库就绪检查，连接失败时返回 503 |
+| `GET /api/v1/public/repos`、`/repos/:id`、`/repos/:id/trend` | 公开项目列表、详情与 Star 趋势，路径共用 `/api/v1/public` 前缀 |
+| `GET /api/v1/public/categories`、`/trending`、`/trending/sources` | 公开分类、官方榜单和榜单来源标识，路径共用 `/api/v1/public` 前缀 |
 | `GET /api/v1/setup/status` | 需要 `Authorization: Bearer <ADMIN_TOKEN>`，新库返回 `{"initialized":false}` |
 | `POST /api/v1/setup/initialize` | 使用同一令牌初始化空库，重复初始化返回 409 |
 
@@ -44,6 +46,8 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/setup/initializ
 ```
 
 初始化前业务 API 返回 `503 setup_required`，业务 Worker 等待安装完成。初始化会保存关闭备份的默认设置。已有数据库重启后会自动恢复采集，普通任务租约到期可接管。缺少 GitHub 令牌时可以读取已有数据，配置令牌并重启后开始采集。
+
+后台提供仓库管理、重点监控、选题池和运行状态。旧 `/system`、`/watchlist`、`/topics`、`/setup` 链接继续跳转到对应后台页。公开仓库接口仅提供可展示的仓库和摘要，重点监控、任务、配置与备份需管理员令牌。
 
 - 默认采集全站和 Go、Python、TypeScript、Rust 的 Trending 日榜、周榜、月榜，保存每个来源的完整成功批次。解析失败保留上次榜单及其真实时间。
 - 每 30 分钟轮换一个 AI 主题 Search。默认限制为近 90 天更新且至少 20 Star 的公共仓库，查询中显式提供的 `pushed:`、`stars:` 条件优先。超过一千条的查询按 Star 和创建时间拆分，分页请求单独排队。
@@ -78,7 +82,7 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 | `GET /api/v1/categories` | 当前数据库分类及 active 仓库数量 |
 | `GET /api/v1/trending?period=daily&sourceKey=all` | 单来源最新完整榜单 |
 | `POST /api/v1/repos/:id/refresh` | 请求体 `{"requestId":"一次操作的唯一值"}`，返回可轮询的任务 |
-| `POST /api/v1/repos/:id/follow` | 请求体 `{"follow":true}`，取消关注使用 false |
+| `POST /api/v1/repos/:id/follow` | 请求体 `{"follow":true}` 加入重点监控，使用 false 移出 |
 | `GET /api/v1/jobs/:id`、`GET /api/v1/system/jobs` | 任务结果和最近任务，错误只返回结构化码 |
 | `GET /api/v1/system/limits` | 配额、暂停时间、本地计数和等待任务数 |
 | `GET /api/v1/system/storage` | SQLite 和 WAL 大小、快照与聚合行数、维护水位 |
@@ -116,7 +120,7 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 
 「立即备份」会更新同一天的云端对象。也可在服务运行时使用相同的管理员令牌和配置文件执行 `go run ./cmd/radar backup`，该命令通过本机 API 等待结果。离线维护、迁移和采集命令应在停止服务后运行。
 
-恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后自动 AI 摘要保持暂停，在管理页确认用量记录可能不完整后再启用。迁移到新实例时，在 `/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的环境变量和管理员令牌。
+恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后自动 AI 摘要保持暂停，在管理页确认用量记录可能不完整后再启用。迁移到新实例时，登录后在 `/admin/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的环境变量和管理员令牌。
 
 使用专用私有存储桶和仅限该桶的 Object Read & Write 令牌。备份包含数据库内的 R2 凭据，请限制数据库目录、暂存文件和 R2 对象的访问权限。R2 请求由 AWS SDK for Go v2 签名，接口与恢复边界见专项方案。[Cloudflare R2 令牌权限](https://developers.cloudflare.com/r2/api/tokens/)、[AWS SDK for Go v2](https://github.com/aws/aws-sdk-go-v2)、[备份专项方案](docs/backup-and-restore.md)
 

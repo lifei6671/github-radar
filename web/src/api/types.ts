@@ -14,7 +14,12 @@ export interface Growth {
   resolution: Resolution
 }
 
-export interface Category { slug: string; name: string; count: number }
+export interface Category {
+  slug: string
+  name: string
+  count: number
+  latestRepo: Pick<Repo, 'id' | 'fullName' | 'description' | 'discoveredAt'> | null
+}
 
 export interface TrendingEntry {
   sourceKey: string
@@ -50,9 +55,9 @@ export interface Repo {
   summaryPreview: string | null
   summaryStatus: SummaryStatus
   summarySourceQuality: SourceQuality | null
-  summaryJobId: number | null
-  followed: boolean
-  followedAt: string | null
+  summaryJobId?: number | null
+  followed?: boolean
+  followedAt?: string | null
   discoveredAt: string
   lastSuccessAt: string | null
 }
@@ -63,7 +68,7 @@ export interface RepoDetail extends Repo {
   license: { spdxId: string | null; name: string | null } | null
   summaryZh: string | null
   summaryGeneratedAt: string | null
-  summaryModel: string | null
+  summaryModel?: string | null
   sourceReadmeUrl: string | null
   features: string[]
   audience: string[]
@@ -120,8 +125,11 @@ export interface Topic {
   status: TopicStatus
   feedback: string | null
   reviewedAt: string | null
+  createdAt: string
   updatedAt: string
 }
+
+export interface TopicDay { day: string; title: string; count: number }
 
 export interface Limits {
   githubConfigured: boolean
@@ -144,6 +152,9 @@ export type SettingValue = boolean | number | string | null | SettingValue[] | S
 export interface SettingFields { [key: string]: SettingValue }
 export interface RuntimeSettings { revision: number; settings: SettingFields; restartRequired: boolean }
 export interface CategorySetting { slug: string; name: string; anyTopics: string[] }
+export interface DiscoveryTab { slug: string; label: string }
+export interface DiscoveryTabOption { slug: string; name: string }
+export interface DiscoveryTabSettings extends ListSettings<DiscoveryTab> { options: DiscoveryTabOption[] }
 export interface RuleSetting {
   sourceType: 'trending' | 'search'
   sourceKey: string

@@ -1,30 +1,37 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { QueryClient } from '@tanstack/react-query'
-import { api } from './client'
+import { useMatch } from 'react-router'
+import { api, publicApi } from './client'
 import type { Category, Items, Page, Repo, Topic } from './types'
 
 export function useCategories() {
   return useQuery({
     queryKey: ['categories'],
-    queryFn: ({ signal }) => api<Items<Category>>('/categories', { signal }),
+    queryFn: ({ signal }) => publicApi<Items<Category>>('/categories', { signal }),
   })
 }
 
-function usePages<T>(path: string, params: URLSearchParams, key: string) {
+export function useAdminArea() { return Boolean(useMatch('/admin/*')) }
+
+function usePages<T>(path: string, params: URLSearchParams, key: string, read = api) {
   const search = params.toString()
   return useInfiniteQuery({
-    queryKey: [key, search],
+    // 同一个登录会话切换前后台时，也必须分开缓存公开和管理数据。
+    queryKey: [key, search, read === api ? 'admin' : 'public'],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) => {
       const query = new URLSearchParams(search)
       if (pageParam !== null) query.set('cursor', pageParam)
-      return api<Page<T>>(path + '?' + query, { signal })
+      return read<Page<T>>(path + '?' + query, { signal })
     },
     getNextPageParam: (last) => last.nextCursor ?? undefined,
   })
 }
 
-export function useRepos(params: URLSearchParams) { return usePages<Repo>('/repos', params, 'repos') }
+export function useRepos(params: URLSearchParams) {
+  const admin = useAdminArea()
+  return usePages<Repo>('/repos', params, 'repos', admin ? api : publicApi)
+}
 export function useTopics(params: URLSearchParams) { return usePages<Topic>('/topics', params, 'topics') }
 
 export function distinct<T extends { id: number }>(items: T[]): T[] {

@@ -34,6 +34,10 @@ func Register(router *gin.Engine, dist fs.FS) {
 			cache = "public, max-age=31536000, immutable"
 		case name == "radar.svg", name == "third-party-licenses.txt":
 		case pageRoute(strings.TrimSuffix(name, "/")):
+			if adminPage(strings.TrimSuffix(name, "/")) {
+				cache = "no-store"
+				c.Header("X-Robots-Tag", "noindex, nofollow")
+			}
 			name = "index.html"
 		default:
 			c.Status(http.StatusNotFound)
@@ -58,8 +62,11 @@ func Register(router *gin.Engine, dist fs.FS) {
 }
 
 func pageRoute(name string) bool {
+	if adminPage(name) {
+		return true
+	}
 	switch name {
-	case "", "trending", "repos", "categories", "topics", "watchlist", "system", "setup":
+	case "", "trending", "repos", "categories", "starred":
 		return true
 	}
 	prefix, value, found := strings.Cut(name, "/")
@@ -70,8 +77,23 @@ func pageRoute(name string) bool {
 		return !strings.Contains(value, ".")
 	}
 	if prefix == "repos" {
-		id, err := strconv.ParseInt(value, 10, 64)
-		return err == nil && id > 0
+		return repoID(value)
 	}
 	return false
+}
+
+// 后台深链接由 React 校验会话，API 数据仍由 Gin 独立鉴权。
+func adminPage(name string) bool {
+	switch name {
+	case "admin", "admin/login", "admin/runs", "admin/repos", "admin/topics", "admin/watchlist", "admin/setup",
+		"topics", "watchlist", "system", "setup":
+		return true
+	}
+	id, found := strings.CutPrefix(name, "admin/repos/")
+	return found && repoID(id)
+}
+
+func repoID(value string) bool {
+	id, err := strconv.ParseInt(value, 10, 64)
+	return err == nil && id > 0
 }

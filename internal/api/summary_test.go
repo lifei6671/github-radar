@@ -142,3 +142,83 @@ func TestManuallyAddTopicPreservesEditorialStatus(t *testing.T) {
 		t.Fatal("重复加入不能覆盖人工选题状态")
 	}
 }
+
+func TestTopicEditionsUseCreationDayAndStableCursor(t *testing.T) {
+	router, db := collectionRouter(t)
+	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	// UTC 16:00 是默认选题时区的午夜，前后条目必须归入不同版面。
+	boundary := time.Date(2026, 11, 10, 16, 0, 0, 0, time.UTC).UnixMilli()
+	for i, createdAt := range []int64{boundary - 1, boundary, boundary} {
+		id := int64(i + 1)
+		name := fmt.Sprintf("repo-%d", id)
+		repo := storage.Repository{RepoID: id, Owner: "owner", Name: name, FullName: "owner/" + name, NameIsCurrent: true,
+			TopicsJSON: "[]", State: "active", Grade: "A", HTMLURL: "https://github.com/owner/" + name}
+		if err := db.Create(&repo).Error; err != nil {
+			t.Fatal(err)
+		}
+		topic := storage.TopicCandidate{RepoID: id, AngleKey: "project", TitleZh: name, SourceURL: repo.HTMLURL,
+			Status: "candidate", CreatedAt: createdAt, UpdatedAt: createdAt}
+		if err := db.Create(&topic).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	const list = "/api/v1/topics"
+	const daysPath = list + "/days"
+	request(t, router, "GET", daysPath, "", "", 401)
+	days := request(t, router, "GET", daysPath, "", "admin", 200)["items"].([]any)
+	if len(days) != 2 {
+		t.Fatalf("应按选题时区返回两天: %+v", days)
+	}
+	first := days[0].(map[string]any)
+	if first["day"] != "2026-11-11" || first["title"] != "repo-3" || first["count"] != float64(2) {
+		t.Fatalf("最新日期及头条不一致: %+v", first)
+	}
+	page := request(t, router, "GET", list+"?day=2026-11-11&limit=1", "", "admin", 200)
+	if page["items"].([]any)[0].(map[string]any)["repoId"] != float64(3) {
+		t.Fatalf("同一入池时刻应按 ID 稳定排序: %+v", page)
+	}
+	cursor := url.QueryEscape(page["nextCursor"].(string))
+	request(t, router, "GET", list+"?day=2026-11-10&cursor="+cursor, "", "admin", 400)
+	request(t, router, "GET", list+"?day=2026-02-30", "", "admin", 400)
+	page = request(t, router, "GET", list+"?day=2026-11-11&cursor="+cursor, "", "admin", 200)
+	if len(page["items"].([]any)) != 1 || page["items"].([]any)[0].(map[string]any)["repoId"] != float64(2) {
+		t.Fatalf("同一日期翻页不应漏项或串期: %+v", page)
+	}
+	request(t, router, "PATCH", list+"/1", `{"status":"accepted","feedback":"保留原日期"}`, "admin", 200)
+	accepted := request(t, router, "GET", daysPath+"?status=accepted", "", "admin", 200)["items"].([]any)
+	if len(accepted) != 1 || accepted[0].(map[string]any)["day"] != "2026-11-10" {
+		t.Fatalf("编辑选题不应移动日期: %+v", accepted)
+	}
+}
+
+func TestTopicDaySpansAcrossMidnightClockChanges(t *testing.T) {
+	loc, err := time.LoadLocation("America/Havana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ day, start, end string }{
+		{"2026-03-07", "2026-03-07T05:00:00Z", "2026-03-08T05:00:00Z"},
+		{"2026-03-08", "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z"},
+		{"2026-11-01", "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z"},
+		{"2040-12-31", "2040-12-31T05:00:00Z", "2041-01-01T05:00:00Z"},
+	} {
+		t.Run(item.day, func(t *testing.T) {
+			date, err := time.Parse(time.DateOnly, item.day)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spans := topicDaySpans(date, loc)
+			if len(spans) == 0 || spans[0].start.UTC().Format(time.RFC3339) != item.start ||
+				spans[len(spans)-1].end.UTC().Format(time.RFC3339) != item.end {
+				t.Fatalf("日期边界不符: %+v", spans)
+			}
+			for i := 1; i < len(spans); i++ {
+				if !spans[i-1].end.Equal(spans[i].start) {
+					t.Fatalf("不应遗漏时钟切换附近的入池记录: %+v", spans)
+				}
+			}
+		})
+	}
+}

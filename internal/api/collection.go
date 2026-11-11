@@ -34,6 +34,7 @@ func (a *collectionAPI) register(v1 *gin.RouterGroup) {
 	v1.POST("/repos/:id/follow", a.follow)
 	v1.POST("/repos/:id/topic", a.addTopic)
 	v1.GET("/topics", a.topics)
+	v1.GET("/topics/days", a.topicDays)
 	v1.PATCH("/topics/:id", a.updateTopic)
 	v1.GET("/categories", a.loadCategories, a.categoryList)
 	v1.GET("/trending", a.loadCategories, a.trending)
@@ -89,7 +90,7 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 	if quality == "" {
 		quality = "insufficient"
 	}
-	return gin.H{
+	body := gin.H{
 		"id": repo.RepoID, "fullName": repo.FullName, "htmlUrl": repo.HTMLURL,
 		"description": repo.Description, "titleZh": summary.title(), "language": repo.PrimaryLanguage,
 		"categories": config.Classify(categoriesFor(c), topics), "state": repo.State,
@@ -103,6 +104,13 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 		"lastSuccessAt": optionalISO(repo.LastSuccessAt),
 		"discoveredAt":  iso(repo.DiscoveredAt), "relativeGrowth": view.row.RelativeGrowth,
 	}
+	if c.GetBool(publicReadKey) {
+		// 公开仓库内容不包含管理员的关注记录或摘要任务标识。
+		delete(body, "followed")
+		delete(body, "followedAt")
+		delete(body, "summaryJobId")
+	}
+	return body
 }
 
 func (a *collectionAPI) fail(c *gin.Context, err error) {
@@ -130,7 +138,7 @@ func (a *collectionAPI) repo(c *gin.Context) {
 	}
 	var repo storage.Repository
 	db := a.db.WithContext(c.Request.Context())
-	if err := db.Take(&repo, "repo_id = ?", id).Error; err != nil {
+	if err := publicRepos(c, db).Take(&repo, "repo_id = ?", id).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -145,7 +153,7 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		return
 	}
 	view := views[id]
-	summaries, err := summaryViews(db, []storage.Repository{repo})
+	summaries, err := summaryViews(db, []storage.Repository{repo}, !c.GetBool(publicReadKey))
 	if err != nil {
 		a.fail(c, err)
 		return
@@ -162,6 +170,9 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		body["summaryGeneratedAt"] = iso(summary.row.GeneratedAt)
 	}
 	body["summarySourceLanguage"] = textPtr(summary.row.SourceLanguage)
+	if c.GetBool(publicReadKey) {
+		delete(body, "summaryModel")
+	}
 	for name, raw := range map[string]string{"features": summary.row.FeaturesJSON, "audience": summary.row.AudienceJSON, "valueTags": summary.row.ValueTagsJSON} {
 		tags := []string{}
 		_ = json.Unmarshal([]byte(raw), &tags)
@@ -302,11 +313,14 @@ func (a *collectionAPI) limits(c *gin.Context) {
 func (a *collectionAPI) categoryList(c *gin.Context) {
 	categories := categoriesFor(c)
 	var repos []storage.Repository
-	if err := a.db.WithContext(c.Request.Context()).Select("topics_json").Where("state='active'").Find(&repos).Error; err != nil {
+	if err := publicRepos(c, a.db.WithContext(c.Request.Context())).Model(&storage.Repository{}).
+		Select("repo_id", "full_name", "description", "discovered_at", "topics_json").
+		Where("state='active'").Order("discovered_at DESC, repo_id ASC").Find(&repos).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
 	counts := make(map[string]int)
+	latest := make(map[string]gin.H)
 	for _, repo := range repos {
 		var topics []string
 		if err := json.Unmarshal([]byte(repo.TopicsJSON), &topics); err != nil {
@@ -314,12 +328,18 @@ func (a *collectionAPI) categoryList(c *gin.Context) {
 			return
 		}
 		for _, category := range config.Classify(categories, topics) {
+			// 与主题列表共用分类规则，首次命中即为最新发现的监控项目。
+			if counts[category] == 0 {
+				latest[category] = gin.H{"id": repo.RepoID, "fullName": repo.FullName,
+					"description": repo.Description, "discoveredAt": iso(repo.DiscoveredAt)}
+			}
 			counts[category]++
 		}
 	}
 	items := make([]gin.H, 0, len(categories))
 	for _, category := range categories {
-		items = append(items, gin.H{"slug": category.Slug, "name": category.Name, "count": counts[category.Slug]})
+		items = append(items, gin.H{"slug": category.Slug, "name": category.Name,
+			"count": counts[category.Slug], "latestRepo": latest[category.Slug]})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
@@ -382,9 +402,10 @@ func (a *collectionAPI) trending(c *gin.Context) {
 	}
 	var members []struct {
 		storage.Repository
-		BatchRank int
+		BatchRank     int
+		PublicVisible bool
 	}
-	if err := db.Model(&storage.Repository{}).Select("repositories.*, t.rank AS batch_rank").
+	if err := db.Model(&storage.Repository{}).Select("repositories.*, t.rank AS batch_rank, ("+publicRepoCondition+") AS public_visible").
 		Joins("JOIN trending_observations t ON t.repo_id = repositories.repo_id").
 		Where("t.source_key=? AND t.window=? AND t.observed_slot=?", source, period, batch.ObservedSlot).
 		Order("t.rank, repositories.repo_id").Find(&members).Error; err != nil {
@@ -404,6 +425,9 @@ func (a *collectionAPI) trending(c *gin.Context) {
 	repos := make([]storage.Repository, 0, len(members))
 	// 目标来源的名次固定使用已选择批次，期间发布新榜单也不会混用槽。
 	for _, member := range members {
+		if c.GetBool(publicReadKey) && !member.PublicVisible {
+			continue
+		}
 		repos = append(repos, member.Repository)
 		var retained []gin.H
 		for _, entry := range entries[member.RepoID] {
@@ -420,7 +444,7 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		a.fail(c, err)
 		return
 	}
-	summaries, err := summaryViews(db, repos)
+	summaries, err := summaryViews(db, repos, !c.GetBool(publicReadKey))
 	if err != nil {
 		a.fail(c, err)
 		return

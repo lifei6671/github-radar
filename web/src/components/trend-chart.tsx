@@ -35,7 +35,7 @@ export default function TrendChart({ data }: { data: Trend }) {
         dataZoom: [{ type: 'inside', zoomOnMouseWheel: 'ctrl', moveOnMouseWheel: false }],
         tooltip: {
           trigger: 'axis', renderMode: 'richText', confine: true,
-          backgroundColor: color('--surface'), borderColor: color('--control-line'), borderWidth: 0.5,
+          backgroundColor: color('--chart-surface'), borderColor: color('--control-line'), borderWidth: 0.5,
           textStyle: { color: color('--ink'), fontSize: 12 },
           axisPointer: { lineStyle: { color: color('--control-line') } },
           formatter: (params: unknown) => {
@@ -59,8 +59,10 @@ export default function TrendChart({ data }: { data: Trend }) {
             if (data.points.length < 100) return 5
             return data.points[dataIndex - 1]?.stars == null && data.points[dataIndex + 1]?.stars == null ? 5 : 0
           },
-          lineStyle: { color: color('--accent-text'), width: 2 },
-          itemStyle: { color: color('--accent-text') },
+          lineStyle: { color: color('--chart-accent'), width: 2 },
+          itemStyle: { color: color('--chart-accent') },
+          areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+            colorStops: [{ offset: 0, color: color('--chart-fill') }, { offset: 1, color: 'transparent' }] } },
         }],
       })
     }

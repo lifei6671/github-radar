@@ -25,8 +25,9 @@ func (e *Invalid) Error() string { return e.Err.Error() }
 
 // Snapshot 以统一修订号协调后台的整表替换，避免覆盖其他管理员的修改。
 type Snapshot struct {
-	Revision int64          `json:"revision"`
-	Settings config.Runtime `json:"settings"`
+	Revision      int64          `json:"revision"`
+	Settings      config.Runtime `json:"settings"`
+	DiscoveryTabs []DiscoveryTab `json:"discoveryTabs"` // nil 跟随分类映射，空数组只显示「全部」。
 }
 
 type Store struct{ DB *gorm.DB }

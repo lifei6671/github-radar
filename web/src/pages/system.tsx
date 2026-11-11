@@ -1,40 +1,43 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowUpRight, Database, Gauge, ListChecks, Wrench } from 'lucide-react'
+import { ArrowUpRight, Wrench } from 'lucide-react'
 import { Link, useSearchParams } from 'react-router'
 import { api, errorText } from '../api/client'
 import type { Items, Job, Limits, StorageStatus } from '../api/types'
-import { Badge, Empty, Notice, PageError, Skeleton, Spinner } from '../components/ui'
+import { AdminMetrics, AdminPanel } from '../components/admin'
+import { SystemHeader, systemPage } from '../components/system-navigation'
+import { Badge, Notice, PageError, Skeleton, Spinner } from '../components/ui'
 import { formatBytes, jobLabel, number, timestamp } from '../lib/format'
-import { CategoryEditor, RulesEditor, RuntimeEditor } from './settings'
+import { CategoryEditor, DiscoveryTabEditor, RulesEditor, RuntimeEditor } from './settings'
 import { BackupPage } from './backup'
 
-const tabs = [
-  ['overview', '概览'], ['jobs', '任务'], ['runtime', '运行配置'], ['categories', '分类映射'], ['rules', '发现规则'],
-  ['backup', '备份与恢复'],
-] as const
-
 export function System() {
-  const [params, setParams] = useSearchParams()
-  const tab = tabs.find(([key]) => key === params.get('tab'))?.[0] ?? 'overview'
-  return <>
-    <header className="page-head"><h1>运行状态</h1>
-      <div className="action-row system-shortcuts"><Link className="button" to="/repos">全部项目</Link><Link className="button" to="/categories">技术主题</Link></div>
-    </header>
-    <div className="pills wrap ranking-tabs" aria-label="运行管理">
-      {tabs.map(([key, label]) => <button key={key} aria-pressed={tab === key} onClick={() =>
-        setParams(key === 'overview' ? {} : { tab: key }, { preventScrollReset: true })}>{label}</button>)}
-    </div>
+  const [params] = useSearchParams()
+  const tab = systemPage(params.get('tab'))
+  return <div className="system-page">
     {tab === 'overview' && <Overview />}
     {tab === 'jobs' && <Jobs />}
     {tab === 'runtime' && <RuntimeEditor />}
     {tab === 'categories' && <CategoryEditor />}
+    {tab === 'discovery-tabs' && <DiscoveryTabEditor />}
     {tab === 'rules' && <RulesEditor />}
-    {tab === 'backup' && <BackupPage />}
-  </>
+    {tab === 'backup' && <div className="admin-stack"><SystemHeader><h1>备份与恢复</h1></SystemHeader><BackupPage /></div>}
+  </div>
 }
 
 const resourceNames: Record<string, string> = {
   core: 'GitHub Core', search: 'GitHub Search', repo_refresh: '仓库采样', readme_check: 'README 检查', github_secondary: '次级限流',
+}
+
+type RateResource = Limits['items'][number]
+type RateRestriction = { until: string; label: string }
+
+function resourceRestriction(item: RateResource, now: number): RateRestriction | null {
+  // 和采集端一致，显式暂停与剩余额度耗尽都能阻止请求。
+  const pausedUntil = item.pausedUntil && Date.parse(item.pausedUntil) > now ? item.pausedUntil : null
+  if (item.remaining === 0 && Date.parse(item.resetAt) > now && (!pausedUntil || Date.parse(item.resetAt) > Date.parse(pausedUntil))) {
+    return { until: item.resetAt, label: '额度用尽，重置于' }
+  }
+  return pausedUntil ? { until: pausedUntil, label: '暂停至' } : null
 }
 
 function Overview() {
@@ -49,54 +52,104 @@ function Overview() {
     queryFn: ({ signal }) => api<StorageStatus>('/system/storage', { signal }),
     refetchInterval: 20_000,
   })
+  const jobs = useSystemJobs()
   const maintain = useMutation({
     mutationFn: () => api<{ status: string }>('/system/maintenance/run', { method: 'POST' }),
     onSuccess: () => { void queryClient.invalidateQueries({ queryKey: ['storage'] }) },
   })
-  return <div className="system-grid">
-    <section className="panel system-panel">
-      <header className="section-head"><h2><Gauge size={18} />采集与模型额度</h2>
-        {limits.data && <Badge tone={limits.data.githubConfigured ? 'ok' : 'warning'}>{limits.data.githubConfigured ? 'GitHub 已配置' : 'GitHub 待配置'}</Badge>}</header>
-      {limits.isPending ? <Skeleton rows={1} /> : !limits.data ?
-        <PageError error={limits.error} retry={() => { void limits.refetch() }} /> : <>
-          {limits.error && <Notice error>{errorText(limits.error)}</Notice>}
-          <dl className="definition-list">
-            <div><dt>待处理任务</dt><dd className="numeric">{number(limits.data.waitingTaskCount)}</dd></div>
-            {limits.data.items.map((item) => <div key={item.resource}>
-              <dt>{resourceNames[item.resource] ?? item.resource}</dt>
-              <dd className="numeric" title={item.pausedUntil ? '暂停至 ' + timestamp(item.pausedUntil) : item.limit > 0 ? '重置于 ' + timestamp(item.resetAt) : undefined}>
-                {item.limit > 0 ? number(item.remaining) + ' / ' + number(item.limit) : number(item.localRequests) + ' 次'}
-              </dd>
-            </div>)}
-            <div><dt>AI 自动调用</dt><dd className="numeric">{number(limits.data.ai.auto.used)} / {number(limits.data.ai.auto.limit)}</dd></div>
-            <div><dt>AI 手动调用</dt><dd className="numeric">{number(limits.data.ai.manual.used)} / {number(limits.data.ai.manual.limit)}</dd></div>
-            <div><dt>AI 额度重置</dt><dd>{timestamp(limits.data.ai.resetAt)}</dd></div>
-          </dl>
-          <Link className="button" to="/system?tab=jobs"><ListChecks size={16} />查看任务</Link>
-        </>}
-    </section>
-    <section className="panel system-panel">
-      <header className="section-head"><h2><Database size={18} />存储与维护</h2></header>
-      {storage.isPending ? <Skeleton rows={1} /> : !storage.data ?
-        <PageError error={storage.error} retry={() => { void storage.refetch() }} /> : <>
-          {storage.error && <Notice error>{errorText(storage.error)}</Notice>}
-          <dl className="definition-list">
-            <div><dt>SQLite / WAL</dt><dd className="numeric">{formatBytes(storage.data.databaseBytes)} / {formatBytes(storage.data.walBytes)}</dd></div>
-            <div><dt>原始快照</dt><dd className="numeric">{number(storage.data.counts.raw)}</dd></div>
-            <div><dt>小时 / 日聚合</dt><dd className="numeric">{number(storage.data.counts.hourly)} / {number(storage.data.counts.daily)}</dd></div>
-            <div><dt>最近计算</dt><dd>{timestamp(storage.data.watermarks.metricsUpdatedAt)}</dd></div>
-            <div><dt>小时聚合水位</dt><dd>{timestamp(storage.data.watermarks.hourly)}</dd></div>
-            <div><dt>日聚合水位</dt><dd>{timestamp(storage.data.watermarks.daily)}</dd></div>
-            <div><dt>最近清理</dt><dd>{timestamp(storage.data.watermarks.cleanedAt)}</dd></div>
-          </dl>
-          <button className="button" disabled={maintain.isPending} onClick={() => maintain.mutate()}>
-            {maintain.isPending ? <Spinner /> : <Wrench size={16} />}运行维护
-          </button>
-          {maintain.data && <Notice>维护已排队。</Notice>}
-          {maintain.error && <Notice error>{errorText(maintain.error)}</Notice>}
-        </>}
-    </section>
+  const rate = limits.data
+  const disk = storage.data
+  const now = Date.now()
+  const resources = rate?.items.map((item) => ({ item, restriction: resourceRestriction(item, now) })) ?? []
+  const blocked = resources.flatMap(({ item, restriction }) => restriction ? [{ item, ...restriction }] : [])
+    .sort((a, b) => Date.parse(b.until) - Date.parse(a.until))[0]
+  const core = rate?.items.find((item) => item.resource === 'core' && item.limit > 0)
+  const configured = rate?.githubConfigured
+  const collection = !rate ? '—' : !configured ? '采集待配置' : blocked ? '采集请求受限' : '采集已配置'
+  const collectionNote = !rate ? null : !configured ? '缺少 GitHub 访问令牌' : blocked ?
+    <>{resourceNames[blocked.item.resource] ?? blocked.item.resource} {blocked.label} <ObservedTime value={blocked.until} /></> :
+    core ? <>GitHub Core {number(core.remaining)} / {number(core.limit)}</> : '等待额度观测'
+  // 等待任务总数来自服务端，队列、异常和时间线只统计最近返回的任务。
+  const recentJobs = jobs.data?.items.slice().sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt) || b.id - a.id) ?? []
+  const queued = recentJobs.filter((job) => job.status === 'pending' || job.status === 'running' || job.status === 'failed')
+  const failed = recentJobs.filter((job) => job.status === 'failed' || job.status === 'dead' || job.status === 'unknown').length
+  const latest = new Map<string, Job>()
+  for (const job of recentJobs) {
+    if (!latest.has(job.type)) latest.set(job.type, job)
+  }
+  return <div className="admin-stack">
+    <SystemHeader>
+      <h1>运行状态</h1>
+      <p className="minor muted">{limits.dataUpdatedAt ? <>最近检查 <ObservedTime value={new Date(limits.dataUpdatedAt).toISOString()} /></> :
+        limits.isPending ? '正在读取运行状态' : '采集状态暂不可用'}</p>
+    </SystemHeader>
+    <AdminMetrics label="运行指标" items={[
+      { label: 'GitHub 采集', value: collection, note: collectionNote, tone: rate ? configured && !blocked ? 'ok' : 'warning' : undefined },
+      { label: '待处理任务', value: number(rate?.waitingTaskCount), note: '排队、运行与等待重试' },
+      { label: '异常任务', value: jobs.data ? number(failed) : '—', note: '最近 50 条任务', tone: jobs.data ? failed ? 'warning' : 'ok' : undefined },
+      { label: 'AI 自动调用', value: budgetValue(rate?.ai.auto) },
+      { label: 'AI 手动调用', value: budgetValue(rate?.ai.manual) },
+    ]} />
+    {jobs.error && jobs.data && <Notice error>{errorText(jobs.error)}</Notice>}
+    <div className="admin-panels">
+      <AdminPanel title="队列">
+        <JobFeed query={jobs} items={queued.slice(0, 5)} empty={rate?.waitingTaskCount ? '近期记录中没有待处理任务' : '暂无待处理任务'} />
+      </AdminPanel>
+      <AdminPanel title="各类任务最近状态">
+        <JobFeed query={jobs} items={[...latest.values()]} empty="暂无任务记录" />
+      </AdminPanel>
+      <AdminPanel title="采集与模型额度">
+        <div className="admin-panel-body">
+          {limits.isPending ? <Skeleton rows={1} /> : rate ? <>
+            {limits.error && <Notice error>{errorText(limits.error)}</Notice>}
+            <dl className="definition-list">
+              {!resources.length && <div><dt>GitHub 额度</dt><dd className="muted">暂无观测</dd></div>}
+              {resources.map(({ item, restriction }) => <div key={item.resource}>
+                <dt>{resourceNames[item.resource] ?? item.resource}</dt>
+                <dd className="system-quota">
+                  <strong className="numeric">{item.limit > 0 ? number(item.remaining) + ' / ' + number(item.limit) : number(item.localRequests) + ' 次'}</strong>
+                  {restriction ? <span className="minor tone-hot">{restriction.label} <ObservedTime value={restriction.until} /></span> :
+                    item.limit > 0 && Date.parse(item.resetAt) > 0 && <span className="minor muted">额度重置 <ObservedTime value={item.resetAt} /></span>}
+                </dd>
+              </div>)}
+              <div><dt>AI 额度重置</dt><dd><ObservedTime value={rate.ai.resetAt} /></dd></div>
+            </dl>
+          </> : <PageError error={limits.error} retry={() => { void limits.refetch() }} />}
+        </div>
+      </AdminPanel>
+      <AdminPanel title="存储与维护" action={<button className="button" disabled={maintain.isPending || !disk} onClick={() => maintain.mutate()}>
+        {maintain.isPending ? <Spinner /> : <Wrench size={16} />}运行维护
+      </button>}>
+        <div className="admin-panel-body">
+          {storage.isPending ? <Skeleton rows={1} /> : disk ? <>
+            {storage.error && <Notice error>{errorText(storage.error)}</Notice>}
+            <dl className="definition-list">
+              <div><dt>SQLite / WAL</dt><dd className="numeric">{formatBytes(disk.databaseBytes)} / {formatBytes(disk.walBytes)}</dd></div>
+              <div><dt>原始快照</dt><dd className="numeric">{number(disk.counts.raw)}</dd></div>
+              <div><dt>小时 / 日聚合</dt><dd className="numeric">{number(disk.counts.hourly)} / {number(disk.counts.daily)}</dd></div>
+              <div><dt>小时聚合水位</dt><dd><ObservedTime value={disk.watermarks.hourly} /></dd></div>
+              <div><dt>日聚合水位</dt><dd><ObservedTime value={disk.watermarks.daily} /></dd></div>
+              <div><dt>最近清理</dt><dd><ObservedTime value={disk.watermarks.cleanedAt} /></dd></div>
+              <div><dt>最近指标计算</dt><dd><ObservedTime value={disk.watermarks.metricsUpdatedAt} /></dd></div>
+            </dl>
+            {maintain.data && <Notice>维护已排队。</Notice>}
+            {maintain.error && <Notice error>{errorText(maintain.error)}</Notice>}
+          </> : <PageError error={storage.error} retry={() => { void storage.refetch() }} />}
+        </div>
+      </AdminPanel>
+      <AdminPanel title="任务时间线" wide action={<Link className="admin-link" to="/admin/runs?tab=jobs">查看任务</Link>}>
+        <JobFeed query={jobs} items={recentJobs.slice(0, 8)} empty="暂无任务记录" />
+      </AdminPanel>
+    </div>
   </div>
+}
+
+function budgetValue(budget?: Limits['ai']['auto']) {
+  return budget ? number(budget.used) + ' / ' + number(budget.limit) : '—'
+}
+
+function ObservedTime({ value }: { value?: string | null }) {
+  return value ? <time dateTime={value}>{timestamp(value)}</time> : <>—</>
 }
 
 const jobTypes: Record<string, string> = {
@@ -104,28 +157,44 @@ const jobTypes: Record<string, string> = {
   refresh_readme_summary: '中文摘要',
 }
 
-function Jobs() {
-  const query = useQuery({
+function useSystemJobs() {
+  return useQuery({
     queryKey: ['jobs'],
     queryFn: ({ signal }) => api<Items<Job>>('/system/jobs?limit=50', { signal }),
     refetchInterval: 10_000,
     staleTime: 0,
   })
-  if (query.isPending) return <Skeleton />
+}
+
+function JobBadge({ status }: { status: Job['status'] }) {
+  return <Badge tone={status === 'unknown' || status === 'failed' ? 'warning' : status === 'dead' ? 'hot' : status === 'succeeded' ? 'ok' : 'neutral'}>{jobLabel[status]}</Badge>
+}
+
+function Jobs() {
+  const query = useSystemJobs()
+  return <div className="admin-stack">
+    <SystemHeader><h1>任务</h1></SystemHeader>
+    <AdminPanel title="最近任务" action={<button className="button" onClick={() => { void query.refetch() }} disabled={query.isFetching}>刷新</button>}>
+      {query.error && query.data && <Notice error>{errorText(query.error)}</Notice>}
+      <JobFeed query={query} items={query.data?.items ?? []} empty="暂无任务记录" />
+    </AdminPanel>
+  </div>
+}
+
+function JobFeed({ query, items, empty }: { query: ReturnType<typeof useSystemJobs>; items: Job[]; empty: string }) {
+  if (query.isPending) return <Skeleton rows={1} />
   if (!query.data) return <PageError error={query.error} retry={() => { void query.refetch() }} />
-  if (!query.data.items.length) return <Empty title="暂无任务记录" />
-  return <section className="panel jobs-panel">
-    {query.error && <Notice error>{errorText(query.error)}</Notice>}
-    <div className="jobs-heading"><h2>最近任务</h2><button className="button" onClick={() => { void query.refetch() }} disabled={query.isFetching}>刷新</button></div>
-    <div className="job-table">
-      {query.data.items.map((job) => <div className="job-row" key={job.id}>
-        <div><strong>{jobTypes[job.type] ?? job.type}</strong><span className="minor muted numeric">#{job.id}</span></div>
-        <Badge tone={job.status === 'unknown' || job.status === 'failed' ? 'warning' : job.status === 'dead' ? 'hot' : job.status === 'succeeded' ? 'ok' : 'neutral'}>{jobLabel[job.status]}</Badge>
-        <span className="numeric minor muted">{job.attempts} / {job.maxAttempts} 次</span>
-        <time className="minor muted" dateTime={job.updatedAt}>{timestamp(job.updatedAt)}</time>
-        {job.errorCode && <code className="minor tone-hot">{job.errorCode}</code>}
-        {job.repoId !== null && <Link className="icon-button" to={'/repos/' + job.repoId} title="查看关联仓库" aria-label={'查看任务 ' + job.id + ' 的仓库'}><ArrowUpRight size={16} /></Link>}
-      </div>)}
-    </div>
-  </section>
+  if (!items.length) return <p className="admin-empty">{empty}</p>
+  return <div className="admin-table-scroll"><table className="admin-table">
+    <thead><tr><th scope="col">任务</th><th scope="col">状态</th><th scope="col">执行次数</th><th scope="col">更新时间</th></tr></thead>
+    <tbody>{items.map((job) => <tr key={job.id}>
+      <td><div className="admin-task-name">
+        <strong>{jobTypes[job.type] ?? job.type}</strong><span className="minor muted numeric">#{job.id}</span>
+        {job.repoId !== null && <Link className="admin-link" to={'/admin/repos/' + job.repoId} title="查看关联仓库" aria-label={'查看任务 ' + job.id + ' 的仓库'}><ArrowUpRight size={14} /></Link>}
+      </div>{job.errorCode && <code className="minor tone-hot">{job.errorCode}</code>}</td>
+      <td><JobBadge status={job.status} /></td>
+      <td className="numeric">{job.attempts} / {job.maxAttempts}</td>
+      <td><ObservedTime value={job.updatedAt} /></td>
+    </tr>)}</tbody>
+  </table></div>
 }
