@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -23,12 +24,12 @@ func (e *Engine) normalize(ctx context.Context, source *sdk.Repository) (*sdk.Re
 		return nil, errors.New("发现源缺少仓库数据")
 	}
 	db := e.Queue.DB.WithContext(ctx)
-	blocked := db.Model(&storage.Repository{}).Where("blocked=1")
+	blocked := db.Model(&storage.Repository{}).Where(storage.RepositoryColumns.Blocked + "=1")
 	if source.GetID() > 0 {
-		blocked = blocked.Where("repo_id=?", source.GetID())
+		blocked = blocked.Where(storage.RepositoryColumns.RepoID+"=?", source.GetID())
 	} else {
 		// Trending 只有名称时，先跳过当前已屏蔽地址，避免额外请求仓库详情。
-		blocked = blocked.Where("full_name=? COLLATE NOCASE AND name_is_current=1", source.GetFullName())
+		blocked = blocked.Where(storage.RepositoryColumns.FullName+"=? COLLATE NOCASE AND "+storage.RepositoryColumns.NameIsCurrent+"=1", source.GetFullName())
 	}
 	var count int64
 	if err := blocked.Count(&count).Error; err != nil || count > 0 {
@@ -43,7 +44,7 @@ func (e *Engine) normalize(ctx context.Context, source *sdk.Repository) (*sdk.Re
 	}
 	var known storage.Repository
 	err := db.Take(&known,
-		"repo_id = ? OR (full_name = ? COLLATE NOCASE AND name_is_current=1)", source.GetID(), source.GetFullName()).Error
+		storage.RepositoryColumns.RepoID+" = ? OR ("+storage.RepositoryColumns.FullName+" = ? COLLATE NOCASE AND "+storage.RepositoryColumns.NameIsCurrent+"=1)", source.GetID(), source.GetFullName()).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return source, nil
 	}
@@ -51,7 +52,7 @@ func (e *Engine) normalize(ctx context.Context, source *sdk.Repository) (*sdk.Re
 		return nil, err
 	}
 	if known.RepoID != source.GetID() || !strings.EqualFold(known.FullName, source.GetFullName()) ||
-		known.State == "unavailable" || known.State == "address_pending" {
+		known.State == consts.StatusUnavailable || known.State == consts.StatusAddressPending {
 		result, err := e.GitHub.RepositoryByID(ctx, source.GetID(), gh.Policy{Resource: gh.Core, RepositoryID: source.GetID()})
 		if errors.Is(err, storage.ErrRepositoryBlocked) {
 			return nil, nil
@@ -71,7 +72,9 @@ type TrendingBatch struct {
 	Size         int   `json:"size"`
 }
 
-func BatchKey(source, period string) string { return "trending:" + source + ":" + period }
+func BatchKey(source, period string) string {
+	return consts.TrendingStatePrefix + source + ":" + period
+}
 
 func (e *Engine) discoverTrending(ctx context.Context, p Payload) (func(*gorm.DB) error, error) {
 	entries, err := e.Trending.Fetch(ctx, p.Language, p.Period)
@@ -79,7 +82,7 @@ func (e *Engine) discoverTrending(ctx context.Context, p Payload) (func(*gorm.DB
 		return nil, err
 	}
 	var previous storage.MaintenanceState
-	err = e.Queue.DB.WithContext(ctx).Take(&previous, "key = ?", BatchKey(p.SourceKey, p.Period)).Error
+	err = e.Queue.DB.WithContext(ctx).Take(&previous, storage.MaintenanceStateColumns.Key+" = ?", BatchKey(p.SourceKey, p.Period)).Error
 	if err == nil {
 		var old TrendingBatch
 		if err := json.Unmarshal([]byte(previous.Value), &old); err != nil {
@@ -110,7 +113,7 @@ func (e *Engine) discoverTrending(ctx context.Context, p Payload) (func(*gorm.DB
 	return func(tx *gorm.DB) error {
 		key := BatchKey(p.SourceKey, p.Period)
 		var existing storage.MaintenanceState
-		err := tx.Take(&existing, "key = ?", key).Error
+		err := tx.Take(&existing, storage.MaintenanceStateColumns.Key+" = ?", key).Error
 		if err == nil {
 			var batch TrendingBatch
 			if err := json.Unmarshal([]byte(existing.Value), &batch); err != nil {
@@ -253,8 +256,8 @@ func splitSearch(p Payload, repos []*sdk.Repository) ([]Payload, error) {
 }
 
 func (e *Engine) enqueueSearch(tx *gorm.DB, parent storage.Job, p Payload) error {
-	key := fmt.Sprintf("auto:discover_search:%d:%d:%d:%d:%d:%d:%d",
+	key := fmt.Sprintf(consts.SearchShardDedupFormat,
 		p.RuleID, Slot(p.PlannedAt), p.MinStars, p.MaxStars, p.CreatedFrom, p.CreatedUntil, p.Page)
-	_, err := e.Queue.enqueue(tx, "discover_search", nil, key, p, parent.Priority, time.Now().UnixMilli())
+	_, err := e.Queue.enqueue(tx, consts.JobDiscoverSearch, nil, key, p, parent.Priority, time.Now().UnixMilli())
 	return err
 }

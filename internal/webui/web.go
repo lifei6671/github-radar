@@ -68,14 +68,14 @@ func pageRoute(name string) bool {
 		return true
 	}
 	switch name {
-	case "", "trending", "repos", "categories", "themes", "starred":
+	case "", "trending", "repos", "categories", consts.PublicTopicPathSegment, "starred":
 		return true
 	}
 	prefix, value, found := strings.Cut(name, "/")
 	if !found || value == "" {
 		return false
 	}
-	if prefix == "categories" || prefix == "themes" {
+	if prefix == "categories" || prefix == consts.PublicTopicPathSegment {
 		return !strings.ContainsAny(value, "/.")
 	}
 	if prefix == "repos" {
@@ -88,7 +88,7 @@ func pageRoute(name string) bool {
 func adminPage(name string) bool {
 	switch name {
 	case "admin", "admin/login", "admin/runs", "admin/repos", "admin/topics", "admin/watchlist", "admin/setup",
-		"topics", "watchlist", "system", "setup":
+		"watchlist", "system", "setup":
 		return true
 	}
 	id, found := strings.CutPrefix(name, "admin/repos/")

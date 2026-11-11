@@ -19,7 +19,7 @@ type HourlyMetric struct {
 	Quality       string `gorm:"column:quality"`
 }
 
-func (HourlyMetric) TableName() string { return "metrics_hourly" }
+func (HourlyMetric) TableName() string { return HourlyMetricTable }
 
 type DailyMetric struct {
 	RepoID        int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
@@ -31,7 +31,7 @@ type DailyMetric struct {
 	RankInDay     *int     `gorm:"column:rank_in_day"`
 }
 
-func (DailyMetric) TableName() string { return "metrics_daily" }
+func (DailyMetric) TableName() string { return DailyMetricTable }
 
 type PendingMetric struct {
 	RepoID        int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
@@ -40,7 +40,7 @@ type PendingMetric struct {
 	MetricAnchors `gorm:"embedded"`
 }
 
-func (PendingMetric) TableName() string { return "metric_rollup_pending" }
+func (PendingMetric) TableName() string { return PendingMetricTable }
 
 // LatestMetric 记录同一轮 asOf 计算的窗口、榜单和热度，缺失数值以 NULL 保存。
 type LatestMetric struct {
@@ -64,7 +64,7 @@ type LatestMetric struct {
 	CalculatedAt       int64    `gorm:"column:calculated_at"`
 }
 
-func (LatestMetric) TableName() string { return "latest_metrics" }
+func (LatestMetric) TableName() string { return LatestMetricTable }
 
 type TrendingBatchRecord struct {
 	SourceKey    string `gorm:"column:source_key;primaryKey"`
@@ -73,4 +73,4 @@ type TrendingBatchRecord struct {
 	ObservedAt   int64  `gorm:"column:observed_at"`
 }
 
-func (TrendingBatchRecord) TableName() string { return "trending_batches" }
+func (TrendingBatchRecord) TableName() string { return TrendingBatchRecordTable }

@@ -145,6 +145,25 @@ npm --prefix web test
 
 浏览器测试覆盖 390、768、1440、1920 像素视口下的亮暗主题和关键流程。测试截图写到 `web/test-results`。前端参考与分发许可见 [第三方声明](web/THIRD_PARTY_NOTICES.md)。
 
+### 整体验收
+
+`go test ./cmd/radar -run '^TestAcceptanceBusiness$' -v -count=1` 使用独立 SQLite 和实际 Go 服务进程验证阶段 0～3。GitHub 与模型请求由本地 HTTP 服务提供固定响应，采集、摘要 Worker、Gin API 和数据库均走项目实际代码。
+
+构建前端并安装 Chromium 后，可以启用 Compose 和真实 R2 验收。下面的 PowerShell 示例使用专用测试桶的本地凭据文件。
+
+```powershell
+npm --prefix web run build
+npx --prefix web playwright install chromium
+$env:RADAR_ACCEPTANCE_BROWSER = '1'
+$env:RADAR_ACCEPTANCE_DOCKER = '1'
+$env:RADAR_ACCEPTANCE_R2_FILE = (Get-Item -LiteralPath 's3-r2-test.local.json').FullName
+go test ./cmd/radar -run '^TestAcceptance(Business|Compose|LiveR2)$' -v -count=1 -timeout 10m
+```
+
+R2 凭据文件读取 `endpoint`、`bucket`、`prefix` 及 `primary.access_key_id` 和 `primary.secret_access_key`。文件可放在仓库外，仓库根目录的 `s3-r2-test.local.json` 已加入 Git 和 Docker 忽略规则。也可通过 `RADAR_ACCEPTANCE_R2_ENDPOINT`、`RADAR_ACCEPTANCE_R2_BUCKET`、`RADAR_ACCEPTANCE_R2_ACCESS_KEY_ID`、`RADAR_ACCEPTANCE_R2_SECRET_ACCESS_KEY` 和可选的 `RADAR_ACCEPTANCE_R2_PREFIX` 提供连接。
+
+Compose 使用本机随机端口和专用数据卷，重建容器后核对持久化。真实 R2 用例在唯一测试子前缀下写入六个日期对象来验证五日保留，结束时清理该前缀。浏览器经实际页面完成安装和后台恢复。技术设计要求的 7～14 天生产观察需在目标环境连续记录。
+
 ## Docker
 
 设置 `ADMIN_TOKEN` 后运行 `docker compose -f deploy/compose.yaml up --build`。镜像构建阶段生成 Vite 产物，运行镜像由 Gin 提供 UI 与 API。Compose 将端口发布到宿主机回环地址，并通过 `radar-data` 卷保存数据库。

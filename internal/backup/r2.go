@@ -18,6 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 const objectSuffix = ".db.gz"
@@ -64,7 +66,7 @@ func newR2(c Connection) objectStore {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	client := s3.New(s3.Options{
-		BaseEndpoint: aws.String(c.Endpoint), Region: "auto", UsePathStyle: true,
+		BaseEndpoint: aws.String(c.Endpoint), Region: consts.R2Region, UsePathStyle: true,
 		Credentials: credentials.NewStaticCredentialsProvider(c.AccessKeyID, c.SecretAccessKey, ""),
 		HTTPClient:  httpClient, RetryMaxAttempts: 2,
 		RequestChecksumCalculation: aws.RequestChecksumCalculationWhenRequired,

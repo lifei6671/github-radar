@@ -172,7 +172,8 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
         kind: index === 5 ? 'trending' : 'stars', fullName: names[3], value: index === 5 ? 2 : 1_000 * (5 - index),
         at: new Date(Date.parse(at) - index * 7 * 86_400_000).toISOString(),
       })) : []
-      return theme ? reply(route, { ...theme, milestones }) : reply(route, { code: 'not_found' }, 404)
+      return theme ? reply(route, { ...theme, groupName: themeGroups.find(({ slug }) => slug === theme.groupSlug)?.name, milestones }) :
+        reply(route, { code: 'not_found' }, 404)
     }
     if (path === '/repos' || path === '/discovery') {
       const categoriesWanted = query.getAll('category')

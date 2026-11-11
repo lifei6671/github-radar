@@ -1,6 +1,6 @@
 import { QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, ArrowDownRight, ArrowRight, Bookmark, ChartNoAxesCombined, Crosshair, Ellipsis, Github, Grid2X2, LayoutDashboard,
+  Activity, ArrowDownRight, ArrowLeft, ArrowRight, Bookmark, ChartNoAxesCombined, Crosshair, Ellipsis, Github, Grid2X2, LayoutDashboard,
   Layers3, ListFilter, LogOut, Monitor, Moon, Radar, Search, Sun, Workflow,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
@@ -8,13 +8,14 @@ import type { FormEvent } from 'react'
 import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router'
 import { api, ApiError, errorText, setToken, useSession } from '../api/client'
 import { ActionButton, BackToTop, Dialog, Notice, PageError, Skeleton } from '../components/ui'
+import { topicsPath } from '../lib/format'
 import { SetupBackup, useBackupStatus, useRestoredData } from '../pages/backup'
 
 const publicNav = [
   { path: '/', label: '发现', icon: Radar },
   { path: '/repos', label: '全部项目', icon: Layers3 },
   { path: '/trending', label: '热点榜', icon: ChartNoAxesCombined },
-  { path: '/themes', label: '主题', icon: Grid2X2 },
+  { path: topicsPath, label: '主题', icon: Grid2X2 },
   { path: '/starred', label: '收藏', icon: Bookmark },
 ]
 const adminNav = [
@@ -147,6 +148,7 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
   const pathname = location.pathname.replace(/\/+$/, '')
   const system = pathname === '/admin/runs'
   const repoDetail = pathname.startsWith(admin ? '/admin/repos/' : '/repos/')
+  const topicDetail = !admin && pathname.startsWith(topicsPath + '/')
   const navigation = admin ? adminNav : publicNav
   const page = repoDetail ? '仓库详情' : navigation.find(({ path }) => path !== '/' && (location.pathname === path || location.pathname.startsWith(path + '/')))?.label
   const showMaintenance = maintenance && (!system || new URLSearchParams(location.search).get('tab') !== 'backup')
@@ -181,7 +183,8 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
       </div>
     </aside>
     <header className="mobile-bar">
-      <Link to="/" aria-label={admin ? '返回前台' : 'GitHub 雷达首页'}><Brand admin={admin} /></Link>
+      {topicDetail ? <Link to={topicsPath} className="project-topic-back"><ArrowLeft size={15} aria-hidden />返回全部主题</Link> :
+        <Link to="/" aria-label={admin ? '返回前台' : 'GitHub 雷达首页'}><Brand admin={admin} /></Link>}
       <div className="mobile-actions">
         <button className="icon-button" aria-label="搜索仓库" onClick={() => setSearch(true)}><Search size={19} /></button>
         <ThemeControl theme={theme} />

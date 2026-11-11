@@ -2,12 +2,14 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -21,9 +23,9 @@ type metricView struct {
 
 func (v metricView) window(key string) gin.H {
 	w := v.windows[key]
-	resolution := "raw"
-	if key == "30d" {
-		resolution = "mixed"
+	resolution := consts.ResolutionRaw
+	if key == consts.Window30d {
+		resolution = consts.ResolutionMixed
 	}
 	if w.Resolution != nil {
 		resolution = *w.Resolution
@@ -48,14 +50,15 @@ func (a *collectionAPI) metricViews(db *gorm.DB, repos []storage.Repository) (ma
 		storage.LatestMetric
 		Rank *int
 	}
-	if err := db.Raw(`
+	if err := db.Raw(fmt.Sprintf(`
 WITH ranks AS (
- SELECT m.repo_id,ROW_NUMBER() OVER(ORDER BY m.hotness_score DESC,m.repo_id) AS rank
- FROM latest_metrics m JOIN repositories r ON r.repo_id=m.repo_id
- WHERE r.state='active' AND m.hotness_score IS NOT NULL
+ SELECT m.%[1]s,ROW_NUMBER() OVER(ORDER BY m.%[2]s DESC,m.%[1]s) AS rank
+ FROM %[3]s m JOIN %[4]s r ON r.%[5]s=m.%[1]s
+ WHERE r.%[6]s='%[7]s' AND m.%[2]s IS NOT NULL
 )
-SELECT m.*, ranks.rank FROM latest_metrics m JOIN repositories r ON r.repo_id=m.repo_id AND r.state='active'
-LEFT JOIN ranks ON ranks.repo_id=m.repo_id WHERE m.repo_id IN ?`, ids).Scan(&rows).Error; err != nil {
+SELECT m.*, ranks.rank FROM %[3]s m JOIN %[4]s r ON r.%[5]s=m.%[1]s AND r.%[6]s='%[7]s'
+LEFT JOIN ranks ON ranks.%[1]s=m.%[1]s WHERE m.%[1]s IN ?`,
+		storage.LatestMetricColumns.RepoID, storage.LatestMetricColumns.HotnessScore, storage.LatestMetricTable, storage.RepositoryTable, storage.RepositoryColumns.RepoID, storage.RepositoryColumns.State, consts.StatusActive), ids).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
@@ -71,12 +74,17 @@ LEFT JOIN ranks ON ranks.repo_id=m.repo_id WHERE m.repo_id IN ?`, ids).Scan(&row
 	type spark struct{ RepoID, Bucket, Stars, Observed, Slot int64 }
 	var closes []spark
 	// 尚未合并的小时也能提供真实收盘样本，缺测小时保持空值。
-	if err := db.Raw(`
-SELECT repo_id,hour_start AS bucket,stars_close AS stars,close_observed_at AS observed,close_slot AS slot
-FROM metrics_hourly WHERE repo_id IN ? AND hour_start>=? AND hour_start<?
+	if err := db.Raw(fmt.Sprintf(`
+SELECT %[1]s,%[2]s AS bucket,%[9]s AS stars,%[10]s AS observed,%[11]s AS slot
+FROM %[3]s WHERE %[1]s IN ? AND %[2]s>=? AND %[2]s<?
 UNION ALL
-SELECT repo_id,bucket_start,stars_close,close_observed_at,close_slot FROM metric_rollup_pending
-WHERE resolution='hourly' AND repo_id IN ? AND bucket_start>=? AND bucket_start<?`, ids, from, to, ids, from, to).
+SELECT %[4]s,%[5]s,%[12]s,%[13]s,%[14]s FROM %[6]s
+WHERE %[7]s='%[8]s' AND %[4]s IN ? AND %[5]s>=? AND %[5]s<?`,
+		storage.HourlyMetricColumns.RepoID, storage.HourlyMetricColumns.HourStart, storage.HourlyMetricTable,
+		storage.PendingMetricColumns.RepoID, storage.PendingMetricColumns.BucketStart, storage.PendingMetricTable, storage.PendingMetricColumns.Resolution, consts.ResolutionHourly,
+		storage.HourlyMetricColumns.StarsClose, storage.HourlyMetricColumns.CloseObservedAt, storage.HourlyMetricColumns.CloseSlot,
+		storage.PendingMetricColumns.StarsClose, storage.PendingMetricColumns.CloseObservedAt, storage.PendingMetricColumns.CloseSlot),
+		ids, from, to, ids, from, to).
 		Scan(&closes).Error; err != nil {
 		return nil, err
 	}
@@ -114,15 +122,15 @@ func (a *collectionAPI) trend(c *gin.Context) {
 		resolution string
 	}
 	r, ok := map[string]interval{
-		"24h": {1, 0, "raw"}, "7d": {7, 0, "raw"}, "30d": {30, metrics.Hour, "hourly"}, "180d": {180, metrics.Day, "daily"},
-	}[c.DefaultQuery("range", "7d")]
+		consts.Window24h: {1, 0, consts.ResolutionRaw}, consts.Window7d: {7, 0, consts.ResolutionRaw}, consts.Window30d: {30, metrics.Hour, consts.ResolutionHourly}, consts.Window180d: {180, metrics.Day, consts.ResolutionDaily},
+	}[c.DefaultQuery("range", consts.Window7d)]
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_range"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidRange})
 		return
 	}
 	db := a.db.WithContext(c.Request.Context())
 	var repo storage.Repository
-	if err := publicRepos(c, db).Take(&repo, "repo_id=?", id).Error; err != nil {
+	if err := publicRepos(c, db).Take(&repo, storage.RepositoryColumns.RepoID+"=?", id).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -137,10 +145,10 @@ func (a *collectionAPI) trend(c *gin.Context) {
 		updated = *repo.LastSuccessAt
 	}
 	points := make([]gin.H, 0)
-	if r.resolution == "raw" {
+	if r.resolution == consts.ResolutionRaw {
 		var snapshots []storage.RepoSnapshot
-		if err := db.Where("repo_id=? AND observed_at BETWEEN ? AND ?", id, from, to).
-			Order("observed_at,sample_slot").Find(&snapshots).Error; err != nil {
+		if err := db.Where(storage.RepoSnapshotColumns.RepoID+"=? AND "+storage.RepoSnapshotColumns.ObservedAt+" BETWEEN ? AND ?", id, from, to).
+			Order(storage.RepoSnapshotColumns.ObservedAt + "," + storage.RepoSnapshotColumns.SampleSlot).Find(&snapshots).Error; err != nil {
 			a.fail(c, err)
 			return
 		}
@@ -168,12 +176,12 @@ func (a *collectionAPI) trend(c *gin.Context) {
 		}
 		var buckets []bucket
 		var err error
-		if r.resolution == "hourly" {
-			err = db.Table("metrics_hourly").Select("*,hour_start AS at").
-				Where("repo_id=? AND hour_start>=? AND hour_start<?", id, from, to).Scan(&buckets).Error
+		if r.resolution == consts.ResolutionHourly {
+			err = db.Table(storage.HourlyMetricTable).Select("*,"+storage.HourlyMetricColumns.HourStart+" AS at").
+				Where(storage.HourlyMetricColumns.RepoID+"=? AND "+storage.HourlyMetricColumns.HourStart+">=? AND "+storage.HourlyMetricColumns.HourStart+"<?", id, from, to).Scan(&buckets).Error
 		} else {
-			err = db.Table("metrics_daily").Select("*,unixepoch(day)*1000 AS at").
-				Where("repo_id=? AND day>=? AND day<?", id, time.UnixMilli(from).UTC().Format(time.DateOnly),
+			err = db.Table(storage.DailyMetricTable).Select("*,unixepoch("+storage.DailyMetricColumns.Day+")*1000 AS at").
+				Where(storage.DailyMetricColumns.RepoID+"=? AND "+storage.DailyMetricColumns.Day+">=? AND "+storage.DailyMetricColumns.Day+"<?", id, time.UnixMilli(from).UTC().Format(time.DateOnly),
 					time.UnixMilli(to).UTC().Format(time.DateOnly)).Scan(&buckets).Error
 		}
 		if err != nil {

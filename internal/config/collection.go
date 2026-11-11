@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 // GitHub 控制 API 版本、上游超时和各资源的本地软预算。
@@ -61,7 +63,7 @@ func collectionDefaults() (GitHub, Scheduler, Discovery) {
 	scheduler := Scheduler{
 		TickMinutes: 5, TrendingDailyMinutes: 60, TrendingOtherMinutes: 360,
 		SearchRoundMinutes: 30, MaxHot: 200, MaxActive: 800, MaxNormal: 2000, MaxMonitoredRepos: 5000,
-		IntervalsMinutes: map[string]int{"S": 15, "A": 60, "B": 360, "C": 1440}, LeaseSeconds: 180,
+		IntervalsMinutes: map[string]int{consts.GradeS: 15, consts.GradeA: 60, consts.GradeB: 360, consts.GradeC: 1440}, LeaseSeconds: 180,
 	}
 	discovery := Discovery{
 		TrendingEnabled: true, TrendingLanguages: []string{"go", "python", "typescript", "rust"},
@@ -86,10 +88,10 @@ func TrendingSource(key string) (source, language, period string, err error) {
 		return "", "", "", fmt.Errorf("Trending 规则键缺少周期")
 	}
 	source, period = key[:index], key[index+1:]
-	if period != "daily" && period != "weekly" && period != "monthly" {
+	if period != consts.PeriodDaily && period != consts.PeriodWeekly && period != consts.PeriodMonthly {
 		return "", "", "", fmt.Errorf("Trending 周期必须为 daily、weekly 或 monthly")
 	}
-	if source == "all" {
+	if source == consts.TrendingAll {
 		return source, "", period, nil
 	}
 	language, ok := strings.CutPrefix(source, "language:")
@@ -118,7 +120,7 @@ func (cfg Runtime) validateCollection() error {
 	}
 	remaining := s.MaxMonitoredRepos
 	var requestsPerHour float64
-	for i, grade := range []string{"S", "A", "B", "C"} {
+	for i, grade := range []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC} {
 		minutes := s.IntervalsMinutes[grade]
 		if minutes < 5 || int64(minutes) > DurationLimit(time.Minute)-5 {
 			return fmt.Errorf("scheduler.intervals_minutes.%s 必须是有效的分钟数，至少为 5", grade)

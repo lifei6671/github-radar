@@ -8,10 +8,11 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
-var gradeNames = []string{"S", "A", "B", "C"}
+var gradeNames = []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC}
 
 func applyGrades(tx *gorm.DB, cfg config.Config, repos []storage.Repository, rows []storage.LatestMetric, exact []bool, asOf int64) error {
 	order := make([]int, len(repos))
@@ -89,9 +90,9 @@ func applyGrades(tx *gorm.DB, cfg config.Config, repos []storage.Repository, row
 		if grade == repo.Grade && sameTime(item.since, repo.BelowGradeSince) {
 			continue
 		}
-		updates := map[string]any{"grade": grade, "below_grade_since": item.since, "updated_at": asOf}
+		updates := map[string]any{storage.RepositoryColumns.Grade: grade, storage.RepositoryColumns.BelowGradeSince: item.since, storage.RepositoryColumns.UpdatedAt: asOf}
 		if level < slices.Index(gradeNames, repo.Grade) && repo.FirstNotFoundAt == nil {
-			updates["next_fetch_at"] = min(asOf, repo.NextFetchAt)
+			updates[storage.RepositoryColumns.NextFetchAt] = min(asOf, repo.NextFetchAt)
 		}
 		if err := tx.Model(&repo).Updates(updates).Error; err != nil {
 			return err

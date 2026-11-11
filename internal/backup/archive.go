@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 type checkedReader struct {
@@ -79,7 +81,7 @@ func compressFile(ctx context.Context, source, dest string) (raw, size int64, di
 	raw, err = io.Copy(gzipWriter, checkedReader{ctx, in})
 	err = errors.Join(err, gzipWriter.Close(), out.Close())
 	if err != nil {
-		return 0, 0, "", "", Fault("backup_compression_failed")
+		return 0, 0, "", "", Fault(consts.CodeBackupCompressionFailed)
 	}
 	archive, err := os.Open(dest)
 	if err != nil {
@@ -92,11 +94,11 @@ func compressFile(ctx context.Context, source, dest string) (raw, size int64, di
 	}
 	check, err := gzip.NewReader(archive)
 	if err != nil {
-		return 0, 0, "", "", Fault("backup_compression_failed")
+		return 0, 0, "", "", Fault(consts.CodeBackupCompressionFailed)
 	}
 	n, readErr := io.Copy(io.Discard, checkedReader{ctx, check})
 	if closeErr := check.Close(); readErr != nil || closeErr != nil || n != raw {
-		return 0, 0, "", "", Fault("backup_compression_failed")
+		return 0, 0, "", "", Fault(consts.CodeBackupCompressionFailed)
 	}
 	return raw, file.Size(), hex.EncodeToString(sha.Sum(nil)), base64.StdEncoding.EncodeToString(md.Sum(nil)), nil
 }
@@ -162,7 +164,7 @@ func download(ctx context.Context, store objectStore, c Connection, key, dir str
 	hash := sha256.New()
 	n, err := io.Copy(io.MultiWriter(dst, hash), io.LimitReader(checkedReader{ctx, remote}, obj.Size+1))
 	if closeErr := dst.Close(); err != nil || closeErr != nil || n != obj.Size || hex.EncodeToString(hash.Sum(nil)) != hex.EncodeToString(sum) {
-		return "", Object{}, Fault("backup_checksum_mismatch")
+		return "", Object{}, Fault(consts.CodeBackupChecksumMismatch)
 	}
 	source, err := os.Open(packed)
 	if err != nil {
@@ -171,7 +173,7 @@ func download(ctx context.Context, store objectStore, c Connection, key, dir str
 	defer source.Close()
 	unzip, err := gzip.NewReader(source)
 	if err != nil {
-		return "", Object{}, Fault("backup_gzip_invalid")
+		return "", Object{}, Fault(consts.CodeBackupGzipInvalid)
 	}
 	defer unzip.Close()
 	path := filepath.Join(dir, "source.db")
@@ -181,7 +183,7 @@ func download(ctx context.Context, store objectStore, c Connection, key, dir str
 	}
 	raw, err := io.Copy(file, io.LimitReader(checkedReader{ctx, unzip}, obj.RawSize+1))
 	if closeErr := file.Close(); err != nil || closeErr != nil || raw != obj.RawSize {
-		return "", Object{}, Fault("backup_gzip_invalid")
+		return "", Object{}, Fault(consts.CodeBackupGzipInvalid)
 	}
 	return path, obj, nil
 }

@@ -37,7 +37,7 @@ export interface ProjectThemeGroup { slug: string; name: string; description: st
 export interface ProjectThemeDirectory { items: ProjectTheme[]; groups: ProjectThemeGroup[] }
 
 export interface ThemeMilestone { kind: 'trending' | 'stars'; fullName: string; at: string; value: number }
-export interface ProjectThemeDetail extends ProjectTheme { milestones: ThemeMilestone[] }
+export interface ProjectThemeDetail extends ProjectTheme { groupName: string; milestones: ThemeMilestone[] }
 
 export interface TrendingEntry {
   sourceKey: string

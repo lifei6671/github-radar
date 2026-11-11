@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -25,7 +26,7 @@ func dayBoundary(now time.Time, hour int) time.Time {
 
 func watermark(tx *gorm.DB, key string) (int64, error) {
 	var row storage.MaintenanceState
-	if err := tx.Find(&row, "key=?", key).Error; err != nil || row.Key == "" {
+	if err := tx.Find(&row, storage.MaintenanceStateColumns.Key+"=?", key).Error; err != nil || row.Key == "" {
 		return 0, err
 	}
 	return strconv.ParseInt(row.Value, 10, 64)
@@ -42,15 +43,15 @@ func Rollup(ctx context.Context, db *gorm.DB, cfg config.Config, now time.Time) 
 		resolution, key string
 		cutoff          int64
 	}{
-		{"hourly", HourlyKey, now.UTC().Truncate(time.Hour).UnixMilli()},
-		{"daily", DailyKey, dayBoundary(now, cfg.Maintenance.DailyRollupHour).UnixMilli()},
+		{consts.ResolutionHourly, HourlyKey, now.UTC().Truncate(time.Hour).UnixMilli()},
+		{consts.ResolutionDaily, DailyKey, dayBoundary(now, cfg.Maintenance.DailyRollupHour).UnixMilli()},
 	} {
 		for {
 			done := false
 			err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 				var pending []storage.PendingMetric
-				if err := tx.Where("resolution=? AND bucket_start<?", layer.resolution, layer.cutoff).
-					Order("bucket_start,repo_id").Limit(min(cfg.Maintenance.BatchRows, 200)).Find(&pending).Error; err != nil {
+				if err := tx.Where(storage.PendingMetricColumns.Resolution+"=? AND "+storage.PendingMetricColumns.BucketStart+"<?", layer.resolution, layer.cutoff).
+					Order(storage.PendingMetricColumns.BucketStart + "," + storage.PendingMetricColumns.RepoID).Limit(min(cfg.Maintenance.BatchRows, 200)).Find(&pending).Error; err != nil {
 					return err
 				}
 				if len(pending) == 0 {
@@ -63,7 +64,7 @@ func Rollup(ctx context.Context, db *gorm.DB, cfg config.Config, now time.Time) 
 				}
 				for _, part := range pending {
 					var err error
-					if layer.resolution == "hourly" {
+					if layer.resolution == consts.ResolutionHourly {
 						err = rollHour(tx, cfg.Metrics.Hour, part)
 					} else {
 						err = rollDay(tx, cfg.Metrics.Day, part)
@@ -102,7 +103,7 @@ func merge(dest *storage.MetricAnchors, part storage.MetricAnchors) {
 
 func rollHour(tx *gorm.DB, tolerance config.BoundaryToleranceMinutes, part storage.PendingMetric) error {
 	hour := storage.HourlyMetric{RepoID: part.RepoID, HourStart: part.BucketStart}
-	if err := tx.Find(&hour, "repo_id=? AND hour_start=?", part.RepoID, part.BucketStart).Error; err != nil {
+	if err := tx.Find(&hour, storage.HourlyMetricColumns.RepoID+"=? AND "+storage.HourlyMetricColumns.HourStart+"=?", part.RepoID, part.BucketStart).Error; err != nil {
 		return err
 	}
 	merge(&hour.MetricAnchors, part.MetricAnchors)
@@ -114,8 +115,8 @@ func rollHour(tx *gorm.DB, tolerance config.BoundaryToleranceMinutes, part stora
 
 	// 向日层传递本次增量，历史小时桶重跑时不会重复统计旧样本。
 	dayStart := time.UnixMilli(part.BucketStart).UTC().Truncate(24 * time.Hour).UnixMilli()
-	day := storage.PendingMetric{RepoID: part.RepoID, Resolution: "daily", BucketStart: dayStart}
-	if err := tx.Find(&day, "repo_id=? AND resolution='daily' AND bucket_start=?", part.RepoID, dayStart).Error; err != nil {
+	day := storage.PendingMetric{RepoID: part.RepoID, Resolution: consts.ResolutionDaily, BucketStart: dayStart}
+	if err := tx.Find(&day, storage.PendingMetricColumns.RepoID+"=? AND "+storage.PendingMetricColumns.Resolution+"='"+consts.ResolutionDaily+"' AND "+storage.PendingMetricColumns.BucketStart+"=?", part.RepoID, dayStart).Error; err != nil {
 		return err
 	}
 	merge(&day.MetricAnchors, part.MetricAnchors)
@@ -125,7 +126,7 @@ func rollHour(tx *gorm.DB, tolerance config.BoundaryToleranceMinutes, part stora
 func rollDay(tx *gorm.DB, tolerance config.BoundaryToleranceMinutes, part storage.PendingMetric) error {
 	date := time.UnixMilli(part.BucketStart).UTC().Format(time.DateOnly)
 	day := storage.DailyMetric{RepoID: part.RepoID, Day: date}
-	if err := tx.Find(&day, "repo_id=? AND day=?", part.RepoID, date).Error; err != nil {
+	if err := tx.Find(&day, storage.DailyMetricColumns.RepoID+"=? AND "+storage.DailyMetricColumns.Day+"=?", part.RepoID, date).Error; err != nil {
 		return err
 	}
 	merge(&day.MetricAnchors, part.MetricAnchors)

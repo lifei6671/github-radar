@@ -3,6 +3,7 @@ package topics
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
@@ -56,12 +58,12 @@ func Generate(ctx context.Context, db *gorm.DB, cfg config.Recommendations, now 
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var computed storage.MaintenanceState
 		// 停机恢复时等计算 Worker 发布有效信号，再写当天的选题完成水位。
-		if err := tx.Find(&computed, "key=?", metrics.ComputeKey).Error; err != nil ||
+		if err := tx.Find(&computed, storage.MaintenanceStateColumns.Key+"=?", metrics.ComputeKey).Error; err != nil ||
 			computed.Key == "" || computed.UpdatedAt < now.Add(-signalAge).UnixMilli() {
 			return err
 		}
 		var marker storage.MaintenanceState
-		if err := tx.Find(&marker, "key=?", dayKey).Error; err != nil ||
+		if err := tx.Find(&marker, storage.MaintenanceStateColumns.Key+"=?", dayKey).Error; err != nil ||
 			(strings.HasPrefix(marker.Value, cfg.Timezone+"/") && marker.Value >= day) {
 			return err
 		}
@@ -82,14 +84,15 @@ func Generate(ctx context.Context, db *gorm.DB, cfg config.Recommendations, now 
 
 func recommendable(tx *gorm.DB, cfg config.Recommendations, now time.Time) ([]option, error) {
 	var rows []input
-	if err := tx.Raw(repoSignalsSQL+`
-WHERE r.state='active' AND r.disabled=0 AND r.archived=0 AND r.name_is_current=1
-  AND (r.starred_by_user=1 OR trim(coalesce(r.description,''))<>'' OR s.repo_id IS NOT NULL)
-  AND (r.starred_by_user=1 OR m.delta_24h>0 OR m.trending_score>0 OR m.persistence_score>0)`, now.Add(-signalAge).UnixMilli()).Scan(&rows).Error; err != nil {
+	if err := tx.Raw(repoSignalsSQL+fmt.Sprintf(`
+WHERE r.%[1]s='%[2]s' AND r.%[3]s=0 AND r.%[4]s=0 AND r.%[5]s=1
+  AND (r.%[6]s=1 OR trim(coalesce(r.%[7]s,''))<>'' OR s.%[8]s IS NOT NULL)
+  AND (r.%[6]s=1 OR m.%[9]s>0 OR m.%[10]s>0 OR m.%[11]s>0)`,
+		storage.RepositoryColumns.State, consts.StatusActive, storage.RepositoryColumns.Disabled, storage.RepositoryColumns.Archived, storage.RepositoryColumns.NameIsCurrent, storage.RepositoryColumns.StarredByUser, storage.RepositoryColumns.Description, storage.AISummaryColumns.RepoID, storage.LatestMetricColumns.Delta24h, storage.LatestMetricColumns.TrendingScore, storage.LatestMetricColumns.PersistenceScore), now.Add(-signalAge).UnixMilli()).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	var existing []storage.TopicCandidate
-	if err := tx.Where("angle_key='project'").Find(&existing).Error; err != nil {
+	if err := tx.Where(storage.TopicCandidateColumns.AngleKey + "='" + consts.TopicAngleProject + "'").Find(&existing).Error; err != nil {
 		return nil, err
 	}
 	byRepo := make(map[int64]storage.TopicCandidate, len(existing))
@@ -99,7 +102,7 @@ WHERE r.state='active' AND r.disabled=0 AND r.archived=0 AND r.name_is_current=1
 	options := make([]option, 0, len(rows))
 	for _, row := range rows {
 		prev := byRepo[row.RepoID]
-		if prev.ID != 0 && prev.Status != "candidate" && !materialChange(prev, row, cfg.ReentryGrowth) {
+		if prev.ID != 0 && prev.Status != consts.StatusCandidate && !materialChange(prev, row, cfg.ReentryGrowth) {
 			continue
 		}
 		groups := [4]bool{row.Growth != nil && *row.Growth > 0, row.TrendingRank != nil,
@@ -112,19 +115,24 @@ WHERE r.state='active' AND r.disabled=0 AND r.archived=0 AND r.name_is_current=1
 	return options, nil
 }
 
-const repoSignalsSQL = `
-SELECT r.*, m.hotness_score AS hotness,
- CASE WHEN json_extract(m.window_details_json,'$."24h".quality')='exact' THEN m.delta_24h END AS growth,
- CASE WHEN m.trending_score>0 THEN m.trending_rank END AS trending_rank,m.persistence_score AS persistence,
- s.summary_zh AS summary,s.features_json AS features,s.source_fingerprint AS fingerprint,s.source_readme_url AS source_url
-FROM repositories r LEFT JOIN latest_metrics m ON m.repo_id=r.repo_id AND m.calculated_at>=?
-LEFT JOIN ai_summaries s ON s.repo_id=r.repo_id AND s.summary_status='ready'
-`
+var repoSignalsSQL = fmt.Sprintf(`
+SELECT r.*, m.%[1]s AS hotness,
+ CASE WHEN json_extract(m.%[2]s,'$."%[21]s".quality')='%[3]s' THEN m.%[4]s END AS growth,
+ CASE WHEN m.%[5]s>0 THEN m.%[6]s END AS trending_rank,m.%[7]s AS persistence,
+ s.%[8]s AS summary,s.%[9]s AS features,s.%[10]s AS fingerprint,s.%[11]s AS source_url
+FROM %[12]s r LEFT JOIN %[13]s m ON m.%[14]s=r.%[15]s AND m.%[16]s>=?
+LEFT JOIN %[17]s s ON s.%[18]s=r.%[15]s AND s.%[19]s='%[20]s'
+`,
+	storage.LatestMetricColumns.HotnessScore, storage.LatestMetricColumns.WindowDetailsJSON, consts.QualityExact, storage.LatestMetricColumns.Delta24h,
+	storage.LatestMetricColumns.TrendingScore, storage.LatestMetricColumns.TrendingRank, storage.LatestMetricColumns.PersistenceScore,
+	storage.AISummaryColumns.SummaryZh, storage.AISummaryColumns.FeaturesJSON, storage.AISummaryColumns.SourceFingerprint, storage.AISummaryColumns.SourceReadmeURL,
+	storage.RepositoryTable, storage.LatestMetricTable, storage.LatestMetricColumns.RepoID, storage.RepositoryColumns.RepoID, storage.LatestMetricColumns.CalculatedAt,
+	storage.AISummaryTable, storage.AISummaryColumns.RepoID, storage.AISummaryColumns.SummaryStatus, consts.StatusReady, consts.Window24h)
 
 func materialChange(previous storage.TopicCandidate, row input, threshold int) bool {
 	// 已处理项目需要已确认的 README 变动或精确净增的明显抬升。
 	if previous.SourceFingerprint != nil && row.Fingerprint != nil &&
-		strings.HasPrefix(*previous.SourceFingerprint, "readme:") && strings.HasPrefix(*row.Fingerprint, "readme:") &&
+		strings.HasPrefix(*previous.SourceFingerprint, consts.ReadmeFingerprintPrefix) && strings.HasPrefix(*row.Fingerprint, consts.ReadmeFingerprintPrefix) &&
 		*row.Fingerprint != *previous.SourceFingerprint && readerValue(row) != previous.ReaderValue {
 		return true
 	}
@@ -230,9 +238,9 @@ func combined(row option) float64 {
 func save(tx *gorm.DB, row option, group int, now int64) error {
 	candidate := row.previous
 	if candidate.ID == 0 {
-		candidate.RepoID, candidate.AngleKey, candidate.CreatedAt = row.RepoID, "project", now
+		candidate.RepoID, candidate.AngleKey, candidate.CreatedAt = row.RepoID, consts.TopicAngleProject, now
 	}
-	candidate.Status, candidate.UpdatedAt = "candidate", now
+	candidate.Status, candidate.UpdatedAt = consts.StatusCandidate, now
 	// 摘要待更新时保留上一组来源证据，后续重入判断需要比较同一版本的指纹和功能。
 	if row.Fingerprint != nil || candidate.SourceFingerprint == nil {
 		candidate.SourceFingerprint = row.Fingerprint

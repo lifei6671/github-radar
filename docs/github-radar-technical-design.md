@@ -133,7 +133,8 @@ github-radar/
 - SQLite 驱动使用纯 Go 的 modernc.org/sqlite，通过 database/sql 访问，免 CGO；恢复复用其 NewRestore/Backup API，不同时支持第二种驱动。
 - robfig/cron/v3、goquery、Go 标准 HTTP 客户端或 resty、log/slog。
 - React + TypeScript + Vite + Tailwind CSS 4 + React Router 客户端路由 + ECharts。页面布局与交互参考 AIHOT，按本项目仓库数据重写业务组件；后端嵌入构建后的静态资源。前端不保留 AIHOT 的 Node SSR、Fastify、PostgreSQL 或 pg-boss。
-- GORM 显式映射表与列，Goose 管理版本化 SQL 迁移；需要精确控制的任务和查询使用 SQL。
+- GORM 显式映射表与列，Goose 管理版本化 SQL 迁移。每个持久化模型提供对应的 `ModelColumns`，Go 中构造查询条件、排序、更新和冲突键时引用表名常量及字段映射。
+- 查询优先使用简单的条件、索引和参数绑定。原子任务领取、跨层保留检查等场景保留必要的复合 SQL。SQLite 专有语法用于通用 SQL 无法满足现有需求的场景。状态、任务类型、操作阶段和错误码等业务标识统一定义在 `internal/consts`。
 - 浏览器端使用 TanStack Query 管理请求缓存、失效和任务轮询；fetch 封装只负责 Bearer、JSON 和错误解析，不再自研并行缓存层。
 
 部署形态：单 Go 进程运行 API、调度器、GitHub 工作池、AI 工作池和维护任务；SQLite 存于持久化卷。第一版禁止多个进程同时对同一套任务进行调度，数据库仍需具备租约和幂等防护以处理重启场景。
@@ -849,7 +850,7 @@ WHERE (repo_id, sample_slot) IN (
 | GET/PUT /api/v1/system/discovery-tabs | 读取或保存发现页分类标签及精选门槛 |
 | GET /api/v1/public/discovery-tabs | 读取发现页分类标签，按展示顺序返回分类标识和显示名称 |
 | GET /api/v1/public/discovery | 精选仓库，支持分类和游标，返回命中信号的时间 `discoveryAt`。`sort=hotness` 返回精选中的热度前五 |
-| GET /api/v1/public/project-themes、/project-themes/:slug | 专题目录和详情，返回简介、可选图标和颜色、项目总数、30 天新增数及最近发现的项目。详情额外返回 `milestones` |
+| GET /api/v1/public/project-themes、/project-themes/:slug | 专题目录和详情，返回简介、可选图标和颜色、项目总数、30 天新增数及最近发现的项目。详情额外返回 `groupName` 和 `milestones` |
 | GET/PUT /api/v1/system/project-themes | 后台读取和保存专题，使用共享修订号 |
 | GET /api/v1/system/storage | SQLite 大小、快照条数、清理水位 |
 | POST /api/v1/system/maintenance/run | 鉴权后手动启动维护任务 |
@@ -915,7 +916,7 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 | /trending | 热点榜 | 24h/7d Star 净增、排名、上榜与走势 |
 | /repos | 全部动态 | 仓库筛选、技术语言、主题、等级和浏览器收藏 |
 | /repos/:owner/:name | 新闻详情 | 独立公开页面，展示 Star 曲线、中文摘要和来源 |
-| /themes、/themes/:slug | 专题页 | 独立专题目录，默认展示该专题近期精选，可切换全部项目 |
+| /topics、/topics/:slug | 专题页 | 独立专题目录，详情展示所属方向、大事记和近期精选，可切换全部项目 |
 | /categories、/categories/:slug | 分类页 | 复用顶部分类映射 |
 | /admin/topics | 日报与精选 | 候选选题、读者收益、审核状态、导出 |
 | /starred | 收藏 | 当前浏览器收藏的仓库 |

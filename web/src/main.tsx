@@ -4,6 +4,7 @@ import { createBrowserRouter, Navigate } from 'react-router'
 import { RouterProvider } from 'react-router/dom'
 import { AdminLayout, AdminLogin, LegacyAdminPage, PageNotFound, PublicLayout, Root, Setup } from './app/shell'
 import { Skeleton } from './components/ui'
+import { topicsPath } from './lib/format'
 import { Detail } from './pages/detail'
 import { Categories, Discover, ProjectThemeDetail, ProjectThemes, Ranking, Repos } from './pages/repos'
 import { Starred } from './pages/starred'
@@ -22,8 +23,8 @@ const router = createBrowserRouter([{
       { path: 'starred', element: <Starred /> },
       { path: 'categories', element: <Categories /> },
       { path: 'categories/:slug', element: <Repos /> },
-      { path: 'themes', element: <ProjectThemes /> },
-      { path: 'themes/:slug', element: <ProjectThemeDetail /> },
+      { path: topicsPath, element: <ProjectThemes /> },
+      { path: topicsPath + '/:slug', element: <ProjectThemeDetail /> },
       { path: '*', element: <PageNotFound /> },
     ] },
     { path: 'admin/login', element: <AdminLogin /> },
@@ -39,7 +40,6 @@ const router = createBrowserRouter([{
       { path: '*', element: <PageNotFound /> },
     ] },
     { path: 'watchlist', element: <LegacyAdminPage to="/admin/watchlist" /> },
-    { path: 'topics', element: <LegacyAdminPage to="/admin/topics" /> },
     { path: 'system', element: <LegacyAdminPage to="/admin/runs" /> },
     { path: 'setup', element: <LegacyAdminPage to="/admin/setup" /> },
   ],

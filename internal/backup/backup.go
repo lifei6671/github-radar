@@ -11,6 +11,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -38,7 +39,7 @@ func (m *Manager) StartBackup() (Operation, error) {
 }
 
 func (m *Manager) startBackupLocked(cfg Settings, now time.Time) Operation {
-	op := m.newOperationLocked("backup")
+	op := m.newOperationLocked(consts.OperationBackup)
 	m.launchLocked(op, func() error { return m.backup(op.ID, cfg, now) })
 	return op
 }
@@ -77,7 +78,7 @@ func (m *Manager) backup(id string, cfg Settings, now time.Time) error {
 	generated := time.Now().UTC()
 	obj := Object{Date: date, RawSize: raw, Size: size, SchemaVersion: version, GeneratedAt: &generated, SHA256: sha}
 	store := m.store(cfg.R2)
-	m.update(id, func(op *Operation) { op.Phase = "copy" })
+	m.update(id, func(op *Operation) { op.Phase = consts.PhaseCopy })
 	saved, err := upload(ctx, store, cfg.R2.Prefix+date+objectSuffix, date, gzPath, obj, md5)
 	if err != nil {
 		return err
@@ -94,7 +95,7 @@ func (m *Manager) backup(id string, cfg Settings, now time.Time) error {
 	m.mu.Unlock()
 	// 键名与上传后的保留窗口使用同一日期，跨午夜也保留刚生成的对象。
 	if err := cleanObjects(ctx, store, cfg, now); err != nil {
-		m.update(id, func(op *Operation) { op.Warning = "backup_cleanup_failed" })
+		m.update(id, func(op *Operation) { op.Warning = consts.CodeBackupCleanupFailed })
 	}
 	return nil
 }
@@ -171,7 +172,7 @@ func (m *Manager) schedule(ctx context.Context, now time.Time) {
 			return
 		}
 		m.state.cleanupDay = day
-		op := m.newOperationLocked("cleanup")
+		op := m.newOperationLocked(consts.OperationCleanup)
 		m.launchLocked(op, func() error {
 			bounded, cancel := context.WithTimeout(m.root, 2*time.Minute)
 			defer cancel()

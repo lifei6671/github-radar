@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	sdk "github.com/google/go-github/v88/github"
+
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 var errBodyLimit = errors.New("GitHub README 响应达到大小限制")
@@ -59,10 +61,10 @@ func (c *Client) Readme(ctx context.Context, owner, name, etag string, limit int
 	parseErr := json.Unmarshal(meta.Bytes(), &item)
 	sha := item.GetSHA()
 	if parseErr != nil || (len(sha) != 40 && len(sha) != 64) || item.GetType() != "file" {
-		return ReadmeResult{}, &Failure{Code: "github_invalid_readme", Status: resp.StatusCode}
+		return ReadmeResult{}, &Failure{Code: consts.CodeGitHubInvalidReadme, Status: resp.StatusCode}
 	}
 	if _, err := hex.DecodeString(sha); err != nil {
-		return ReadmeResult{}, &Failure{Code: "github_invalid_readme", Status: resp.StatusCode}
+		return ReadmeResult{}, &Failure{Code: consts.CodeGitHubInvalidReadme, Status: resp.StatusCode}
 	}
 	result := ReadmeResult{SHA: sha, ETag: resp.Header.Get("ETag")}
 	u, parseErr := url.Parse(item.GetHTMLURL())
@@ -74,7 +76,7 @@ func (c *Client) Readme(ctx context.Context, owner, name, etag string, limit int
 	switch item.GetEncoding() {
 	case "base64":
 		if item.Content == nil {
-			return ReadmeResult{}, &Failure{Code: "github_invalid_readme", Status: resp.StatusCode}
+			return ReadmeResult{}, &Failure{Code: consts.CodeGitHubInvalidReadme, Status: resp.StatusCode}
 		}
 		decoded := base64.NewDecoder(base64.StdEncoding, strings.NewReader(*item.Content))
 		result.Body, err = io.ReadAll(io.LimitReader(decoded, int64(limit)+1))
@@ -91,7 +93,7 @@ func (c *Client) Readme(ctx context.Context, owner, name, etag string, limit int
 		err = errBodyLimit
 	}
 	if err != nil {
-		return ReadmeResult{}, &Failure{Code: "github_invalid_readme", Status: resp.StatusCode}
+		return ReadmeResult{}, &Failure{Code: consts.CodeGitHubInvalidReadme, Status: resp.StatusCode}
 	}
 	result.Truncated = len(result.Body) > limit || item.GetSize() > limit
 	if len(result.Body) > limit {

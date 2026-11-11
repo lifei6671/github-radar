@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/lifei6671/github-radar/internal/backup"
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 const backupPath = "/system/backup"
@@ -109,7 +110,7 @@ func registerBackup(v1, business *gin.RouterGroup, m *backup.Manager) {
 			return
 		}
 		if !input.AcceptIncompleteUsage {
-			c.JSON(http.StatusBadRequest, gin.H{"code": "incomplete_usage_not_accepted"})
+			c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeIncompleteUsageNotAccepted})
 			return
 		}
 		if err := m.ResumeAI(c.Request.Context()); err != nil {

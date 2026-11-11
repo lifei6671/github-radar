@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -30,17 +31,17 @@ func initialRules(seed config.Config, now time.Time) ([]storage.DiscoveryRule, e
 	var rules []storage.DiscoveryRule
 	sources := append([]string{""}, seed.Discovery.TrendingLanguages...)
 	for _, language := range sources {
-		source := "all"
+		source := consts.TrendingAll
 		if language != "" {
 			source = "language:" + language
 		}
-		for _, period := range []string{"daily", "weekly", "monthly"} {
+		for _, period := range []string{consts.PeriodDaily, consts.PeriodWeekly, consts.PeriodMonthly} {
 			interval, priority := seed.Scheduler.TrendingOtherMinutes, 10
-			if period == "daily" {
+			if period == consts.PeriodDaily {
 				interval, priority = seed.Scheduler.TrendingDailyMinutes, 30
 			}
 			rules = append(rules, storage.DiscoveryRule{
-				SourceType: "trending", SourceKey: source + ":" + period,
+				SourceType: consts.SourceTrending, SourceKey: source + ":" + period,
 				Enabled: seed.Discovery.TrendingEnabled, IntervalMinutes: interval,
 				Priority: priority, NextRunAt: now.UnixMilli(),
 			})
@@ -59,7 +60,7 @@ func initialRules(seed config.Config, now time.Time) ([]storage.DiscoveryRule, e
 	offset := 0
 	for _, rule := range seed.Discovery.SearchRules {
 		rules = append(rules, storage.DiscoveryRule{
-			SourceType: "search", SourceKey: rule.Key, Query: strings.TrimSpace(rule.Query), Enabled: rule.Enabled,
+			SourceType: consts.SourceSearch, SourceKey: rule.Key, Query: strings.TrimSpace(rule.Query), Enabled: rule.Enabled,
 			IntervalMinutes: round * max(enabled, 1), Priority: rule.Priority,
 			NextRunAt: now.Add(time.Duration(offset*round) * time.Minute).UnixMilli(),
 		})
@@ -72,13 +73,13 @@ func initialRules(seed config.Config, now time.Time) ([]storage.DiscoveryRule, e
 
 func rulesFromDB(tx *gorm.DB) ([]storage.DiscoveryRule, error) {
 	var rows []storage.DiscoveryRule
-	err := tx.Order("display_position, source_type, id").Find(&rows).Error
+	err := tx.Order(storage.DiscoveryRuleColumns.DisplayPosition + ", " + storage.DiscoveryRuleColumns.SourceType + ", " + storage.DiscoveryRuleColumns.ID).Find(&rows).Error
 	return rows, err
 }
 
 func ruleView(row storage.DiscoveryRule) Rule {
 	query := row.Query
-	if row.SourceType == "trending" {
+	if row.SourceType == consts.SourceTrending {
 		query = ""
 	}
 	return Rule{row.SourceType, row.SourceKey, query, row.Enabled, row.IntervalMinutes, row.Priority}
@@ -118,14 +119,14 @@ func normalizeRules(items []Rule) ([]Rule, error) {
 		seen[key] = true
 		item.Query = strings.TrimSpace(item.Query)
 		switch item.SourceType {
-		case "trending":
+		case consts.SourceTrending:
 			if _, _, _, err := config.TrendingSource(item.SourceKey); err != nil {
 				return nil, err
 			}
 			if item.Query != "" {
 				return nil, fmt.Errorf("Trending 规则使用来源键和周期，无需搜索查询")
 			}
-		case "search":
+		case consts.SourceSearch:
 			if !config.ValidSourceSlug(item.SourceKey) || item.Query == "" {
 				return nil, fmt.Errorf("Search 规则需要有效键和查询")
 			}
@@ -170,15 +171,15 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 			if ruleView(row) == item {
 				// 只换展示顺序时保留任务计划、规则 ID 和现有租约。
 				if row.DisplayPosition != position {
-					if err := tx.Model(&row).Update("display_position", position).Error; err != nil {
+					if err := tx.Model(&row).Update(storage.DiscoveryRuleColumns.DisplayPosition, position).Error; err != nil {
 						return err
 					}
 				}
 				continue
 			}
 			if err := tx.Model(&row).Updates(map[string]any{
-				"query": item.Query, "enabled": item.Enabled, "interval_minutes": item.IntervalMinutes,
-				"priority": item.Priority, "next_run_at": now, "display_position": position,
+				storage.DiscoveryRuleColumns.Query: item.Query, storage.DiscoveryRuleColumns.Enabled: item.Enabled, storage.DiscoveryRuleColumns.IntervalMinutes: item.IntervalMinutes,
+				storage.DiscoveryRuleColumns.Priority: item.Priority, storage.DiscoveryRuleColumns.NextRunAt: now, storage.DiscoveryRuleColumns.DisplayPosition: position,
 			}).Error; err != nil {
 				return err
 			}
@@ -201,10 +202,10 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 
 func cancelRuleJobs(tx *gorm.DB, id, now int64) error {
 	return tx.Model(&storage.Job{}).
-		Where("type IN ('discover_search','discover_trending') AND status IN ('pending','running','failed')").
-		Where("CAST(json_extract(payload_json,'$.ruleId') AS INTEGER) = ?", id).
+		Where(storage.JobColumns.Type+" IN ('"+consts.JobDiscoverSearch+"','"+consts.JobDiscoverTrending+"') AND "+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusRunning+"','"+consts.StatusFailed+"')").
+		Where("CAST(json_extract("+storage.JobColumns.PayloadJSON+",'$.ruleId') AS INTEGER) = ?", id).
 		Updates(map[string]any{
-			"status": "canceled", "lease_token": nil, "lease_until": nil,
-			"last_error_code": "source_rule_changed", "updated_at": now,
+			storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LeaseToken: nil, storage.JobColumns.LeaseUntil: nil,
+			storage.JobColumns.LastErrorCode: consts.CodeSourceRuleChanged, storage.JobColumns.UpdatedAt: now,
 		}).Error
 }

@@ -8,6 +8,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/lifei6671/github-radar/configs"
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 // Category 按 GitHub 原始 topics 派生，允许一个仓库同时命中多类。
@@ -36,7 +37,7 @@ func LoadCategories(path string) ([]Category, error) {
 // NormalizeCategories 统一验证默认数据和后台修改，other 始终由查询派生。
 func NormalizeCategories(categories []Category) ([]Category, error) {
 	result := make([]Category, 0, len(categories))
-	seen := map[string]bool{"other": true}
+	seen := map[string]bool{consts.CategoryOther: true}
 	for _, c := range categories {
 		c.Name = strings.TrimSpace(c.Name)
 		if !ValidSourceSlug(c.Slug) || seen[c.Slug] || c.Name == "" || len(c.AnyTopics) == 0 {
@@ -77,7 +78,7 @@ func Classify(categories []Category, topics []string) []string {
 		}
 	}
 	if len(matches) == 0 {
-		return []string{"other"}
+		return []string{consts.CategoryOther}
 	}
 	return matches
 }

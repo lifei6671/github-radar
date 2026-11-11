@@ -82,7 +82,7 @@ func (s Service) loop(ctx context.Context, interval time.Duration, work func(tim
 func (s Service) maintain(ctx context.Context, now time.Time, force bool) error {
 	db := s.DB.WithContext(ctx)
 	var request storage.MaintenanceState
-	if err := db.Find(&request, "key=?", requestKey).Error; err != nil {
+	if err := db.Find(&request, storage.MaintenanceStateColumns.Key+"=?", requestKey).Error; err != nil {
 		return err
 	}
 	manual := force || request.Key != ""
@@ -125,7 +125,7 @@ func (s Service) maintain(ctx context.Context, now time.Time, force bool) error 
 		}
 	}
 	if request.Key != "" {
-		if err := db.Where("key=? AND value=?", request.Key, request.Value).Delete(&storage.MaintenanceState{}).Error; err != nil {
+		if err := db.Where(storage.MaintenanceStateColumns.Key+"=? AND "+storage.MaintenanceStateColumns.Value+"=?", request.Key, request.Value).Delete(&storage.MaintenanceState{}).Error; err != nil {
 			return err
 		}
 	}

@@ -1,11 +1,13 @@
 package metrics
 
 import (
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -38,34 +40,35 @@ func loadAnchors(tx *gorm.DB, target, limit, asOf int64, hourlyOnly bool) (ancho
 			{target - limit, target, "DESC"}, {target, min(asOf, target+limit), "ASC"},
 		} {
 			var rows []row
-			err := tx.Raw(`
-SELECT r.repo_id,s.observed_at AS at,s.stars,s.sample_slot AS slot
-FROM repositories r JOIN repo_snapshots s ON s.repo_id=r.repo_id AND s.sample_slot=(
-  SELECT x.sample_slot FROM repo_snapshots x WHERE x.repo_id=r.repo_id AND x.observed_at BETWEEN ? AND ?
-  ORDER BY x.observed_at `+seek.order+`,x.sample_slot ASC LIMIT 1
-) WHERE r.state='active'`, seek.min, seek.max).Scan(&rows).Error
+			err := tx.Raw(fmt.Sprintf(`
+SELECT r.%[1]s AS repo_id,s.%[2]s AS at,s.%[3]s AS stars,s.%[4]s AS slot
+FROM %[5]s r JOIN %[6]s s ON s.%[7]s=r.%[1]s AND s.%[4]s=(
+  SELECT x.%[4]s FROM %[6]s x WHERE x.%[7]s=r.%[1]s AND x.%[2]s BETWEEN ? AND ?
+  ORDER BY x.%[2]s `,
+				storage.RepositoryColumns.RepoID, storage.RepoSnapshotColumns.ObservedAt, storage.RepoSnapshotColumns.Stars, storage.RepoSnapshotColumns.SampleSlot, storage.RepositoryTable, storage.RepoSnapshotTable, storage.RepoSnapshotColumns.RepoID)+seek.order+`,x.`+storage.RepoSnapshotColumns.SampleSlot+` ASC LIMIT 1
+) WHERE r.`+storage.RepositoryColumns.State+`='`+consts.StatusActive+`'`, seek.min, seek.max).Scan(&rows).Error
 			if err != nil {
 				return a, err
 			}
 			for _, row := range rows {
-				row.Resolution = "raw"
+				row.Resolution = consts.ResolutionRaw
 				a.raw[row.RepoID] = append(a.raw[row.RepoID], row.Point)
 			}
 		}
 	}
 	var hours []storage.HourlyMetric
-	if err := tx.Table("metrics_hourly AS h").Select("h.*").
-		Joins("JOIN repositories r ON r.repo_id=h.repo_id AND r.state='active'").
-		Where("h.hour_start BETWEEN ? AND ?", time.UnixMilli(target-limit).UTC().Truncate(time.Hour).UnixMilli(), min(asOf, target+limit)).
+	if err := tx.Table(storage.HourlyMetricTable+" AS h").Select("h.*").
+		Joins("JOIN "+storage.RepositoryTable+" r ON r."+storage.RepositoryColumns.RepoID+"=h."+storage.HourlyMetricColumns.RepoID+" AND r."+storage.RepositoryColumns.State+"='"+consts.StatusActive+"'").
+		Where("h."+storage.HourlyMetricColumns.HourStart+" BETWEEN ? AND ?", time.UnixMilli(target-limit).UTC().Truncate(time.Hour).UnixMilli(), min(asOf, target+limit)).
 		Find(&hours).Error; err != nil {
 		return a, err
 	}
 	for _, h := range hours {
 		if h.OpenObservedAt <= asOf {
-			a.hourly[h.RepoID] = append(a.hourly[h.RepoID], Point{h.OpenObservedAt, h.StarsOpen, h.OpenSlot, "hourly"})
+			a.hourly[h.RepoID] = append(a.hourly[h.RepoID], Point{h.OpenObservedAt, h.StarsOpen, h.OpenSlot, consts.ResolutionHourly})
 		}
 		if h.CloseObservedAt <= asOf && h.CloseSlot != h.OpenSlot {
-			a.hourly[h.RepoID] = append(a.hourly[h.RepoID], Point{h.CloseObservedAt, h.StarsClose, h.CloseSlot, "hourly"})
+			a.hourly[h.RepoID] = append(a.hourly[h.RepoID], Point{h.CloseObservedAt, h.StarsClose, h.CloseSlot, consts.ResolutionHourly})
 		}
 	}
 	return a, nil

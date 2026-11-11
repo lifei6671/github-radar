@@ -15,6 +15,7 @@ import (
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -31,7 +32,7 @@ func (e *Engine) readReadme(ctx context.Context, repo storage.Repository, displa
 	fullName := remote.GetFullName()
 	owner, name, ok := strings.Cut(fullName, "/")
 	if !ok {
-		return gh.ReadmeResult{}, &gh.Failure{Code: "github_invalid_repository"}
+		return gh.ReadmeResult{}, &gh.Failure{Code: consts.CodeGitHubInvalidRepository}
 	}
 	result, err := e.GitHub.Readme(ctx, owner, name, "", e.Queue.AI.Summary.ReadmeMaxBytes, policy)
 	if err != nil || result.Missing {
@@ -42,7 +43,7 @@ func (e *Engine) readReadme(ctx context.Context, repo storage.Repository, displa
 		return gh.ReadmeResult{}, err
 	}
 	if result.NotModified || !strings.EqualFold(remote.GetFullName(), fullName) {
-		return gh.ReadmeResult{}, &gh.Failure{Code: "github_readme_source_changed"}
+		return gh.ReadmeResult{}, &gh.Failure{Code: consts.CodeGitHubReadmeSourceChanged}
 	}
 	return result, nil
 }
@@ -168,7 +169,7 @@ type ReadmeView struct {
 // ReadmeView 只发布与本次确认的公开 README SHA 一致的译文。
 func (e *Engine) ReadmeView(ctx context.Context, repo storage.Repository) (ReadmeView, error) {
 	if e.GitHub == nil {
-		return ReadmeView{State: "unavailable"}, nil
+		return ReadmeView{State: consts.StatusUnavailable}, nil
 	}
 	source, err := e.readReadme(ctx, repo, true)
 	if err != nil {
@@ -179,16 +180,16 @@ func (e *Engine) ReadmeView(ctx context.Context, repo storage.Repository) (Readm
 			}
 		} else if err == ErrRepoUnavailable {
 			// 上游身份响应异常时保留详情，只有已确认撤回才返回 404。
-			err = &gh.Failure{Code: "github_invalid_repository"}
+			err = &gh.Failure{Code: consts.CodeGitHubInvalidRepository}
 		}
 		return ReadmeView{}, err
 	}
 	if source.Missing || len(source.Body) == 0 {
-		return ReadmeView{State: "missing"}, nil
+		return ReadmeView{State: consts.StatusMissing}, nil
 	}
 	data := readmeBody(source.Body)
-	view := ReadmeView{State: "ready", Language: language(prose(data)), SourceURL: source.URL, Truncated: source.Truncated}
-	if view.Language == "zh" {
+	view := ReadmeView{State: consts.StatusReady, Language: language(prose(data)), SourceURL: source.URL, Truncated: source.Truncated}
+	if view.Language == consts.LanguageChinese {
 		view.ChineseHTML, err = renderReadme(data, source.URL)
 		view.Complete = true
 		return view, err
@@ -198,7 +199,7 @@ func (e *Engine) ReadmeView(ctx context.Context, repo storage.Repository) (Readm
 		return ReadmeView{}, err
 	}
 	var saved storage.RepoReadmeTranslation
-	if err := e.Queue.DB.WithContext(ctx).Find(&saved, "repo_id=? AND readme_sha=? AND readme_bytes=?", repo.RepoID, source.SHA, len(source.Body)).Error; err != nil {
+	if err := e.Queue.DB.WithContext(ctx).Find(&saved, storage.RepoReadmeTranslationColumns.RepoID+"=? AND "+storage.RepoReadmeTranslationColumns.ReadmeSHA+"=? AND "+storage.RepoReadmeTranslationColumns.ReadmeBytes+"=?", repo.RepoID, source.SHA, len(source.Body)).Error; err != nil {
 		return ReadmeView{}, err
 	}
 	if saved.RepoID != 0 {

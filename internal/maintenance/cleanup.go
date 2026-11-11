@@ -9,6 +9,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -32,32 +33,46 @@ func Cleanup(ctx context.Context, db *gorm.DB, cfg config.Maintenance, now time.
 		name, query string
 		args        []any
 	}{
-		{"原始快照", `DELETE FROM repo_snapshots WHERE (repo_id,sample_slot) IN (
-SELECT s.repo_id,s.sample_slot FROM repo_snapshots s
-JOIN metrics_hourly h ON h.repo_id=s.repo_id AND h.hour_start=s.observed_at/3600000*3600000
-WHERE s.observed_at<? AND (s.observed_at,s.sample_slot) BETWEEN (h.open_observed_at,h.open_slot) AND (h.close_observed_at,h.close_slot)
-AND NOT EXISTS(SELECT 1 FROM metric_rollup_pending p WHERE p.repo_id=s.repo_id AND p.resolution='hourly' AND p.bucket_start=h.hour_start)
-ORDER BY s.observed_at LIMIT ?)`, []any{min(age(cfg.RawDays), hourly)}},
-		{"小时聚合", `DELETE FROM metrics_hourly WHERE (repo_id,hour_start) IN (
-SELECT h.repo_id,h.hour_start FROM metrics_hourly h
-JOIN metrics_daily d ON d.repo_id=h.repo_id AND d.day=date(h.hour_start/1000,'unixepoch')
-WHERE h.hour_start<? AND (h.open_observed_at,h.open_slot)>=(d.open_observed_at,d.open_slot)
-AND (h.close_observed_at,h.close_slot)<=(d.close_observed_at,d.close_slot)
-AND NOT EXISTS(SELECT 1 FROM metric_rollup_pending p WHERE p.repo_id=h.repo_id AND p.resolution='daily' AND p.bucket_start=h.hour_start/86400000*86400000)
-AND NOT EXISTS(SELECT 1 FROM repo_snapshots s WHERE s.repo_id=h.repo_id AND s.observed_at>=h.hour_start AND s.observed_at<h.hour_start+3600000)
-ORDER BY h.hour_start LIMIT ?)`, []any{min(dayAge(cfg.HourlyDays).UnixMilli(), daily)}},
-		{"日聚合", `DELETE FROM metrics_daily WHERE (repo_id,day) IN (
-SELECT d.repo_id,d.day FROM metrics_daily d WHERE d.day<?
-AND NOT EXISTS(SELECT 1 FROM metric_rollup_pending p WHERE p.repo_id=d.repo_id AND p.resolution='daily' AND p.bucket_start=unixepoch(d.day)*1000)
-AND NOT EXISTS(SELECT 1 FROM metric_rollup_pending p WHERE p.repo_id=d.repo_id AND p.resolution='hourly' AND p.bucket_start>=unixepoch(d.day)*1000 AND p.bucket_start<(unixepoch(d.day)+86400)*1000)
-AND NOT EXISTS(SELECT 1 FROM metrics_hourly h WHERE h.repo_id=d.repo_id AND h.hour_start>=unixepoch(d.day)*1000 AND h.hour_start<(unixepoch(d.day)+86400)*1000)
-ORDER BY d.day LIMIT ?)`, []any{dayAge(cfg.DailyDays).Format(time.DateOnly)}},
-		{"历史 Trending", `DELETE FROM trending_observations WHERE (repo_id,source_key,window,observed_slot) IN (
-SELECT o.repo_id,o.source_key,o.window,o.observed_slot FROM trending_observations o
-WHERE o.observed_slot<? AND NOT EXISTS(SELECT 1 FROM trending_batches b WHERE b.source_key=o.source_key AND b.window=o.window AND b.observed_slot=o.observed_slot)
-ORDER BY o.observed_slot LIMIT ?)`, []any{discovery}},
-		{"Search 发现记录", `DELETE FROM search_observations WHERE (repo_id,source_key,observed_slot) IN (
-SELECT repo_id,source_key,observed_slot FROM search_observations WHERE observed_at<? ORDER BY observed_at LIMIT ?)`, []any{discovery}},
+		{"原始快照", fmt.Sprintf(`DELETE FROM %[1]s WHERE (%[2]s,%[3]s) IN (
+SELECT s.%[2]s,s.%[3]s FROM %[1]s s
+JOIN %[4]s h ON h.%[5]s=s.%[2]s AND h.%[6]s=s.%[7]s/3600000*3600000
+WHERE s.%[7]s<? AND (s.%[7]s,s.%[3]s) BETWEEN (h.%[13]s,h.%[14]s) AND (h.%[15]s,h.%[16]s)
+AND NOT EXISTS(SELECT 1 FROM %[8]s p WHERE p.%[9]s=s.%[2]s AND p.%[10]s='%[11]s' AND p.%[12]s=h.%[6]s)
+ORDER BY s.%[7]s LIMIT ?)`,
+			storage.RepoSnapshotTable, storage.RepoSnapshotColumns.RepoID, storage.RepoSnapshotColumns.SampleSlot,
+			storage.HourlyMetricTable, storage.HourlyMetricColumns.RepoID, storage.HourlyMetricColumns.HourStart, storage.RepoSnapshotColumns.ObservedAt,
+			storage.PendingMetricTable, storage.PendingMetricColumns.RepoID, storage.PendingMetricColumns.Resolution, consts.ResolutionHourly, storage.PendingMetricColumns.BucketStart,
+			storage.HourlyMetricColumns.OpenObservedAt, storage.HourlyMetricColumns.OpenSlot,
+			storage.HourlyMetricColumns.CloseObservedAt, storage.HourlyMetricColumns.CloseSlot), []any{min(age(cfg.RawDays), hourly)}},
+		{"小时聚合", fmt.Sprintf(`DELETE FROM %[1]s WHERE (%[2]s,%[3]s) IN (
+SELECT h.%[2]s,h.%[3]s FROM %[1]s h
+JOIN %[4]s d ON d.%[5]s=h.%[2]s AND d.%[6]s=date(h.%[3]s/1000,'unixepoch')
+WHERE h.%[3]s<? AND (h.%[15]s,h.%[16]s)>=(d.%[17]s,d.%[18]s)
+AND (h.%[19]s,h.%[20]s)<=(d.%[21]s,d.%[22]s)
+AND NOT EXISTS(SELECT 1 FROM %[7]s p WHERE p.%[8]s=h.%[2]s AND p.%[9]s='%[10]s' AND p.%[11]s=h.%[3]s/86400000*86400000)
+AND NOT EXISTS(SELECT 1 FROM %[12]s s WHERE s.%[13]s=h.%[2]s AND s.%[14]s>=h.%[3]s AND s.%[14]s<h.%[3]s+3600000)
+ORDER BY h.%[3]s LIMIT ?)`,
+			storage.HourlyMetricTable, storage.HourlyMetricColumns.RepoID, storage.HourlyMetricColumns.HourStart,
+			storage.DailyMetricTable, storage.DailyMetricColumns.RepoID, storage.DailyMetricColumns.Day,
+			storage.PendingMetricTable, storage.PendingMetricColumns.RepoID, storage.PendingMetricColumns.Resolution, consts.ResolutionDaily, storage.PendingMetricColumns.BucketStart,
+			storage.RepoSnapshotTable, storage.RepoSnapshotColumns.RepoID, storage.RepoSnapshotColumns.ObservedAt,
+			storage.HourlyMetricColumns.OpenObservedAt, storage.HourlyMetricColumns.OpenSlot, storage.DailyMetricColumns.OpenObservedAt, storage.DailyMetricColumns.OpenSlot,
+			storage.HourlyMetricColumns.CloseObservedAt, storage.HourlyMetricColumns.CloseSlot, storage.DailyMetricColumns.CloseObservedAt, storage.DailyMetricColumns.CloseSlot), []any{min(dayAge(cfg.HourlyDays).UnixMilli(), daily)}},
+		{"日聚合", fmt.Sprintf(`DELETE FROM %[1]s WHERE (%[2]s,%[3]s) IN (
+SELECT d.%[2]s,d.%[3]s FROM %[1]s d WHERE d.%[3]s<?
+AND NOT EXISTS(SELECT 1 FROM %[4]s p WHERE p.%[5]s=d.%[2]s AND p.%[6]s='%[7]s' AND p.%[8]s=unixepoch(d.%[3]s)*1000)
+AND NOT EXISTS(SELECT 1 FROM %[4]s p WHERE p.%[5]s=d.%[2]s AND p.%[6]s='%[9]s' AND p.%[8]s>=unixepoch(d.%[3]s)*1000 AND p.%[8]s<(unixepoch(d.%[3]s)+86400)*1000)
+AND NOT EXISTS(SELECT 1 FROM %[10]s h WHERE h.%[11]s=d.%[2]s AND h.%[12]s>=unixepoch(d.%[3]s)*1000 AND h.%[12]s<(unixepoch(d.%[3]s)+86400)*1000)
+ORDER BY d.%[3]s LIMIT ?)`,
+			storage.DailyMetricTable, storage.DailyMetricColumns.RepoID, storage.DailyMetricColumns.Day, storage.PendingMetricTable, storage.PendingMetricColumns.RepoID, storage.PendingMetricColumns.Resolution, consts.ResolutionDaily, storage.PendingMetricColumns.BucketStart, consts.ResolutionHourly, storage.HourlyMetricTable, storage.HourlyMetricColumns.RepoID, storage.HourlyMetricColumns.HourStart), []any{dayAge(cfg.DailyDays).Format(time.DateOnly)}},
+		{"历史 Trending", fmt.Sprintf(`DELETE FROM %[1]s WHERE (%[2]s,%[3]s,%[4]s,%[5]s) IN (
+SELECT o.%[2]s,o.%[3]s,o.%[4]s,o.%[5]s FROM %[1]s o
+WHERE o.%[5]s<? AND NOT EXISTS(SELECT 1 FROM %[6]s b WHERE b.%[7]s=o.%[3]s AND b.%[8]s=o.%[4]s AND b.%[9]s=o.%[5]s)
+ORDER BY o.%[5]s LIMIT ?)`,
+			storage.TrendingObservationTable, storage.TrendingObservationColumns.RepoID, storage.TrendingObservationColumns.SourceKey, storage.TrendingObservationColumns.Window, storage.TrendingObservationColumns.ObservedSlot, storage.TrendingBatchRecordTable, storage.TrendingBatchRecordColumns.SourceKey, storage.TrendingBatchRecordColumns.Window, storage.TrendingBatchRecordColumns.ObservedSlot), []any{discovery}},
+		{"Search 发现记录", fmt.Sprintf(`DELETE FROM %[1]s WHERE (%[2]s,%[3]s,%[4]s) IN (
+SELECT %[2]s,%[3]s,%[4]s FROM %[1]s WHERE %[5]s<? ORDER BY %[5]s LIMIT ?)`,
+			storage.SearchObservationTable, storage.SearchObservationColumns.RepoID, storage.SearchObservationColumns.SourceKey, storage.SearchObservationColumns.ObservedSlot, storage.SearchObservationColumns.ObservedAt), []any{discovery}},
 	}
 	if err := cleanTrending(db, discovery, min(cfg.BatchRows, 100)); err != nil {
 		return fmt.Errorf("清理 Trending 批次: %w", err)
@@ -84,16 +99,17 @@ func cleanJobs(db *gorm.DB, finished, dead int64, limit int) error {
 	for {
 		var ids []int64
 		err := db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&storage.Job{}).Where(`
-((status IN ('succeeded','canceled') AND updated_at<?) OR (status='dead' AND updated_at<?))
-AND NOT EXISTS(SELECT 1 FROM ai_calls a WHERE a.job_id=jobs.id AND a.status IN ('unknown','sending','reserved'))`, finished, dead).
-				Order("updated_at,id").Limit(limit).Pluck("id", &ids).Error; err != nil || len(ids) == 0 {
+			if err := tx.Model(&storage.Job{}).Where(fmt.Sprintf(`
+((%[1]s IN ('%[2]s','%[3]s') AND %[4]s<?) OR (%[1]s='%[5]s' AND %[4]s<?))
+AND NOT EXISTS(SELECT 1 FROM %[6]s a WHERE a.%[7]s=%[8]s.%[9]s AND a.%[10]s IN ('%[11]s','%[12]s','%[13]s'))`,
+				storage.JobColumns.Status, consts.StatusSucceeded, consts.StatusCanceled, storage.JobColumns.UpdatedAt, consts.StatusDead, storage.AICallTable, storage.AICallColumns.JobID, storage.JobTable, storage.JobColumns.ID, storage.AICallColumns.Status, consts.StatusUnknown, consts.StatusSending, consts.StatusReserved), finished, dead).
+				Order(storage.JobColumns.UpdatedAt+","+storage.JobColumns.ID).Limit(limit).Pluck(storage.JobColumns.ID, &ids).Error; err != nil || len(ids) == 0 {
 				return err
 			}
-			if err := tx.Where("job_id IN ?", ids).Delete(&storage.AICall{}).Error; err != nil {
+			if err := tx.Where(storage.AICallColumns.JobID+" IN ?", ids).Delete(&storage.AICall{}).Error; err != nil {
 				return err
 			}
-			return tx.Where("id IN ?", ids).Delete(&storage.Job{}).Error
+			return tx.Where(storage.JobColumns.ID+" IN ?", ids).Delete(&storage.Job{}).Error
 		})
 		if err != nil || len(ids) < limit {
 			return err
@@ -102,10 +118,12 @@ AND NOT EXISTS(SELECT 1 FROM ai_calls a WHERE a.job_id=jobs.id AND a.status IN (
 }
 
 func cleanTopics(db *gorm.DB, cutoff int64, limit int) error {
+	t := storage.TopicCandidateColumns
 	for {
-		res := db.Exec(`DELETE FROM topic_candidates WHERE id IN (
-SELECT id FROM topic_candidates WHERE status='candidate' AND reviewed_at IS NULL AND updated_at<?
-ORDER BY updated_at,id LIMIT ?)`, cutoff, limit)
+		ids := db.Model(&storage.TopicCandidate{}).Select(t.ID).
+			Where(t.Status+"=? AND "+t.ReviewedAt+" IS NULL AND "+t.UpdatedAt+"<?", consts.StatusCandidate, cutoff).
+			Order(t.UpdatedAt).Order(t.ID).Limit(limit)
+		res := db.Where(t.ID+" IN (?)", ids).Delete(&storage.TopicCandidate{})
 		if res.Error != nil || res.RowsAffected < int64(limit) {
 			return res.Error
 		}
@@ -117,16 +135,16 @@ func cleanTrending(db *gorm.DB, cutoff int64, limit int) error {
 		count := 0
 		err := db.Transaction(func(tx *gorm.DB) error {
 			var batches []storage.TrendingBatchRecord
-			if err := tx.Where("observed_at<?", cutoff).Order("observed_at").Limit(limit).Find(&batches).Error; err != nil {
+			if err := tx.Where(storage.TrendingBatchRecordColumns.ObservedAt+"<?", cutoff).Order(storage.TrendingBatchRecordColumns.ObservedAt).Limit(limit).Find(&batches).Error; err != nil {
 				return err
 			}
 			count = len(batches)
 			for _, batch := range batches {
-				if err := tx.Where("source_key=? AND window=? AND observed_slot=?", batch.SourceKey, batch.Window, batch.ObservedSlot).
+				if err := tx.Where(storage.TrendingObservationColumns.SourceKey+"=? AND "+storage.TrendingObservationColumns.Window+"=? AND "+storage.TrendingObservationColumns.ObservedSlot+"=?", batch.SourceKey, batch.Window, batch.ObservedSlot).
 					Delete(&storage.TrendingObservation{}).Error; err != nil {
 					return err
 				}
-				if err := tx.Where("key=? AND json_extract(value,'$.observedSlot')=?", collector.BatchKey(batch.SourceKey, batch.Window), batch.ObservedSlot).
+				if err := tx.Where(storage.MaintenanceStateColumns.Key+"=? AND json_extract("+storage.MaintenanceStateColumns.Value+",'$.observedSlot')=?", collector.BatchKey(batch.SourceKey, batch.Window), batch.ObservedSlot).
 					Delete(&storage.MaintenanceState{}).Error; err != nil {
 					return err
 				}
@@ -148,33 +166,46 @@ func cleanCandidates(db *gorm.DB, cutoff int64, limit int) error {
 		err := db.Transaction(func(tx *gorm.DB) error {
 			var ids []int64
 			// 有未终结任务、近期采样或仍在最新完整榜单里的候选继续保留。
-			if err := tx.Model(&storage.Repository{}).Where(`state='candidate' AND blocked=0 AND starred_by_user=0 AND last_discovered_at<?
-AND (last_success_at IS NULL OR last_success_at<?)
-AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.repo_id=repositories.repo_id AND j.status NOT IN ('succeeded','canceled','dead'))
-AND NOT EXISTS(SELECT 1 FROM ai_summaries s WHERE s.repo_id=repositories.repo_id)
-AND NOT EXISTS(SELECT 1 FROM topic_candidates t WHERE t.repo_id=repositories.repo_id)
-AND NOT EXISTS(SELECT 1 FROM jobs j JOIN ai_calls a ON a.job_id=j.id
-  WHERE j.repo_id=repositories.repo_id AND a.status IN ('unknown','sending','reserved'))
-AND NOT EXISTS(SELECT 1 FROM trending_observations o JOIN maintenance_state m ON m.key='trending:'||o.source_key||':'||o.window
- WHERE o.repo_id=repositories.repo_id AND json_extract(m.value,'$.observedSlot')=o.observed_slot)`, cutoff, cutoff).
-				Order("last_discovered_at,repo_id").Limit(limit).Pluck("repo_id", &ids).Error; err != nil {
+			if err := tx.Model(&storage.Repository{}).Where(fmt.Sprintf(`%[1]s='%[2]s' AND %[3]s=0 AND %[4]s=0 AND %[5]s<?
+AND (%[6]s IS NULL OR %[6]s<?)
+AND NOT EXISTS(SELECT 1 FROM %[7]s j WHERE j.%[8]s=%[9]s.%[10]s AND j.%[11]s NOT IN ('%[12]s','%[13]s','%[14]s'))
+AND NOT EXISTS(SELECT 1 FROM %[15]s s WHERE s.%[16]s=%[9]s.%[10]s)
+AND NOT EXISTS(SELECT 1 FROM %[17]s t WHERE t.%[18]s=%[9]s.%[10]s)
+AND NOT EXISTS(SELECT 1 FROM %[7]s j JOIN %[19]s a ON a.%[20]s=j.%[21]s
+  WHERE j.%[8]s=%[9]s.%[10]s AND a.%[22]s IN ('%[23]s','%[24]s','%[25]s'))
+AND NOT EXISTS(SELECT 1 FROM %[26]s o JOIN %[27]s m ON m.%[28]s='%[29]s'||o.%[30]s||':'||o.%[31]s
+ WHERE o.%[32]s=%[9]s.%[10]s AND json_extract(m.%[33]s,'$.observedSlot')=o.%[34]s)`,
+				storage.RepositoryColumns.State, consts.StatusCandidate, storage.RepositoryColumns.Blocked, storage.RepositoryColumns.StarredByUser, storage.RepositoryColumns.LastDiscoveredAt, storage.RepositoryColumns.LastSuccessAt, storage.JobTable, storage.JobColumns.RepoID, storage.RepositoryTable, storage.RepositoryColumns.RepoID, storage.JobColumns.Status, consts.StatusSucceeded, consts.StatusCanceled, consts.StatusDead, storage.AISummaryTable, storage.AISummaryColumns.RepoID, storage.TopicCandidateTable, storage.TopicCandidateColumns.RepoID, storage.AICallTable, storage.AICallColumns.JobID, storage.JobColumns.ID, storage.AICallColumns.Status, consts.StatusUnknown, consts.StatusSending, consts.StatusReserved, storage.TrendingObservationTable, storage.MaintenanceStateTable, storage.MaintenanceStateColumns.Key, consts.TrendingStatePrefix, storage.TrendingObservationColumns.SourceKey, storage.TrendingObservationColumns.Window, storage.TrendingObservationColumns.RepoID, storage.MaintenanceStateColumns.Value, storage.TrendingObservationColumns.ObservedSlot), cutoff, cutoff).
+				Order(storage.RepositoryColumns.LastDiscoveredAt+","+storage.RepositoryColumns.RepoID).Limit(limit).Pluck(storage.RepositoryColumns.RepoID, &ids).Error; err != nil {
 				return err
 			}
 			count = len(ids)
 			if count == 0 {
 				return nil
 			}
-			for _, model := range []any{&storage.PendingMetric{}, &storage.RepoSnapshot{}, &storage.HourlyMetric{}, &storage.DailyMetric{},
-				&storage.LatestMetric{}, &storage.TrendingObservation{}, &storage.SearchObservation{}, &storage.SummaryCheck{}} {
-				if err := tx.Where("repo_id IN ?", ids).Delete(model).Error; err != nil {
+			children := []struct {
+				model  any
+				repoID string
+			}{
+				{&storage.PendingMetric{}, storage.PendingMetricColumns.RepoID},
+				{&storage.RepoSnapshot{}, storage.RepoSnapshotColumns.RepoID},
+				{&storage.HourlyMetric{}, storage.HourlyMetricColumns.RepoID},
+				{&storage.DailyMetric{}, storage.DailyMetricColumns.RepoID},
+				{&storage.LatestMetric{}, storage.LatestMetricColumns.RepoID},
+				{&storage.TrendingObservation{}, storage.TrendingObservationColumns.RepoID},
+				{&storage.SearchObservation{}, storage.SearchObservationColumns.RepoID},
+				{&storage.SummaryCheck{}, storage.SummaryCheckColumns.RepoID},
+			}
+			for _, child := range children {
+				if err := tx.Where(child.repoID+" IN ?", ids).Delete(child.model).Error; err != nil {
 					return err
 				}
 			}
 			// 任务记录按各自期限保留，仓库外键可空。
-			if err := tx.Model(&storage.Job{}).Where("repo_id IN ?", ids).Update("repo_id", nil).Error; err != nil {
+			if err := tx.Model(&storage.Job{}).Where(storage.JobColumns.RepoID+" IN ?", ids).Update(storage.JobColumns.RepoID, nil).Error; err != nil {
 				return err
 			}
-			return tx.Where("repo_id IN ?", ids).Delete(&storage.Repository{}).Error
+			return tx.Where(storage.RepositoryColumns.RepoID+" IN ?", ids).Delete(&storage.Repository{}).Error
 		})
 		if err != nil || count < limit {
 			return err

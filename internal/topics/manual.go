@@ -6,6 +6,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -13,7 +14,7 @@ import (
 func Add(ctx context.Context, db *gorm.DB, id int64, now time.Time) (storage.TopicCandidate, error) {
 	var candidate storage.TopicCandidate
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Find(&candidate, "repo_id=? AND angle_key='project'", id).Error; err != nil {
+		if err := tx.Find(&candidate, storage.TopicCandidateColumns.RepoID+"=? AND "+storage.TopicCandidateColumns.AngleKey+"='"+consts.TopicAngleProject+"'", id).Error; err != nil {
 			return err
 		}
 		if candidate.ID != 0 {
@@ -23,10 +24,10 @@ func Add(ctx context.Context, db *gorm.DB, id int64, now time.Time) (storage.Top
 			// 已自动入池的项目也可被人工保留，不改变审核状态。
 			ms := now.UnixMilli()
 			candidate.ReviewedAt = &ms
-			return tx.Model(&candidate).Update("reviewed_at", ms).Error
+			return tx.Model(&candidate).Update(storage.TopicCandidateColumns.ReviewedAt, ms).Error
 		}
 		var row input
-		result := tx.Raw(repoSignalsSQL+"WHERE r.repo_id=?", now.Add(-signalAge).UnixMilli(), id).Scan(&row)
+		result := tx.Raw(repoSignalsSQL+"WHERE r."+storage.RepositoryColumns.RepoID+"=?", now.Add(-signalAge).UnixMilli(), id).Scan(&row)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -37,11 +38,11 @@ func Add(ctx context.Context, db *gorm.DB, id int64, now time.Time) (storage.Top
 			return err
 		}
 		// 人工加入属于明确的处理记录，普通候选清理不会删除它。
-		if err := tx.Model(&storage.TopicCandidate{}).Where("repo_id=? AND angle_key='project'", id).
-			Update("reviewed_at", now.UnixMilli()).Error; err != nil {
+		if err := tx.Model(&storage.TopicCandidate{}).Where(storage.TopicCandidateColumns.RepoID+"=? AND "+storage.TopicCandidateColumns.AngleKey+"='"+consts.TopicAngleProject+"'", id).
+			Update(storage.TopicCandidateColumns.ReviewedAt, now.UnixMilli()).Error; err != nil {
 			return err
 		}
-		return tx.Take(&candidate, "repo_id=? AND angle_key='project'", id).Error
+		return tx.Take(&candidate, storage.TopicCandidateColumns.RepoID+"=? AND "+storage.TopicCandidateColumns.AngleKey+"='"+consts.TopicAngleProject+"'", id).Error
 	})
 	return candidate, err
 }

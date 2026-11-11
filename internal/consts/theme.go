@@ -1,5 +1,8 @@
 package consts
 
+// PublicTopicPathSegment 用于前台专题目录和详情的页面路由。
+const PublicTopicPathSegment = "topics"
+
 // 专题图标使用 Lucide 标识，颜色对应前端 Radix 色阶。
 const (
 	ThemeIconBot                 = "bot"

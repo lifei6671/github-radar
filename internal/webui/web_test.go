@@ -30,11 +30,12 @@ func TestSPAAndStaticRouteBoundaries(t *testing.T) {
 		{"GET", "/repos/radar-demo/browser-agent?range=30d", "GitHub 雷达", "no-cache", 200},
 		{"GET", "/repos/org/.github", "GitHub 雷达", "no-cache", 200},
 		{"GET", "/categories/mcp", "GitHub 雷达", "no-cache", 200},
-		{"GET", "/themes", "GitHub 雷达", "no-cache", 200},
-		{"GET", "/themes/terminal-tools?view=all", "GitHub 雷达", "no-cache", 200},
-		{"GET", "/themes/terminal-tools/missing.js", "", "", 404},
+		{"GET", "/topics", "GitHub 雷达", "no-cache", 200},
+		{"GET", "/topics/terminal-tools?view=all", "GitHub 雷达", "no-cache", 200},
+		{"GET", "/topics/terminal-tools/missing.js", "", "", 404},
 		{"GET", "/starred", "GitHub 雷达", "no-cache", 200},
 		{"GET", "/admin", "GitHub 雷达", "no-store", 200},
+		{"GET", "/admin/topics", "GitHub 雷达", "no-store", 200},
 		{"GET", "/admin/login?return=%2Fadmin%2Fruns", "GitHub 雷达", "no-store", 200},
 		{"GET", "/admin/repos/42", "", "", 404},
 		{"GET", "/admin/repos/radar-demo/browser-agent", "GitHub 雷达", "no-store", 200},
@@ -62,6 +63,9 @@ func TestSPAAndStaticRouteBoundaries(t *testing.T) {
 			}
 			if strings.HasPrefix(tc.url, "/admin") && tc.status == 200 && rec.Header().Get("X-Robots-Tag") != "noindex, nofollow" {
 				t.Fatal("后台页面应排除搜索索引")
+			}
+			if strings.HasPrefix(tc.url, "/topics") && rec.Header().Get("X-Robots-Tag") != "" {
+				t.Fatal("前台专题应允许搜索索引")
 			}
 		})
 	}

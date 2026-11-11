@@ -12,7 +12,7 @@ import { RepoCollectionEmpty } from '../components/repo-collection'
 import { PageTitle } from '../components/page-title'
 import { ThemeChronicle } from '../components/theme-chronicle'
 import { ThemeIcon } from '../components/theme-icon'
-import { dateGroup, dateHeading, dayOfWeek, decimal, number, relativeTime, repoState, timeOfDay, timestamp } from '../lib/format'
+import { dateGroup, dateHeading, dayOfWeek, decimal, number, relativeTime, repoState, timeOfDay, timestamp, topicPath, topicsPath } from '../lib/format'
 
 function mapNames(items: Category[] | undefined) {
   return new Map(items?.map(({ slug, name }) => [slug, name]))
@@ -513,8 +513,6 @@ export function Categories() {
   </div>
 }
 
-const themePath = (slug: string) => '/themes/' + encodeURIComponent(slug)
-
 export function ProjectThemes() {
   const query = useQuery({
     queryKey: ['project-themes'],
@@ -539,7 +537,7 @@ export function ProjectThemes() {
                 </header>
                 <ul className="project-theme-list">
                   {cards.map((theme) => <li key={theme.slug}>
-                    <Link className="panel project-theme-card" to={themePath(theme.slug)} aria-label={theme.name}>
+                    <Link className="panel project-theme-card" to={topicPath(theme.slug)} aria-label={theme.name}>
                       <h3 className="title-with-icon"><ThemeIcon icon={theme.icon} color={theme.iconColor} />{theme.name}</h3>
                       <p>{theme.latestRepo?.fullName || theme.description}</p>
                       <div className="project-theme-meta minor muted">
@@ -569,26 +567,38 @@ export function ProjectThemeDetail() {
   // 两个视图共用仓库卡片及分页，精选复用发现页的后端规则。
   const criteria = new URLSearchParams({ theme: slug, limit: '30' })
   if (all) criteria.set('sort', 'discovered')
-  return <>
-    <Link className="back-link" to="/themes"><ArrowLeft size={15} />返回主题</Link>
+  const latestAt = theme?.latestRepo?.discoveredAt
+  return <div className="project-topic-detail">
+    <Link className="project-topic-back project-topic-back-desktop" to={topicsPath}><ArrowLeft size={15} aria-hidden />返回全部主题</Link>
     {query.isPending ? <Skeleton /> : query.error instanceof ApiError && query.error.status === 404 ?
       <Empty title="此专题不存在" /> : query.error ? <PageError error={query.error} retry={() => { void query.refetch() }} /> :
         theme && <>
-          <header className="page-head wrap">
-            <div>
-              <PageTitle title={theme.name} subtitle={theme.description} icon={theme.icon ? <ThemeIcon icon={theme.icon} color={theme.iconColor} size={20} /> : undefined} />
-              <p className="project-theme-count minor muted">{number(theme.count)} 个项目　近 30 天新增 {number(theme.recentCount)} 个</p>
+          <header className="project-topic-head">
+            <div className="project-topic-intro">
+              <p className="project-topic-group minor">{theme.groupName}</p>
+              <h1 className="title-with-icon">
+                <ThemeIcon icon={theme.icon} color={theme.iconColor} size={24} />
+                <span>{theme.name}{' '}<span className="project-topic-context" aria-hidden>{all ? '全部项目' : '最新动态'}</span></span>
+              </h1>
+              <p className="page-subtitle">{theme.description}</p>
+              <p className="project-topic-counts minor muted">
+                <span>近 30 天新增 <strong className="numeric">{number(theme.recentCount)}</strong> 个</span>
+                <span>共收录 <strong className="numeric">{number(theme.count)}</strong> 个项目</span>
+              </p>
             </div>
-            <Link className="button" to={themePath(slug) + (all ? '' : '?view=all')}>
-              {all ? '返回近期精选' : '查看该专题全部项目'}{!all && <ArrowRight size={15} aria-hidden />}
-            </Link>
+            <div className="project-topic-tools minor muted">
+              {latestAt && <span>最近发现 <time dateTime={latestAt} className="numeric">{dateHeading(latestAt, true)} {timeOfDay(latestAt, true)}</time></span>}
+              <Link to={topicPath(slug) + (all ? '' : '?view=all')}>
+                {all ? <><ArrowLeft size={14} aria-hidden />返回近期精选</> : <>查看该专题全部项目<ArrowRight size={14} aria-hidden /></>}
+              </Link>
+            </div>
           </header>
           {!all && <ThemeChronicle key={slug} events={theme.milestones ?? []} />}
           <section className="timeline-section" aria-labelledby="project-theme-list">
-            <h2 id="project-theme-list" className="topic-section-label">{all ? '全部项目' : '近期精选'}</h2>
+            <h2 id="project-theme-list" className="sr-only">{all ? '全部项目' : '近期精选'}</h2>
             <RepoFeed params={criteria} names={mapNames(categories.data?.items)} timeline favorites discovery={!all}
               empty={all ? '暂无项目' : '暂无近期精选'} />
           </section>
         </>}
-  </>
+  </div>
 }

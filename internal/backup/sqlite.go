@@ -10,6 +10,7 @@ import (
 
 	"modernc.org/sqlite"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/migrations"
 )
@@ -18,15 +19,15 @@ import (
 func checkSQLite(ctx context.Context, pool *sql.DB) error {
 	var result string
 	if err := pool.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil || result != "ok" {
-		return Fault("backup_integrity_failed")
+		return Fault(consts.CodeBackupIntegrityFailed)
 	}
 	rows, err := pool.QueryContext(ctx, "PRAGMA foreign_key_check")
 	if err != nil {
-		return Fault("backup_integrity_failed")
+		return Fault(consts.CodeBackupIntegrityFailed)
 	}
 	defer rows.Close()
 	if rows.Next() || rows.Err() != nil {
-		return Fault("backup_foreign_key_failed")
+		return Fault(consts.CodeBackupForeignKeyFailed)
 	}
 	return nil
 }

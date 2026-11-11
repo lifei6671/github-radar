@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -180,7 +181,7 @@ func (m *Manager) readLive(ctx context.Context) (liveState, error) {
 	}
 	state.restartRequired = !reflect.DeepEqual(runtime.Settings, m.cfg.RuntimeSettings())
 	rows := []storage.MaintenanceState{}
-	if err := m.db.WithContext(ctx).Where("key IN ?", []string{receiptKey, lastBackupKey, backupDayKey, cleanupDayKey}).Find(&rows).Error; err != nil {
+	if err := m.db.WithContext(ctx).Where(storage.MaintenanceStateColumns.Key+" IN ?", []string{receiptKey, lastBackupKey, backupDayKey, cleanupDayKey}).Find(&rows).Error; err != nil {
 		return state, ErrDatabase
 	}
 	for _, row := range rows {
@@ -204,7 +205,7 @@ func (m *Manager) readLive(ctx context.Context) (liveState, error) {
 
 func readReceipt(ctx context.Context, db *gorm.DB) (receipt, error) {
 	var row storage.MaintenanceState
-	if err := db.WithContext(ctx).Find(&row, "key=?", receiptKey).Error; err != nil {
+	if err := db.WithContext(ctx).Find(&row, storage.MaintenanceStateColumns.Key+"=?", receiptKey).Error; err != nil {
 		return receipt{}, ErrDatabase
 	}
 	var value receipt
@@ -218,7 +219,7 @@ func readReceipt(ctx context.Context, db *gorm.DB) (receipt, error) {
 func (m *Manager) Enter(settingsWrite bool) (func(), error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if settingsWrite && (m.busy == "restore" || m.blocked) {
+	if settingsWrite && (m.busy == consts.OperationRestore || m.blocked) {
 		return nil, ErrRestoring
 	}
 	if m.blocked {
@@ -260,7 +261,7 @@ func (m *Manager) Status() Status {
 	if restore == nil && m.state.receipt.OperationID != "" {
 		restore, _ = m.operationLocked(m.state.receipt.OperationID)
 	}
-	return Status{Initialized: m.state.initialized, Restoring: m.busy == "restore", Maintenance: m.blocked,
+	return Status{Initialized: m.state.initialized, Restoring: m.busy == consts.OperationRestore, Maintenance: m.blocked,
 		LastBackup: m.state.lastBackup, LastBackupOperation: backup, LastCleanup: cleanup, LastRestore: restore,
 		NextBackupAt: view.NextBackupAt, NextCleanupAt: view.NextCleanupAt,
 		AutoAIResumeRequired: m.state.aiPaused, RestartRequired: m.state.restartRequired}
@@ -272,7 +273,7 @@ func (m *Manager) operationLocked(id string) (*Operation, error) {
 	}
 	if id != "" && m.state.receipt.OperationID == id && !m.blocked && m.state.initialized {
 		preparedAt := m.state.receipt.PreparedAt
-		return &Operation{ID: id, Kind: "restore", Status: "completed", Phase: "done", DatabaseApplied: true,
+		return &Operation{ID: id, Kind: consts.OperationRestore, Status: consts.StatusCompleted, Phase: consts.PhaseDone, DatabaseApplied: true,
 			UpdatedAt: time.Now().UTC(), PreparedAt: &preparedAt}, nil
 	}
 	return nil, ErrOperation
@@ -301,7 +302,7 @@ func (m *Manager) wakeup() {
 }
 
 func (m *Manager) checkIdleLocked() error {
-	if m.busy == "restore" || m.blocked {
+	if m.busy == consts.OperationRestore || m.blocked {
 		return ErrRestoring
 	}
 	if m.busy != "" {
@@ -315,20 +316,20 @@ func (m *Manager) checkIdleLocked() error {
 
 func (m *Manager) newOperationLocked(kind string) Operation {
 	m.busy = kind
-	op := Operation{ID: rand.Text(), Kind: kind, Status: "running", Phase: "prepare", UpdatedAt: time.Now().UTC()}
+	op := Operation{ID: rand.Text(), Kind: kind, Status: consts.StatusRunning, Phase: consts.PhasePrepare, UpdatedAt: time.Now().UTC()}
 	m.operations[op.ID] = op
 	m.order = append(m.order, op.ID)
 	if len(m.order) > 20 {
 		delete(m.operations, m.order[0])
 		m.order = m.order[1:]
 	}
-	if kind == "backup" {
+	if kind == consts.OperationBackup {
 		m.lastBackupID = op.ID
 	}
-	if kind == "cleanup" {
+	if kind == consts.OperationCleanup {
 		m.lastCleanupID = op.ID
 	}
-	if kind == "restore" {
+	if kind == consts.OperationRestore {
 		m.lastRestoreID = op.ID
 	}
 	return op
@@ -347,9 +348,9 @@ func (m *Manager) finish(id string, err error) {
 	defer m.mu.Unlock()
 	op := m.operations[id]
 	if err != nil {
-		op.Status, op.ErrorCode = "failed", ErrorCode(err)
+		op.Status, op.ErrorCode = consts.StatusFailed, ErrorCode(err)
 	} else {
-		op.Status, op.Phase, op.ErrorCode = "completed", "done", ""
+		op.Status, op.Phase, op.ErrorCode = consts.StatusCompleted, consts.PhaseDone, ""
 	}
 	op.UpdatedAt = time.Now().UTC()
 	m.operations[id] = op

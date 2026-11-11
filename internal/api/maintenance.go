@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/maintenance"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -19,7 +20,7 @@ func (a *collectionAPI) requestMaintenance(c *gin.Context) {
 		a.fail(c, err)
 		return
 	}
-	c.JSON(http.StatusAccepted, gin.H{"status": "pending"})
+	c.JSON(http.StatusAccepted, gin.H{"status": consts.StatusPending})
 }
 
 func (a *collectionAPI) storageStatus(c *gin.Context) {
@@ -49,7 +50,7 @@ func (a *collectionAPI) storageStatus(c *gin.Context) {
 		return
 	}
 	counts := gin.H{}
-	for name, model := range map[string]any{"raw": &storage.RepoSnapshot{}, "hourly": &storage.HourlyMetric{}, "daily": &storage.DailyMetric{}} {
+	for name, model := range map[string]any{consts.ResolutionRaw: &storage.RepoSnapshot{}, consts.ResolutionHourly: &storage.HourlyMetric{}, consts.ResolutionDaily: &storage.DailyMetric{}} {
 		var n int64
 		if err := db.Model(model).Count(&n).Error; err != nil {
 			a.fail(c, err)
@@ -58,12 +59,12 @@ func (a *collectionAPI) storageStatus(c *gin.Context) {
 		counts[name] = n
 	}
 	var markers []storage.MaintenanceState
-	if err := db.Where("key IN ?", []string{maintenance.HourlyKey, maintenance.DailyKey, maintenance.CleanupKey, metrics.ComputeKey}).
+	if err := db.Where(storage.MaintenanceStateColumns.Key+" IN ?", []string{maintenance.HourlyKey, maintenance.DailyKey, maintenance.CleanupKey, metrics.ComputeKey}).
 		Find(&markers).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
-	watermarks := gin.H{"hourly": nil, "daily": nil, "cleanedAt": nil, "metricsUpdatedAt": nil}
+	watermarks := gin.H{consts.ResolutionHourly: nil, consts.ResolutionDaily: nil, "cleanedAt": nil, "metricsUpdatedAt": nil}
 	for _, marker := range markers {
 		switch marker.Key {
 		case metrics.ComputeKey:
@@ -77,9 +78,9 @@ func (a *collectionAPI) storageStatus(c *gin.Context) {
 				return
 			}
 			if marker.Key == maintenance.HourlyKey {
-				watermarks["hourly"] = iso(value)
+				watermarks[consts.ResolutionHourly] = iso(value)
 			} else {
-				watermarks["daily"] = iso(value)
+				watermarks[consts.ResolutionDaily] = iso(value)
 			}
 		}
 	}

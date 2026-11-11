@@ -85,6 +85,7 @@ func TestProjectThemeUsesTopicsAndKeepsDiscoveryAndCompleteViews(t *testing.T) {
 		t.Fatalf("没有观测记录时不应有大事记: %v", got)
 	}
 	delete(detail, "milestones")
+	delete(detail, "groupName")
 	if !reflect.DeepEqual(directory[0], detail) || detail["count"] != float64(3) || detail["recentCount"] != float64(2) ||
 		detail["icon"] != consts.ThemeIconPlug || detail["iconColor"] != consts.ThemeColorGreen ||
 		detail["latestRepo"].(map[string]any)["id"] != float64(1) {
@@ -173,5 +174,9 @@ func TestProjectThemeGroupAssignmentAndRemoval(t *testing.T) {
 	item := directory["items"].([]any)[0].(map[string]any)
 	if first["slug"] != "content" || first["name"] != "项目用途" || first["description"] != "按用途查看工具。" || item["groupSlug"] != first["slug"] {
 		t.Fatalf("公开目录未返回更新后的方向及专题归属: %+v", directory)
+	}
+	detail := request(t, router, "GET", "/api/v1/public/project-themes/sample", "", "", 200)
+	if detail["groupName"] != first["name"] {
+		t.Fatalf("公开详情未返回所属方向的名称: %+v", detail)
 	}
 }

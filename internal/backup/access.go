@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -21,7 +22,7 @@ func (m *Manager) Save(ctx context.Context, input SettingsUpdate) (SettingsView,
 		return SettingsView{}, ErrSetupRequired
 	}
 	current := m.state.settings
-	m.busy = "settings"
+	m.busy = consts.OperationSettings
 	m.mu.Unlock()
 	defer func() { m.mu.Lock(); m.busy = ""; m.mu.Unlock(); m.wakeup() }()
 	next := Settings{Enabled: input.Enabled, Schedule: input.Schedule, RetentionDays: input.RetentionDays, R2: current.R2}
@@ -44,7 +45,7 @@ func (m *Manager) Save(ctx context.Context, input SettingsUpdate) (SettingsView,
 	changed := current.R2.Endpoint != next.R2.Endpoint || current.R2.Bucket != next.R2.Bucket || current.R2.Prefix != next.R2.Prefix
 	if err := m.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if changed {
-			if err := tx.Delete(&storage.MaintenanceState{}, "key IN ?", []string{lastBackupKey, backupDayKey, cleanupDayKey}).Error; err != nil {
+			if err := tx.Delete(&storage.MaintenanceState{}, storage.MaintenanceStateColumns.Key+" IN ?", []string{lastBackupKey, backupDayKey, cleanupDayKey}).Error; err != nil {
 				return ErrDatabase
 			}
 		}
@@ -154,7 +155,7 @@ func (m *Manager) List(ctx context.Context, sessionID string, setup bool, limit 
 func (m *Manager) ResumeAI(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.busy == "restore" || m.blocked {
+	if m.busy == consts.OperationRestore || m.blocked {
 		return ErrRestoring
 	}
 	if !m.state.initialized {

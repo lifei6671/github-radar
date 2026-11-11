@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
@@ -23,12 +24,12 @@ func (a *collectionAPI) readme(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(a.cfg.Server.WriteTimeoutSeconds)*time.Second)
 	defer cancel()
 	var repo storage.Repository
-	if err := a.db.WithContext(ctx).Where(publicRepoCondition).Take(&repo, "repo_id=?", id).Error; err != nil {
+	if err := a.db.WithContext(ctx).Where(publicRepoCondition).Take(&repo, storage.RepositoryColumns.RepoID+"=?", id).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
 	if a.readmes == nil {
-		c.JSON(http.StatusOK, summary.ReadmeView{State: "unavailable"})
+		c.JSON(http.StatusOK, summary.ReadmeView{State: consts.StatusUnavailable})
 		return
 	}
 	view, err := a.readmes.ReadmeView(ctx, repo)
@@ -36,8 +37,8 @@ func (a *collectionAPI) readme(c *gin.Context) {
 	case err == nil:
 		if !c.GetBool(publicReadKey) && view.OriginalHTML != "" {
 			var job storage.Job
-			if err := a.db.WithContext(ctx).Select("id").Where(
-				"repo_id=? AND type=? AND status IN ('pending','running','failed','unknown')", id, summary.TranslationJob).Find(&job).Error; err != nil {
+			if err := a.db.WithContext(ctx).Select(storage.JobColumns.ID).Where(
+				storage.JobColumns.RepoID+"=? AND "+storage.JobColumns.Type+"=? AND "+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusRunning+"','"+consts.StatusFailed+"','"+consts.StatusUnknown+"')", id, summary.TranslationJob).Find(&job).Error; err != nil {
 				a.fail(c, err)
 				return
 			}
@@ -47,11 +48,11 @@ func (a *collectionAPI) readme(c *gin.Context) {
 		}
 		c.JSON(http.StatusOK, view)
 	case errors.Is(err, summary.ErrRepoUnavailable), errors.Is(err, storage.ErrRepositoryBlocked):
-		c.JSON(http.StatusNotFound, gin.H{"code": "not_found"})
+		c.JSON(http.StatusNotFound, gin.H{"code": consts.CodeNotFound})
 	default:
 		var upstream *gh.Failure
 		if errors.As(err, &upstream) || errors.Is(err, context.DeadlineExceeded) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"code": "readme_unavailable"})
+			c.JSON(http.StatusServiceUnavailable, gin.H{"code": consts.CodeReadmeUnavailable})
 			return
 		}
 		a.fail(c, err)

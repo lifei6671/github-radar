@@ -26,6 +26,10 @@ export function repoPath(fullName: string, admin = false, historicalId?: number)
   return (admin ? '/admin/repos/' : '/repos/') + encodedRepoName(fullName) +
     (admin && historicalId !== undefined ? '?repoId=' + historicalId : '')
 }
+
+export const topicsPath = '/topics'
+export function topicPath(slug: string) { return topicsPath + '/' + encodeURIComponent(slug) }
+
 export function dateGroup(value: string, discovery = false) { return (discovery ? discoveryDay : day).format(new Date(value)) }
 export function dateHeading(value: string, discovery = false) { return (discovery ? discoveryHeading : monthDay).format(new Date(value)) }
 export function dayOfWeek(value: string, discovery = false) { return (discovery ? discoveryWeekday : weekday).format(new Date(value)) }

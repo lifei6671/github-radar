@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -95,10 +96,10 @@ func (c *Client) getRepo(ctx context.Context, path, etag string, p Policy) (Repo
 	}
 	if response.StatusCode != http.StatusOK || repo.GetID() <= 0 || repo.GetFullName() == "" ||
 		repo.StargazersCount == nil || repo.ForksCount == nil {
-		return RepositoryResult{}, &Failure{Code: "github_invalid_repository", Status: response.StatusCode}
+		return RepositoryResult{}, &Failure{Code: consts.CodeGitHubInvalidRepository, Status: response.StatusCode}
 	}
 	if repo.GetPrivate() {
-		return RepositoryResult{}, &Failure{Code: "github_gone", Status: http.StatusGone}
+		return RepositoryResult{}, &Failure{Code: consts.CodeGitHubGone, Status: http.StatusGone}
 	}
 	return RepositoryResult{Repository: &repo, ETag: response.Header.Get("ETag")}, nil
 }
@@ -121,7 +122,7 @@ func (c *Client) Search(ctx context.Context, query string, page int) (SearchPage
 		return SearchPage{}, err
 	}
 	if response.StatusCode != http.StatusOK || result.Total == nil || result.GetIncompleteResults() {
-		return SearchPage{}, &Failure{Code: "github_incomplete_search", Status: response.StatusCode}
+		return SearchPage{}, &Failure{Code: consts.CodeGitHubIncompleteSearch, Status: response.StatusCode}
 	}
 	return SearchPage{result.Repositories, result.GetTotal(), response.NextPage}, nil
 }
@@ -159,9 +160,9 @@ func (c *Client) getMedia(ctx context.Context, path, etag string, p Policy, targ
 		var network net.Error
 		switch {
 		case errors.Is(requestErr, context.DeadlineExceeded) || (errors.As(requestErr, &network) && network.Timeout()):
-			return nil, &Failure{Code: "github_timeout"}
+			return nil, &Failure{Code: consts.CodeGitHubTimeout}
 		default:
-			return nil, &Failure{Code: "github_network"}
+			return nil, &Failure{Code: consts.CodeGitHubNetwork}
 		}
 	}
 
@@ -172,7 +173,7 @@ func (c *Client) getMedia(ctx context.Context, path, etag string, p Policy, targ
 	}
 	var network net.Error
 	if errors.Is(requestErr, context.DeadlineExceeded) || (errors.As(requestErr, &network) && network.Timeout()) {
-		return nil, &Failure{Code: "github_timeout"}
+		return nil, &Failure{Code: consts.CodeGitHubTimeout}
 	}
 	status := response.StatusCode
 	if kind != "" {
@@ -181,18 +182,18 @@ func (c *Client) getMedia(ctx context.Context, path, etag string, p Policy, targ
 	if status == http.StatusNotModified || (status == http.StatusOK && (requestErr == nil || errors.Is(requestErr, errBodyLimit))) {
 		return response, nil
 	}
-	code := "github_invalid_response"
+	code := consts.CodeGitHubInvalidResponse
 	switch {
 	case status == http.StatusUnauthorized:
-		code = "github_unauthorized"
+		code = consts.CodeGitHubUnauthorized
 	case status == http.StatusForbidden:
-		code = "github_forbidden"
+		code = consts.CodeGitHubForbidden
 	case status == http.StatusNotFound:
-		code = "github_not_found"
+		code = consts.CodeGitHubNotFound
 	case status == http.StatusGone:
-		code = "github_gone"
+		code = consts.CodeGitHubGone
 	case status >= 500:
-		code = "github_upstream"
+		code = consts.CodeGitHubUpstream
 	}
 	return nil, &Failure{Code: code, Status: status}
 }

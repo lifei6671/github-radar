@@ -13,12 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/topics"
 )
 
 func validTopicStatus(status string) bool {
-	return slices.Contains([]string{"candidate", "shortlisted", "accepted", "ignored", "published"}, status)
+	return slices.Contains([]string{consts.StatusCandidate, consts.StatusShortlisted, consts.StatusAccepted, consts.StatusIgnored, consts.StatusPublished}, status)
 }
 
 type topicCursor struct {
@@ -91,15 +92,15 @@ func (a *collectionAPI) topics(c *gin.Context) {
 	}
 	status := c.Query("status")
 	if status != "" && !validTopicStatus(status) {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_topic_status"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidTopicStatus})
 		return
 	}
-	db := a.db.WithContext(c.Request.Context()).Table("topic_candidates t")
+	db := a.db.WithContext(c.Request.Context()).Table(storage.TopicCandidateTable + " t")
 	if status != "" {
-		db = db.Where("t.status=?", status)
+		db = db.Where("t."+storage.TopicCandidateColumns.Status+"=?", status)
 	}
 	day := c.Query("day")
-	orderColumn := "t.updated_at"
+	orderColumn := "t." + storage.TopicCandidateColumns.UpdatedAt
 	if day != "" {
 		loc, err := time.LoadLocation(a.cfg.Recommendations.Timezone)
 		if err != nil {
@@ -108,14 +109,15 @@ func (a *collectionAPI) topics(c *gin.Context) {
 		}
 		date, err := time.Parse(time.DateOnly, day)
 		if err != nil || date.Format(time.DateOnly) != day {
-			c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_topic_day"})
+			c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidTopicDay})
 			return
 		}
 		// 用入池日期和稳定的创建顺序生成版面，编辑反馈不会移动条目。
 		var clauses []string
 		var bounds []any
 		for _, span := range topicDaySpans(date, loc) {
-			clauses = append(clauses, "(t.created_at>=? AND t.created_at<?)")
+			createdAt := "t." + storage.TopicCandidateColumns.CreatedAt
+			clauses = append(clauses, "("+createdAt+">=? AND "+createdAt+"<?)")
 			bounds = append(bounds, span.start.UnixMilli(), span.end.UnixMilli())
 		}
 		if len(clauses) == 0 {
@@ -123,16 +125,16 @@ func (a *collectionAPI) topics(c *gin.Context) {
 		} else {
 			db = db.Where("("+strings.Join(clauses, " OR ")+")", bounds...)
 		}
-		orderColumn = "t.created_at"
+		orderColumn = "t." + storage.TopicCandidateColumns.CreatedAt
 	}
 	if raw, exists := c.GetQuery("cursor"); exists {
 		var cursor topicCursor
 		data, err := base64.RawURLEncoding.DecodeString(raw)
 		if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Status != status || cursor.Day != day || cursor.ID <= 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_cursor"})
+			c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidCursor})
 			return
 		}
-		db = db.Where("("+orderColumn+",t.id)<(?,?)", cursor.At, cursor.ID)
+		db = db.Where("("+orderColumn+",t."+storage.TopicCandidateColumns.ID+")<(?,?)", cursor.At, cursor.ID)
 	}
 	var rows []struct {
 		storage.TopicCandidate
@@ -141,9 +143,9 @@ func (a *collectionAPI) topics(c *gin.Context) {
 		SummaryZh     *string
 		ValueTagsJSON *string
 	}
-	if err := db.Select("t.*,r.full_name,r.name_is_current,s.summary_zh,s.value_tags_json").
-		Joins("JOIN repositories r ON r.repo_id=t.repo_id LEFT JOIN ai_summaries s ON s.repo_id=t.repo_id").
-		Order(orderColumn + " DESC,t.id DESC").Limit(limit + 1).Scan(&rows).Error; err != nil {
+	if err := db.Select("t.*,r." + storage.RepositoryColumns.FullName + ",r." + storage.RepositoryColumns.NameIsCurrent + ",s." + storage.AISummaryColumns.SummaryZh + ",s." + storage.AISummaryColumns.ValueTagsJSON).
+		Joins("JOIN " + storage.RepositoryTable + " r ON r." + storage.RepositoryColumns.RepoID + "=t." + storage.TopicCandidateColumns.RepoID + " LEFT JOIN " + storage.AISummaryTable + " s ON s." + storage.AISummaryColumns.RepoID + "=t." + storage.TopicCandidateColumns.RepoID).
+		Order(orderColumn + " DESC,t." + storage.TopicCandidateColumns.ID + " DESC").Limit(limit + 1).Scan(&rows).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -178,7 +180,7 @@ func (a *collectionAPI) topics(c *gin.Context) {
 func (a *collectionAPI) topicDays(c *gin.Context) {
 	status := c.Query("status")
 	if status != "" && !validTopicStatus(status) {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_topic_status"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidTopicStatus})
 		return
 	}
 	loc, err := time.LoadLocation(a.cfg.Recommendations.Timezone)
@@ -187,9 +189,9 @@ func (a *collectionAPI) topicDays(c *gin.Context) {
 		return
 	}
 	var rows []storage.TopicCandidate
-	db := a.db.WithContext(c.Request.Context()).Select("created_at", "title_zh").Order("created_at DESC,id DESC")
+	db := a.db.WithContext(c.Request.Context()).Select(storage.TopicCandidateColumns.CreatedAt, storage.TopicCandidateColumns.TitleZh).Order(storage.TopicCandidateColumns.CreatedAt + " DESC," + storage.TopicCandidateColumns.ID + " DESC")
 	if status != "" {
-		db = db.Where("status=?", status)
+		db = db.Where(storage.TopicCandidateColumns.Status+"=?", status)
 	}
 	if err := db.Find(&rows).Error; err != nil {
 		a.fail(c, err)
@@ -222,31 +224,31 @@ func (a *collectionAPI) updateTopic(c *gin.Context) {
 	if c.ShouldBindJSON(&input) != nil || (input.Status == nil && input.Feedback == nil) ||
 		(input.Status != nil && !validTopicStatus(*input.Status)) ||
 		(input.Feedback != nil && utf8.RuneCountInString(*input.Feedback) > 500) {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_topic_update"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidTopicUpdate})
 		return
 	}
 	now := time.Now().UnixMilli()
-	values := map[string]any{"updated_at": now, "reviewed_at": now}
+	values := map[string]any{storage.TopicCandidateColumns.UpdatedAt: now, storage.TopicCandidateColumns.ReviewedAt: now}
 	if input.Status != nil {
-		values["status"] = *input.Status
+		values[storage.TopicCandidateColumns.Status] = *input.Status
 	}
 	if input.Feedback != nil {
-		values["feedback"] = textPtr(strings.TrimSpace(*input.Feedback))
+		values[storage.TopicCandidateColumns.Feedback] = textPtr(strings.TrimSpace(*input.Feedback))
 	}
 	var row storage.TopicCandidate
 	err := a.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&storage.TopicCandidate{}).Where("id=?", id).Updates(values)
+		result := tx.Model(&storage.TopicCandidate{}).Where(storage.TopicCandidateColumns.ID+"=?", id).Updates(values)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
 			return gorm.ErrRecordNotFound
 		}
-		return tx.Take(&row, "id=?", id).Error
+		return tx.Take(&row, storage.TopicCandidateColumns.ID+"=?", id).Error
 	})
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"code": "not_found"})
+			c.JSON(http.StatusNotFound, gin.H{"code": consts.CodeNotFound})
 			return
 		}
 		a.fail(c, err)

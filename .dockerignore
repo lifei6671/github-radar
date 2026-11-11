@@ -1,6 +1,7 @@
 .git/
 .workbuddy/
 .env*
+s3-r2-test.local.json
 data/
 docs/
 *.exe

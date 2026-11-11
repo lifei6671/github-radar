@@ -12,6 +12,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -22,21 +23,21 @@ type Fault string
 func (f Fault) Error() string { return string(f) }
 
 const (
-	ErrBusy               Fault = "backup_operation_in_progress"
-	ErrRestoring          Fault = "restore_in_progress"
-	ErrMaintenance        Fault = "restoring"
-	ErrAlreadyInitialized Fault = "already_initialized"
-	ErrSetupRequired      Fault = "setup_required"
-	ErrNotConfigured      Fault = "r2_not_configured"
-	ErrInvalidSettings    Fault = "invalid_backup_settings"
-	ErrInvalidObject      Fault = "invalid_backup_object"
-	ErrSession            Fault = "setup_session_expired"
-	ErrOperation          Fault = "backup_operation_not_found"
-	ErrReload             Fault = "reload_not_available"
-	ErrR2                 Fault = "r2_request_failed"
-	ErrSpace              Fault = "backup_insufficient_disk"
-	ErrUploadUnknown      Fault = "backup_upload_unconfirmed"
-	ErrDatabase           Fault = "backup_database_error"
+	ErrBusy               Fault = consts.CodeBackupOperationInProgress
+	ErrRestoring          Fault = consts.CodeRestoreInProgress
+	ErrMaintenance        Fault = consts.CodeRestoring
+	ErrAlreadyInitialized Fault = consts.CodeAlreadyInitialized
+	ErrSetupRequired      Fault = consts.CodeSetupRequired
+	ErrNotConfigured      Fault = consts.CodeR2NotConfigured
+	ErrInvalidSettings    Fault = consts.CodeInvalidBackupSettings
+	ErrInvalidObject      Fault = consts.CodeInvalidBackupObject
+	ErrSession            Fault = consts.CodeSetupSessionExpired
+	ErrOperation          Fault = consts.CodeBackupOperationNotFound
+	ErrReload             Fault = consts.CodeReloadNotAvailable
+	ErrR2                 Fault = consts.CodeR2RequestFailed
+	ErrSpace              Fault = consts.CodeBackupInsufficientDisk
+	ErrUploadUnknown      Fault = consts.CodeBackupUploadUnconfirmed
+	ErrDatabase           Fault = consts.CodeBackupDatabaseError
 )
 
 func ErrorCode(err error) string {
@@ -114,7 +115,7 @@ type storedSettings struct {
 
 func readSettings(ctx context.Context, db *gorm.DB) (Settings, error) {
 	var row storage.SystemSetting
-	err := db.WithContext(ctx).Take(&row, "key=?", settingsKey).Error
+	err := db.WithContext(ctx).Take(&row, storage.SystemSettingColumns.Key+"=?", settingsKey).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return defaults(), nil
 	}

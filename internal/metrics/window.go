@@ -4,13 +4,14 @@ import (
 	"time"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
 const (
-	Exact        = "exact"
-	Estimated    = "estimated"
-	Insufficient = "insufficient"
+	Exact        = consts.QualityExact
+	Estimated    = consts.QualityEstimated
+	Insufficient = consts.QualityInsufficient
 	Hour         = int64(time.Hour / time.Millisecond)
 	Day          = 24 * Hour
 	minute       = int64(time.Minute / time.Millisecond)
@@ -60,7 +61,7 @@ func Between(start, end *Point, from, to int64, tolerance config.BoundaryToleran
 	delta := end.Stars - start.Stars
 	resolution := end.Resolution
 	if start.Resolution != end.Resolution {
-		resolution = "mixed"
+		resolution = consts.ResolutionMixed
 	}
 	w = Window{Delta: &delta, Quality: Estimated, StartAt: &start.At, EndAt: &end.At, Resolution: &resolution}
 	if offset <= int64(tolerance.Exact)*minute {

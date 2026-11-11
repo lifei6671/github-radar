@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/migrations"
@@ -44,7 +45,7 @@ func (m *Manager) StartRestore(key string, newConnection *Connection, sessionID 
 	if _, ok := objectDate(cfg.R2.Prefix, key); !ok {
 		return Operation{}, ErrInvalidObject
 	}
-	op := m.newOperationLocked("restore")
+	op := m.newOperationLocked(consts.OperationRestore)
 	m.launchLocked(op, func() error { return m.restore(op.ID, key, cfg, setup, !setup && newConnection != nil) })
 	return op, nil
 }
@@ -70,7 +71,7 @@ func (m *Manager) restore(id, key string, cfg Settings, setup, probe bool) error
 	}
 	m.measure(id, dir)
 
-	m.update(id, func(op *Operation) { op.Phase = "drain" })
+	m.update(id, func(op *Operation) { op.Phase = consts.PhaseDrain })
 	started := time.Now()
 	defer func() { m.update(id, func(op *Operation) { op.MaintenanceMS = time.Since(started).Milliseconds() }) }()
 	drain, cancel := context.WithTimeout(m.root, 30*time.Second)
@@ -78,10 +79,10 @@ func (m *Manager) restore(id, key string, cfg Settings, setup, probe bool) error
 	cancel()
 	if err != nil {
 		m.openBusiness(nil)
-		return Fault("restore_drain_failed")
+		return Fault(consts.CodeRestoreDrainFailed)
 	}
 
-	m.update(id, func(op *Operation) { op.Phase = "copy" })
+	m.update(id, func(op *Operation) { op.Phase = consts.PhaseCopy })
 	copyCtx, cancel := context.WithTimeout(m.root, 5*time.Minute)
 	walPath := m.cfg.Storage.Path + "-wal"
 	wal := fileSize(walPath)
@@ -94,25 +95,25 @@ func (m *Manager) restore(id, key string, cfg Settings, setup, probe bool) error
 	defer cancel()
 	result, err := readReceipt(verify, m.db)
 	if err != nil {
-		return Fault("restore_database_unavailable")
+		return Fault(consts.CodeRestoreDatabaseUnavailable)
 	}
 	if result.OperationID == id {
 		m.update(id, func(op *Operation) {
-			op.Phase = "reload"
+			op.Phase = consts.PhaseReload
 			op.DatabaseApplied = true
 			op.PreparedAt = &result.PreparedAt
 		})
 		return m.reload(verify, id)
 	}
 	if copyErr == nil {
-		return Fault("restore_receipt_missing")
+		return Fault(consts.CodeRestoreReceiptMissing)
 	}
 	state, err := m.readLive(verify)
 	if err != nil {
-		return Fault("restore_database_unavailable")
+		return Fault(consts.CodeRestoreDatabaseUnavailable)
 	}
 	m.openBusiness(&state)
-	return Fault("restore_copy_failed")
+	return Fault(consts.CodeRestoreCopyFailed)
 }
 
 // prepareRestore 只修改 staging 中的数据库，验证完成后关闭它的连接池。
@@ -131,7 +132,7 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 	}
 	version, err := migrations.BackupVersion(ctx, pool)
 	if err != nil || version != obj.SchemaVersion {
-		return "", Fault("backup_schema_unsupported")
+		return "", Fault(consts.CodeBackupSchemaUnsupported)
 	}
 	sourcePage, err := pageSize(ctx, pool)
 	if err != nil {
@@ -146,13 +147,13 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 		return "", ErrDatabase
 	}
 	if mode == "wal" && sourcePage != targetPage {
-		return "", Fault("restore_page_size_mismatch")
+		return "", Fault(consts.CodeRestorePageSizeMismatch)
 	}
 	if err := pool.QueryRowContext(ctx, "PRAGMA journal_mode=DELETE").Scan(&mode); err != nil || mode != "delete" {
 		return "", ErrDatabase
 	}
 	if _, err := migrations.Up(ctx, pool); err != nil {
-		return "", Fault("backup_migration_failed")
+		return "", Fault(consts.CodeBackupMigrationFailed)
 	}
 	db, err := storage.OpenGORM(pool)
 	if err != nil {
@@ -163,7 +164,7 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 	}
 	if setup {
 		var row storage.SystemSetting
-		if err := db.WithContext(ctx).Find(&row, "key=?", settingsKey).Error; err != nil {
+		if err := db.WithContext(ctx).Find(&row, storage.SystemSettingColumns.Key+"=?", settingsKey).Error; err != nil {
 			return "", ErrDatabase
 		}
 		var saved storedSettings
@@ -195,7 +196,7 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 		if err := resetWork(tx, at.UnixMilli()); err != nil {
 			return err
 		}
-		if err := tx.Delete(&storage.MaintenanceState{}, "key IN ?", []string{lastBackupKey, backupDayKey, cleanupDayKey}).Error; err != nil {
+		if err := tx.Delete(&storage.MaintenanceState{}, storage.MaintenanceStateColumns.Key+" IN ?", []string{lastBackupKey, backupDayKey, cleanupDayKey}).Error; err != nil {
 			return ErrDatabase
 		}
 		if err := setMark(tx, lastBackupKey, string(backupData)); err != nil {
@@ -232,12 +233,12 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 }
 
 func resetWork(tx *gorm.DB, at int64) error {
-	if err := tx.Model(&storage.Job{}).Where("status IN ?", []string{"pending", "running", "failed", "unknown"}).
-		Updates(map[string]any{"status": "canceled", "last_error_code": "restore_reset", "lease_token": nil, "lease_until": nil, "updated_at": at}).Error; err != nil {
+	if err := tx.Model(&storage.Job{}).Where(storage.JobColumns.Status+" IN ?", []string{consts.StatusPending, consts.StatusRunning, consts.StatusFailed, consts.StatusUnknown}).
+		Updates(map[string]any{storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LastErrorCode: consts.CodeRestoreReset, storage.JobColumns.LeaseToken: nil, storage.JobColumns.LeaseUntil: nil, storage.JobColumns.UpdatedAt: at}).Error; err != nil {
 		return ErrDatabase
 	}
-	if err := tx.Model(&storage.AICall{}).Where("status IN ?", []string{"reserved", "sending", "unknown"}).
-		Updates(map[string]any{"status": "failed", "error_code": "restore_reset_unknown", "updated_at": at}).Error; err != nil {
+	if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.Status+" IN ?", []string{consts.StatusReserved, consts.StatusSending, consts.StatusUnknown}).
+		Updates(map[string]any{storage.AICallColumns.Status: consts.StatusFailed, storage.AICallColumns.ErrorCode: consts.CodeRestoreResetUnknown, storage.AICallColumns.UpdatedAt: at}).Error; err != nil {
 		return ErrDatabase
 	}
 	if err := tx.Where("1=1").Delete(&storage.RateLimit{}).Error; err != nil {
@@ -247,9 +248,9 @@ func resetWork(tx *gorm.DB, at int64) error {
 		model  any
 		column string
 	}{
-		{&storage.Repository{}, "next_fetch_at"},
-		{&storage.DiscoveryRule{}, "next_run_at"},
-		{&storage.SummaryCheck{}, "next_check_at"},
+		{&storage.Repository{}, storage.RepositoryColumns.NextFetchAt},
+		{&storage.DiscoveryRule{}, storage.DiscoveryRuleColumns.NextRunAt},
+		{&storage.SummaryCheck{}, storage.SummaryCheckColumns.NextCheckAt},
 	} {
 		if err := tx.Model(update.model).Where("1=1").UpdateColumn(update.column, at).Error; err != nil {
 			return ErrDatabase
@@ -277,11 +278,11 @@ func (m *Manager) drain(ctx context.Context) error {
 		}
 	}
 	var running int64
-	if err := m.db.WithContext(ctx).Model(&storage.Job{}).Where("status=? AND lease_until>?", "running", time.Now().UnixMilli()).Count(&running).Error; err != nil {
+	if err := m.db.WithContext(ctx).Model(&storage.Job{}).Where(storage.JobColumns.Status+"=? AND "+storage.JobColumns.LeaseUntil+">?", consts.StatusRunning, time.Now().UnixMilli()).Count(&running).Error; err != nil {
 		return err
 	}
 	if running != 0 || m.pool.Stats().InUse != 0 {
-		return Fault("restore_drain_failed")
+		return Fault(consts.CodeRestoreDrainFailed)
 	}
 	return ctx.Err()
 }
@@ -309,7 +310,7 @@ func (m *Manager) reload(ctx context.Context, id string) error {
 		m.mu.Lock()
 		m.failedReload = id
 		m.mu.Unlock()
-		return Fault("restore_reload_failed")
+		return Fault(consts.CodeRestoreReloadFailed)
 	}
 	m.openBusiness(&state)
 	return nil
@@ -327,9 +328,9 @@ func (m *Manager) Reload() (Operation, error) {
 		return Operation{}, ErrReload
 	}
 	op := m.operations[id]
-	op.Status, op.ErrorCode, op.UpdatedAt = "running", "", time.Now().UTC()
+	op.Status, op.ErrorCode, op.UpdatedAt = consts.StatusRunning, "", time.Now().UTC()
 	m.operations[id] = op
-	m.busy = "restore"
+	m.busy = consts.OperationRestore
 	m.launchLocked(op, func() error {
 		ctx, cancel := context.WithTimeout(m.root, 15*time.Second)
 		defer cancel()

@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -18,7 +19,7 @@ func retryAt(job storage.Job, now time.Time) int64 {
 
 func (e *Engine) sourceFailed(ctx context.Context, job storage.Job, err error) error {
 	if errors.Is(err, ErrRepoUnavailable) {
-		return e.Queue.settle(ctx, job, outcome{status: "dead", code: "summary_repo_unavailable", attempts: job.Attempts,
+		return e.Queue.settle(ctx, job, outcome{status: consts.StatusDead, code: consts.CodeSummaryRepoUnavailable, attempts: job.Attempts,
 			apply: withdrawRepository(err, *job.RepoID)})
 	}
 	var upstream *gh.Failure
@@ -44,12 +45,12 @@ func withdrawRepository(err error, repoID int64) func(*gorm.DB) error {
 	}
 	return func(tx *gorm.DB) error {
 		at := observation.observed
-		values := map[string]any{"last_checked_at": at, "updated_at": gorm.Expr("MAX(updated_at, ?)", at),
-			"first_not_found_at": gorm.Expr("COALESCE(first_not_found_at, ?)", at)}
+		values := map[string]any{storage.RepositoryColumns.LastCheckedAt: at, storage.RepositoryColumns.UpdatedAt: gorm.Expr("MAX(updated_at, ?)", at),
+			storage.RepositoryColumns.FirstNotFoundAt: gorm.Expr("COALESCE("+storage.RepositoryColumns.FirstNotFoundAt+", ?)", at)}
 		if observation.gone {
-			values["state"] = "unavailable"
+			values[storage.RepositoryColumns.State] = consts.StatusUnavailable
 		}
-		return tx.Model(&storage.Repository{}).Where("repo_id=? AND COALESCE(last_checked_at,0)<=? AND COALESCE(last_success_at,0)<=?", repoID, at, at).
+		return tx.Model(&storage.Repository{}).Where(storage.RepositoryColumns.RepoID+"=? AND COALESCE("+storage.RepositoryColumns.LastCheckedAt+",0)<=? AND COALESCE("+storage.RepositoryColumns.LastSuccessAt+",0)<=?", repoID, at, at).
 			Updates(values).Error
 	}
 }
@@ -59,9 +60,9 @@ func (e *Engine) fail(ctx context.Context, job storage.Job, code string, retry b
 	if deferOnly {
 		attempts--
 	}
-	status := "failed"
+	status := consts.StatusFailed
 	if !retry || attempts >= job.MaxAttempts {
-		status = "dead"
+		status = consts.StatusDead
 	}
 	return e.Queue.settle(ctx, job, outcome{status: status, code: code, attempts: attempts, next: max(until, retryAt(job, time.Now()))})
 }
@@ -76,20 +77,20 @@ func (e *Engine) finishFailure(ctx context.Context, job storage.Job, call storag
 func (e *Engine) recordCallFailure(ctx context.Context, job storage.Job, call storage.AICall, result ModelResult, duration time.Duration,
 	old storage.AISummary, check storage.SummaryCheck, topicsFingerprint string) error {
 	retry := result.Retry
-	if result.Code == "invalid_output" && retry && e.Queue.AI.Summary.RepairAttempts < job.MaxAttempts-1 {
+	if result.Code == consts.CodeInvalidOutput && retry && e.Queue.AI.Summary.RepairAttempts < job.MaxAttempts-1 {
 		var count int64
 		if err := e.Queue.DB.WithContext(ctx).Model(&storage.AICall{}).
-			Where("job_id=? AND status='failed' AND error_code='invalid_output'", job.ID).Count(&count).Error; err != nil {
+			Where(storage.AICallColumns.JobID+"=? AND "+storage.AICallColumns.Status+"='"+consts.StatusFailed+"' AND "+storage.AICallColumns.ErrorCode+"='"+consts.CodeInvalidOutput+"'", job.ID).Count(&count).Error; err != nil {
 			return err
 		}
 		retry = count < int64(e.Queue.AI.Summary.RepairAttempts)
 	}
-	status := "failed"
+	status := consts.StatusFailed
 	if !retry || job.Attempts >= job.MaxAttempts {
-		status = "dead"
+		status = consts.StatusDead
 	}
 	if result.Unknown {
-		status = "unknown"
+		status = consts.StatusUnknown
 	}
 	return e.Queue.settle(ctx, job, outcome{status: status, code: result.Code, next: retryAt(job, time.Now()),
 		attempts: job.Attempts, call: &call, model: result, duration: duration, apply: func(tx *gorm.DB) error {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/github-radar/internal/backup"
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 // runBackup 使用运行中服务的同一协调器，避免离线命令与恢复并发写库。
@@ -71,9 +72,9 @@ func runBackup(ctx context.Context, listen, token string, logger *slog.Logger) e
 			return err
 		}
 		switch op.Status {
-		case "failed":
+		case consts.StatusFailed:
 			return fmt.Errorf("备份失败 %s", op.ErrorCode)
-		case "completed":
+		case consts.StatusCompleted:
 			logger.Info("备份完成", "operationId", op.ID, "warning", op.Warning)
 			return nil
 		}

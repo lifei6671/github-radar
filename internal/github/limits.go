@@ -11,16 +11,17 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
 const (
 	Core            = "core"
-	Search          = "search"
+	Search          = consts.SourceSearch
 	repoLimit       = "repo_refresh"
 	readmeLimit     = "readme_check"
 	readmeViewLimit = "readme_view"
-	secondary       = "github_secondary"
+	secondary       = consts.CodeGitHubSecondary
 )
 
 // Policy 区分独立的 Search 预算、仓库详情子预算和优先请求。
@@ -41,7 +42,7 @@ type limiter struct {
 
 func rateState(tx *gorm.DB, resource string) (storage.RateLimit, error) {
 	r := storage.RateLimit{Resource: resource}
-	err := tx.Take(&r, "resource = ?", resource).Error
+	err := tx.Take(&r, storage.RateLimitColumns.Resource+" = ?", resource).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		err = nil
 	}
@@ -59,7 +60,7 @@ func (l limiter) reserve(ctx context.Context, p Policy, now time.Time) error {
 		if p.RepositoryID > 0 {
 			// 每次实际 HTTP 请求都检查屏蔽，覆盖重定向和 README 的后续 blob 请求。
 			var blocked int64
-			if err := tx.Model(&storage.Repository{}).Where("repo_id=? AND blocked=1", p.RepositoryID).Count(&blocked).Error; err != nil {
+			if err := tx.Model(&storage.Repository{}).Where(storage.RepositoryColumns.RepoID+"=? AND "+storage.RepositoryColumns.Blocked+"=1", p.RepositoryID).Count(&blocked).Error; err != nil {
 				return err
 			}
 			if blocked > 0 {
@@ -71,26 +72,26 @@ func (l limiter) reserve(ctx context.Context, p Policy, now time.Time) error {
 			return err
 		}
 		if global.PausedUntil != nil && *global.PausedUntil > ms {
-			return &Failure{Code: "github_secondary_limit", Until: *global.PausedUntil}
+			return &Failure{Code: consts.CodeGitHubSecondaryLimit, Until: *global.PausedUntil}
 		}
 		r, err := rateState(tx, p.Resource)
 		if err != nil {
 			return err
 		}
 		if r.PausedUntil != nil && *r.PausedUntil > ms {
-			return &Failure{Code: "github_primary_limit", Until: *r.PausedUntil}
+			return &Failure{Code: consts.CodeGitHubPrimaryLimit, Until: *r.PausedUntil}
 		}
 		if r.ResetAt > ms {
 			if r.Remaining == 0 {
-				return &Failure{Code: "github_primary_limit", Until: r.ResetAt + 1000}
+				return &Failure{Code: consts.CodeGitHubPrimaryLimit, Until: r.ResetAt + 1000}
 			}
 			if p.Resource == Core && !p.Priority {
 				reserve := l.cfg.CoreReserveRemaining
-				if p.Grade == "B" || p.Grade == "C" {
+				if p.Grade == consts.GradeB || p.Grade == consts.GradeC {
 					reserve = max(reserve, 1000)
 				}
 				if r.Remaining < reserve {
-					return &Failure{Code: "github_core_reserve", Until: r.ResetAt + 1000}
+					return &Failure{Code: consts.CodeGitHubCoreReserve, Until: r.ResetAt + 1000}
 				}
 			}
 		}
@@ -130,7 +131,7 @@ func consumeLocal(tx *gorm.DB, r *storage.RateLimit, budget int, window time.Dur
 	if r.LocalWindow == 0 || end <= now {
 		r.LocalWindow, r.LocalRequests = now, 0
 	} else if r.LocalRequests >= budget {
-		return &Failure{Code: "github_local_budget", Until: end}
+		return &Failure{Code: consts.CodeGitHubLocalBudget, Until: end}
 	}
 	r.LocalRequests++
 	return saveRate(tx, r)

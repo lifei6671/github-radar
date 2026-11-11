@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -23,14 +24,14 @@ func Compute(ctx context.Context, db *gorm.DB, cfg config.Config, now time.Time,
 	slot := now.UTC().Truncate(time.Duration(cfg.Scheduler.MetricsIntervalMinutes) * time.Minute).UnixMilli()
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var marker storage.MaintenanceState
-		if err := tx.Find(&marker, "key = ?", ComputeKey).Error; err != nil {
+		if err := tx.Find(&marker, storage.MaintenanceStateColumns.Key+" = ?", ComputeKey).Error; err != nil {
 			return err
 		}
 		if marker.Key != "" && (marker.UpdatedAt > asOf || (!force && marker.Value == strconv.FormatInt(slot, 10))) {
 			return nil
 		}
 		var repos []storage.Repository
-		if err := tx.Where("state='active'").Order("repo_id").Find(&repos).Error; err != nil {
+		if err := tx.Where(storage.RepositoryColumns.State + "='" + consts.StatusActive + "'").Order(storage.RepositoryColumns.RepoID).Find(&repos).Error; err != nil {
 			return err
 		}
 		rows, exact, err := calculate(tx, cfg.Metrics, repos, now)
@@ -45,7 +46,7 @@ func Compute(ctx context.Context, db *gorm.DB, cfg config.Config, now time.Time,
 				return err
 			}
 		}
-		if err := tx.Exec("DELETE FROM latest_metrics WHERE repo_id IN (SELECT repo_id FROM repositories WHERE state <> 'active')").Error; err != nil {
+		if err := tx.Exec("DELETE FROM " + storage.LatestMetricTable + " WHERE " + storage.LatestMetricColumns.RepoID + " IN (SELECT " + storage.RepositoryColumns.RepoID + " FROM " + storage.RepositoryTable + " WHERE " + storage.RepositoryColumns.State + " <> '" + consts.StatusActive + "')").Error; err != nil {
 			return err
 		}
 		marker = storage.MaintenanceState{Key: ComputeKey, Value: strconv.FormatInt(slot, 10), UpdatedAt: asOf}
@@ -68,8 +69,8 @@ func calculate(tx *gorm.DB, cfg config.Metrics, repos []storage.Repository, now 
 	}
 	asOf := now.UnixMilli()
 	windows := []windowSpec{
-		{"1h", Hour, cfg.Hour, false}, {"24h", Day, cfg.Day, false}, {"7d", 7 * Day, cfg.Week, false},
-		{"30d", 30 * Day, cfg.Month, true}, {"previous24h", 2 * Day, cfg.Day, false},
+		{consts.Window1h, Hour, cfg.Hour, false}, {consts.Window24h, Day, cfg.Day, false}, {consts.Window7d, 7 * Day, cfg.Week, false},
+		{consts.Window30d, 30 * Day, cfg.Month, true}, {consts.WindowPrevious24h, 2 * Day, cfg.Day, false},
 	}
 	load := func(target int64, tolerance config.BoundaryToleranceMinutes, hourlyOnly bool) (anchors, error) {
 		return loadAnchors(tx, target, int64(tolerance.Max)*minute, asOf, hourlyOnly)
@@ -107,12 +108,12 @@ func calculate(tx *gorm.DB, cfg config.Metrics, repos []storage.Repository, now 
 			from, to := asOf-spec.span, asOf
 			start := starts[i].pick(id, from, spec.tolerance, spec.hourlyOnly)
 			finish := end.pick(id, to, spec.tolerance, false)
-			if spec.key == "previous24h" {
+			if spec.key == consts.WindowPrevious24h {
 				to -= Day
 				finish = starts[1].pick(id, to, spec.tolerance, false)
 			}
 			w[spec.key] = Between(start, finish, from, to, spec.tolerance)
-			if spec.key == "7d" {
+			if spec.key == consts.Window7d {
 				start7 = start
 			}
 		}
@@ -123,15 +124,15 @@ func calculate(tx *gorm.DB, cfg config.Metrics, repos []storage.Repository, now 
 		}
 		row := summarize(cfg, w, dayWindows, trending[id], fresh, start7)
 		row.RepoID, row.CalculatedAt = id, asOf
-		row.CandidateBurst = (repo.Grade == "B" || repo.Grade == "C") &&
-			w["24h"].Quality == Estimated && *w["24h"].Delta >= int64(cfg.HotGrowth)
+		row.CandidateBurst = (repo.Grade == consts.GradeB || repo.Grade == consts.GradeC) &&
+			w[consts.Window24h].Quality == Estimated && *w[consts.Window24h].Delta >= int64(cfg.HotGrowth)
 		details, err := json.Marshal(w)
 		if err != nil {
 			return nil, nil, err
 		}
 		row.WindowDetailsJSON = string(details)
 		rows = append(rows, row)
-		exact = append(exact, w["24h"].Quality == Exact)
+		exact = append(exact, w[consts.Window24h].Quality == Exact)
 	}
 	return rows, exact, nil
 }
@@ -143,9 +144,9 @@ func scale(value, cap float64) float64 {
 }
 
 func summarize(cfg config.Metrics, w map[string]Window, days []Window, signal trendingSignal, fresh bool, start7 *Point) storage.LatestMetric {
-	current, week, prev := w["24h"], w["7d"], w["previous24h"]
+	current, week, prev := w[consts.Window24h], w[consts.Window7d], w[consts.WindowPrevious24h]
 	row := storage.LatestMetric{
-		Delta1h: w["1h"].Delta, Delta24h: current.Delta, Delta7d: week.Delta, Delta30d: w["30d"].Delta,
+		Delta1h: w[consts.Window1h].Delta, Delta24h: current.Delta, Delta7d: week.Delta, Delta30d: w[consts.Window30d].Delta,
 		TrendingFrequency: signal.frequency, TrendingStreak: signal.streak, TrendingRank: signal.rank, TrendingScore: signal.score,
 		DataQuality: Insufficient,
 	}

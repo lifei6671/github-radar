@@ -6,9 +6,11 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
-const MaintenanceInterrupted = "maintenance_interrupted"
+const MaintenanceInterrupted = consts.CodeMaintenanceInterrupted
 
 // InterruptJob 仅由仍拥有租约的执行者收尾，发送中的调用和任务原子进入 unknown。
 func InterruptJob(ctx context.Context, db *gorm.DB, job Job) error {
@@ -16,30 +18,30 @@ func InterruptJob(ctx context.Context, db *gorm.DB, job Job) error {
 		now := time.Now()
 		at := now.UnixMilli()
 		var call AICall
-		if job.Type == "refresh_readme_summary" || job.Type == "translate_readme" {
-			if err := tx.Find(&call, "job_id=? AND status IN ('reserved','sending','unknown')", job.ID).Error; err != nil {
+		if job.Type == consts.JobRefreshSummary || job.Type == consts.JobTranslateReadme {
+			if err := tx.Find(&call, AICallColumns.JobID+"=? AND "+AICallColumns.Status+" IN ('"+consts.StatusReserved+"','"+consts.StatusSending+"','"+consts.StatusUnknown+"')", job.ID).Error; err != nil {
 				return err
 			}
 		}
-		status, code := "failed", MaintenanceInterrupted
+		status, code := consts.StatusFailed, MaintenanceInterrupted
 		if job.Attempts >= job.MaxAttempts {
-			status = "dead"
+			status = consts.StatusDead
 		}
-		if call.Status == "sending" || call.Status == "unknown" {
-			status, code = "unknown", "ai_delivery_unknown"
-			if err := tx.Model(&call).Updates(map[string]any{"status": "unknown", "error_code": code, "updated_at": at}).Error; err != nil {
+		if call.Status == consts.StatusSending || call.Status == consts.StatusUnknown {
+			status, code = consts.StatusUnknown, consts.CodeAIDeliveryUnknown
+			if err := tx.Model(&call).Updates(map[string]any{AICallColumns.Status: consts.StatusUnknown, AICallColumns.ErrorCode: code, AICallColumns.UpdatedAt: at}).Error; err != nil {
 				return err
 			}
 		}
-		if status == "dead" && call.Status == "reserved" {
-			if err := tx.Model(&call).Updates(map[string]any{"status": "failed", "error_code": code, "updated_at": at}).Error; err != nil {
+		if status == consts.StatusDead && call.Status == consts.StatusReserved {
+			if err := tx.Model(&call).Updates(map[string]any{AICallColumns.Status: consts.StatusFailed, AICallColumns.ErrorCode: code, AICallColumns.UpdatedAt: at}).Error; err != nil {
 				return err
 			}
 		}
 		backoff := time.Duration(1<<min(job.Attempts, 8)+int(job.ID%17)) * time.Second
 		next := max(job.AvailableAt, now.Add(backoff).UnixMilli())
-		result := tx.Model(&Job{}).Where("id=? AND status='running' AND lease_token=? AND lease_until>?", job.ID, job.LeaseToken, time.Now().UnixMilli()).
-			Updates(map[string]any{"status": status, "last_error_code": code, "lease_token": nil, "lease_until": nil, "available_at": next, "updated_at": at})
+		result := tx.Model(&Job{}).Where(JobColumns.ID+"=? AND "+JobColumns.Status+"='"+consts.StatusRunning+"' AND "+JobColumns.LeaseToken+"=? AND "+JobColumns.LeaseUntil+">?", job.ID, job.LeaseToken, time.Now().UnixMilli()).
+			Updates(map[string]any{JobColumns.Status: status, JobColumns.LastErrorCode: code, JobColumns.LeaseToken: nil, JobColumns.LeaseUntil: nil, JobColumns.AvailableAt: next, JobColumns.UpdatedAt: at})
 		if result.Error != nil {
 			return result.Error
 		}

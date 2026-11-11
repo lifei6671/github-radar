@@ -98,10 +98,17 @@ COALESCE(m.total,0) AS total, COALESCE(m.recent,0) AS recent, m.`+storage.Reposi
 		if len(items) == 0 {
 			return nil, gorm.ErrRecordNotFound
 		}
+		// 详情直接读取所属方向，访问深链接时无需再请求整个专题目录。
+		var group storage.ProjectThemeGroup
+		if err := db.Select(storage.ProjectThemeGroupColumns.Name).
+			Take(&group, storage.ProjectThemeGroupColumns.Slug+" = ?", rows[0].GroupSlug).Error; err != nil {
+			return nil, err
+		}
 		milestones, err := themeMilestones(c, db, slug, now)
 		if err != nil {
 			return nil, err
 		}
+		items[0]["groupName"] = group.Name
 		items[0]["milestones"] = milestones
 		return items[0], nil
 	}

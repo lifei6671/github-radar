@@ -12,6 +12,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -192,7 +193,7 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 		}
 		return true, err
 	}
-	if job.Type != "refresh_repo" {
+	if job.Type != consts.JobRefreshRepo {
 		// 新发现的仓库立即安排首采，无需等待下一个五分钟扫描。
 		return true, e.Queue.Schedule(ctx, time.Now())
 	}
@@ -205,11 +206,11 @@ func (e *Engine) execute(ctx context.Context, job storage.Job) (func(*gorm.DB) e
 		return nil, fmt.Errorf("任务 payload 无效: %w", err)
 	}
 	switch job.Type {
-	case "refresh_repo":
+	case consts.JobRefreshRepo:
 		return e.refresh(ctx, job, payload)
-	case "discover_search":
+	case consts.JobDiscoverSearch:
 		return e.search(ctx, job, payload)
-	case "discover_trending":
+	case consts.JobDiscoverTrending:
 		return e.discoverTrending(ctx, payload)
 	default:
 		return nil, errors.New("未支持的采集任务")

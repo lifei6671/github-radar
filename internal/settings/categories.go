@@ -17,7 +17,7 @@ func (s Store) Categories(ctx context.Context) ([]config.Category, error) {
 
 func readCategories(tx *gorm.DB) ([]config.Category, error) {
 	var rows []storage.CategorySetting
-	if err := tx.Order("position, slug").Find(&rows).Error; err != nil {
+	if err := tx.Order(storage.CategorySettingColumns.Position + ", " + storage.CategorySettingColumns.Slug).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	items := make([]config.Category, 0, len(rows))

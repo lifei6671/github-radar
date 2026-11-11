@@ -8,10 +8,11 @@ import { Link, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError, errorText } from '../api/client'
 import type { CategorySetting, DiscoverySelection, DiscoveryTab, DiscoveryTabSettings, ListSettings, ProjectThemeGroup, ProjectThemeSetting, RuleSetting, RuntimeSettings, SettingFields, SettingValue } from '../api/types'
 import { AdminMetrics, AdminPanel } from '../components/admin'
+import { ThemeIcon } from '../components/theme-icon'
 import { ThemeIconPicker } from '../components/theme-icon-picker'
 import { SortableSettings, SortableSettingsRow } from '../components/sortable-settings'
 import { ActionButton, Badge, Dialog, Notice, PageError, Skeleton, Spinner } from '../components/ui'
-import { number } from '../lib/format'
+import { number, topicPath } from '../lib/format'
 import { runtimeHelp } from './runtime-help'
 
 type Snapshot = { revision: number }
@@ -288,6 +289,7 @@ type Directory<T> = {
   noun: string
   identity: (item: T) => string
   name: (item: T) => string
+  icon?: (item: T) => ReactNode
   caption: (item: T) => string
   search: (item: T) => string
   columns: string[]
@@ -430,7 +432,9 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
             const { id, label } = entries[index]
             return <SortableSettingsRow key={id} as="tr" id={id} label={label} disabled={visible.length < 2 || saveList.isPending}>{(handle) => <>
               <td className="settings-grip-cell">{handle}</td>
-              <td className="admin-entry-cell"><Link className="admin-entry-link" to={entryUrl(id)}>{label}</Link>
+              <td className="admin-entry-cell"><Link className={directory.icon ? 'admin-entry-link title-with-icon' : 'admin-entry-link'} to={entryUrl(id)}>
+                {directory.icon?.(item)}<span>{label}</span>
+              </Link>
                 {directory.caption(item) !== label && <code className="minor muted">{directory.caption(item)}</code>}</td>
               {directory.cells(item).map((cell, index) => <td key={index}>{cell}</td>)}
               <td className="settings-action-cell"><div className="settings-row-actions">
@@ -532,6 +536,7 @@ function projectThemes(groups: ProjectThemeGroup[]): Directory<ProjectThemeSetti
   const names = new Map(groups.map(({ slug, name }) => [slug, name]))
   return {
     path: '/system/project-themes', title: '专题管理', noun: '专题',
+    icon: (item) => <ThemeIcon icon={item.icon} color={item.iconColor} size={14} />,
     identity: (item) => item.slug, name: (item) => item.name, caption: (item) => item.slug,
     search: (item) => [item.name, item.slug, item.description, names.get(item.groupSlug), ...item.anyTopics].join(' '),
     columns: ['方向', '简介', '匹配 Topics'],
@@ -559,7 +564,7 @@ function projectThemes(groups: ProjectThemeGroup[]): Directory<ProjectThemeSetti
       <label className="field admin-field-wide">匹配 Topics<input required placeholder="用逗号分隔" value={item.anyTopics.join(',')}
         onChange={(e) => edit({ ...item, anyTopics: e.target.value.split(/[,，]/) })} /></label>
     </>,
-    status: (item) => <Link className="admin-link" to={'/themes/' + encodeURIComponent(item.slug)}>查看专题</Link>,
+    status: (item) => <Link className="admin-link" to={topicPath(item.slug)}>查看专题</Link>,
   }
 }
 

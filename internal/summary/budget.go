@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -18,15 +19,15 @@ func (q Queue) reserve(ctx context.Context, job storage.Job, manual bool, now ti
 	var call storage.AICall
 	ms := now.UnixMilli()
 	start := now.UTC().Truncate(24 * time.Hour)
-	origin, limit := "auto", q.AI.Summary.AutoDailyCalls
+	origin, limit := consts.OriginAuto, q.AI.Summary.AutoDailyCalls
 	if manual {
-		origin, limit = "manual", q.AI.Summary.ManualDailyCalls
+		origin, limit = consts.OriginManual, q.AI.Summary.ManualDailyCalls
 	}
 	err := q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := owns(tx, job); err != nil {
 			return err
 		}
-		if err := tx.Find(&call, "job_id=? AND status='reserved'", job.ID).Error; err != nil {
+		if err := tx.Find(&call, storage.AICallColumns.JobID+"=? AND "+storage.AICallColumns.Status+"='"+consts.StatusReserved+"'", job.ID).Error; err != nil {
 			return err
 		}
 		provider := ProviderKey(q.AI)
@@ -34,12 +35,12 @@ func (q Queue) reserve(ctx context.Context, job storage.Job, manual bool, now ti
 			if call.ReservedAt >= start.UnixMilli() && call.Provider == provider {
 				return nil
 			}
-			if err := tx.Model(&call).Updates(map[string]any{"status": "failed", "error_code": "reservation_expired", "updated_at": ms}).Error; err != nil {
+			if err := tx.Model(&call).Updates(map[string]any{storage.AICallColumns.Status: consts.StatusFailed, storage.AICallColumns.ErrorCode: consts.CodeReservationExpired, storage.AICallColumns.UpdatedAt: ms}).Error; err != nil {
 				return err
 			}
 		}
 		var count int64
-		if err := tx.Model(&storage.AICall{}).Where("origin=? AND reserved_at>=? AND reserved_at<?",
+		if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.Origin+"=? AND "+storage.AICallColumns.ReservedAt+">=? AND "+storage.AICallColumns.ReservedAt+"<?",
 			origin, start.UnixMilli(), start.Add(24*time.Hour).UnixMilli()).Count(&count).Error; err != nil {
 			return err
 		}
@@ -48,7 +49,7 @@ func (q Queue) reserve(ctx context.Context, job storage.Job, manual bool, now ti
 			call = storage.AICall{}
 			return nil
 		}
-		call = storage.AICall{CallKey: rand.Text(), JobID: job.ID, Provider: provider, Origin: origin, Status: "reserved", ReservedAt: ms, UpdatedAt: ms}
+		call = storage.AICall{CallKey: rand.Text(), JobID: job.ID, Provider: provider, Origin: origin, Status: consts.StatusReserved, ReservedAt: ms, UpdatedAt: ms}
 		return tx.Create(&call).Error
 	})
 	if err == nil && call.CallKey == "" {
@@ -60,10 +61,10 @@ func (q Queue) reserve(ctx context.Context, job storage.Job, manual bool, now ti
 func (q Queue) sending(ctx context.Context, job storage.Job, call storage.AICall) error {
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now()
-		if err := checked(fence(tx, job, now.UnixMilli()).Update("lease_until", now.Add(time.Duration(q.LeaseSeconds)*time.Second).UnixMilli())); err != nil {
+		if err := checked(fence(tx, job, now.UnixMilli()).Update(storage.JobColumns.LeaseUntil, now.Add(time.Duration(q.LeaseSeconds)*time.Second).UnixMilli())); err != nil {
 			return err
 		}
-		return checked(tx.Model(&call).Where("status='reserved'").Updates(map[string]any{"status": "sending", "updated_at": time.Now().UnixMilli()}))
+		return checked(tx.Model(&call).Where(storage.AICallColumns.Status + "='" + consts.StatusReserved + "'").Updates(map[string]any{storage.AICallColumns.Status: consts.StatusSending, storage.AICallColumns.UpdatedAt: time.Now().UnixMilli()}))
 	})
 }
 
@@ -86,12 +87,12 @@ func (q Queue) settle(ctx context.Context, job storage.Job, o outcome) error {
 		now := time.Now()
 		ms := now.UnixMilli()
 		if o.call != nil {
-			callStatus := "succeeded"
+			callStatus := consts.StatusSucceeded
 			if o.model.Code != "" {
-				callStatus = "failed"
+				callStatus = consts.StatusFailed
 			}
 			if o.model.Unknown {
-				callStatus = "unknown"
+				callStatus = consts.StatusUnknown
 			}
 			var cost *float64
 			if o.model.InputTokens != nil && o.model.OutputTokens != nil &&
@@ -99,16 +100,16 @@ func (q Queue) settle(ctx context.Context, job storage.Job, o outcome) error {
 				value := (float64(*o.model.InputTokens)*q.AI.Summary.InputCostPerM + float64(*o.model.OutputTokens)*q.AI.Summary.OutputCostPerM) / 1e6
 				cost = &value
 			}
-			if err := checked(tx.Model(o.call).Where("status='sending'").Updates(map[string]any{
-				"status": callStatus, "error_code": optional(o.model.Code), "updated_at": ms,
-				"provider_request_id": optional(o.model.RequestID), "input_tokens": o.model.InputTokens,
-				"output_tokens": o.model.OutputTokens, "estimated_cost": cost, "duration_ms": o.duration.Milliseconds(),
+			if err := checked(tx.Model(o.call).Where(storage.AICallColumns.Status + "='" + consts.StatusSending + "'").Updates(map[string]any{
+				storage.AICallColumns.Status: callStatus, storage.AICallColumns.ErrorCode: optional(o.model.Code), storage.AICallColumns.UpdatedAt: ms,
+				storage.AICallColumns.ProviderRequestID: optional(o.model.RequestID), storage.AICallColumns.InputTokens: o.model.InputTokens,
+				storage.AICallColumns.OutputTokens: o.model.OutputTokens, storage.AICallColumns.EstimatedCost: cost, storage.AICallColumns.DurationMS: o.duration.Milliseconds(),
 			})); err != nil {
 				return err
 			}
-		} else if o.status == "succeeded" || o.status == "dead" || o.status == "canceled" {
-			if err := tx.Model(&storage.AICall{}).Where("job_id=? AND status='reserved'", job.ID).
-				Updates(map[string]any{"status": "failed", "error_code": "reservation_unused", "updated_at": ms}).Error; err != nil {
+		} else if o.status == consts.StatusSucceeded || o.status == consts.StatusDead || o.status == consts.StatusCanceled {
+			if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.JobID+"=? AND "+storage.AICallColumns.Status+"='"+consts.StatusReserved+"'", job.ID).
+				Updates(map[string]any{storage.AICallColumns.Status: consts.StatusFailed, storage.AICallColumns.ErrorCode: consts.CodeReservationUnused, storage.AICallColumns.UpdatedAt: ms}).Error; err != nil {
 				return err
 			}
 		}
@@ -117,7 +118,7 @@ func (q Queue) settle(ctx context.Context, job storage.Job, o outcome) error {
 				return err
 			}
 		}
-		if job.Type == JobType && (o.status == "failed" || o.status == "dead" || o.status == "unknown") && o.attempts == job.Attempts {
+		if job.Type == JobType && (o.status == consts.StatusFailed || o.status == consts.StatusDead || o.status == consts.StatusUnknown) && o.attempts == job.Attempts {
 			if err := q.recordFailure(tx, *job.RepoID, o.code, now); err != nil {
 				return err
 			}
