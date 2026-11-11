@@ -2,7 +2,7 @@
 
 - 版本：1.5.1
 - 日期：2026-11-11
-- 执行状态：UI-01～UI-07 已接入 React 与 Gin，UI-08 随阶段 5 实施
+- 执行状态：UI-01～UI-08 已接入 React 与 Gin
 - 主文档：[GitHub 热点雷达技术设计](./github-radar-technical-design.md)
 - 备份与一键恢复专项方案：[R2 五天备份与后台恢复](./backup-and-restore.md)
 - 视觉与交互参考：https://github.com/KKKKhazix/AIHOT

@@ -110,6 +110,16 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 
 选题默认在每天北京时间 08:30 后生成，覆盖精确增长、近期上榜、日增长和关注信号。`settings.recommendations` 管理时间、数量、重新入池门槛和普通选题保留天数。已处理项目在 README 与功能证据同时变化、精确 24h 净增明显抬升或人工重新打开时回到候选，保留人工反馈。
 
+## R2 备份与恢复
+
+在「运行状态 → 备份与恢复」填写 R2 端点、存储桶、备份前缀和对象读写凭据。备份计划和 R2 设置由 SQLite 保存，默认关闭。启用后默认每天北京时间 03:00 备份，上传成功后及 03:30 清理，保留当天及之前 4 个自然日。后台可调整时间、时区和 1～30 天的保留期。
+
+「立即备份」会更新同一天的云端对象。也可在服务运行时使用相同的管理员令牌和配置文件执行 `go run ./cmd/radar backup`，该命令通过本机 API 等待结果。离线维护、迁移和采集命令应在停止服务后运行。
+
+恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后自动 AI 摘要保持暂停，在管理页确认用量记录可能不完整后再启用。迁移到新实例时，在 `/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的环境变量和管理员令牌。
+
+使用专用私有存储桶和仅限该桶的 Object Read & Write 令牌。备份包含数据库内的 R2 凭据，请限制数据库目录、暂存文件和 R2 对象的访问权限。R2 请求由 AWS SDK for Go v2 签名，接口与恢复边界见专项方案。[Cloudflare R2 令牌权限](https://developers.cloudflare.com/r2/api/tokens/)、[AWS SDK for Go v2](https://github.com/aws/aws-sdk-go-v2)、[备份专项方案](docs/backup-and-restore.md)
+
 ## 迁移与验证
 
 `go run ./cmd/radar migrate` 可以离线升级表结构，支持相同的 `-config` 选项。首次业务配置在服务启动时导入，离线迁移只应用新的 SQL 版本。Goose 管理随二进制分发的 SQL 迁移，GORM 通过 libtnb/sqlite 复用 modernc.org/sqlite 的连接池。[Goose](https://github.com/pressly/goose)、[GORM](https://github.com/go-gorm/gorm)、[libtnb/sqlite](https://github.com/libtnb/sqlite)、[modernc.org/sqlite](https://github.com/modernc-org/sqlite)

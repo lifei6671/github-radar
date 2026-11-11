@@ -61,6 +61,8 @@ interface RequestOptions {
   body?: unknown
   signal?: AbortSignal
   token?: string
+  setupSession?: string
+  timeoutMs?: number
 }
 
 // API 仅使用同源请求。迟到的旧会话 401 不应清除新会话。
@@ -69,8 +71,9 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   const usedToken = options.token ?? requestedSession.token
   const headers = new Headers({ Accept: 'application/json' })
   if (usedToken) headers.set('Authorization', 'Bearer ' + usedToken)
+  if (options.setupSession) headers.set('X-Setup-Session', options.setupSession)
   if (options.body !== undefined) headers.set('Content-Type', 'application/json')
-  const timeout = AbortSignal.timeout(15_000)
+  const timeout = AbortSignal.timeout(options.timeoutMs ?? 15_000)
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout
   let response: Response
   try {
@@ -113,6 +116,32 @@ const messages: Record<string, string> = {
   possible_charge_not_accepted: '请确认再次调用可能产生费用。',
   not_found: '记录不存在或已过保留期。',
   invalid_response: '服务返回了无法读取的数据。',
+  already_initialized: '系统已经初始化。',
+  backup_operation_in_progress: '已有备份或清理任务正在运行。',
+  restore_in_progress: '恢复正在进行，暂时无法修改设置或发起新任务。',
+  restoring: '恢复期间暂不可访问项目数据。',
+  r2_not_configured: '请先保存 R2 连接。',
+  invalid_backup_settings: '请检查 R2 连接、时区和保留天数。',
+  invalid_backup_object: '备份已不存在或格式无效。',
+  setup_session_expired: 'R2 会话已过期，请重新连接。',
+  r2_request_failed: 'R2 请求失败，请检查连接和存储桶读写权限。',
+  backup_upload_unconfirmed: '无法确认上传结果，请刷新云端备份列表。',
+  backup_insufficient_disk: '暂存空间不足或不可写。',
+  backup_checksum_mismatch: '备份的校验值或压缩大小不匹配。',
+  backup_gzip_invalid: '备份解压失败。',
+  backup_compression_failed: '生成压缩备份失败。',
+  backup_integrity_failed: 'SQLite 完整性检查失败。',
+  backup_foreign_key_failed: 'SQLite 外键检查失败。',
+  backup_schema_unsupported: '备份的数据库版本不受当前服务支持。',
+  backup_migration_failed: '备份数据库升级失败。',
+  restore_page_size_mismatch: '备份与当前 SQLite 数据库的页大小不匹配。',
+  restore_drain_failed: '未能在限时内暂停业务，已结束本次恢复。',
+  restore_copy_failed: '复制失败，已恢复原有业务访问。',
+  restore_database_unavailable: '无法读取数据库确认恢复结果，业务暂不可用。',
+  restore_receipt_missing: '无法确认恢复提交结果，业务暂不可用。',
+  restore_reload_failed: '数据已恢复，加载失败。',
+  reload_not_available: '当前没有需要重试加载的恢复任务。',
+  incomplete_usage_not_accepted: '请确认恢复前的 AI 用量记录可能不完整。',
 }
 
 export function errorText(error: unknown): string {

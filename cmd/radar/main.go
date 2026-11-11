@@ -19,9 +19,11 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/lifei6671/github-radar/internal/api"
+	"github.com/lifei6671/github-radar/internal/backup"
 	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
 	gh "github.com/lifei6671/github-radar/internal/github"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/maintenance"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -48,8 +50,8 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command, args = args[0], args[1:]
 	}
-	if command != "server" && command != "migrate" && command != "collect-once" && command != "maintenance-once" {
-		return fmt.Errorf("未知命令 %q，请使用 server、migrate、collect-once 或 maintenance-once", command)
+	if command != "server" && command != "migrate" && command != "collect-once" && command != "maintenance-once" && command != "backup" {
+		return fmt.Errorf("未知命令 %q，请使用 server、migrate、collect-once、maintenance-once 或 backup", command)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	configPath := flags.String("config", "", "YAML 配置文件路径，省略时使用默认配置")
@@ -64,11 +66,14 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return err
 	}
 	var adminToken string
-	if command == "server" {
+	if command == "server" || command == "backup" {
 		adminToken, err = cfg.AdminToken()
 		if err != nil {
 			return err
 		}
+	}
+	if command == "backup" {
+		return runBackup(ctx, cfg.Server.Listen, adminToken, logger)
 	}
 
 	if command == "migrate" {
@@ -132,8 +137,26 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	summarizer := summary.Engine{Queue: summary.Queue{DB: db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds},
 		GitHub: readmes, Provider: provider, Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute}
 
+	group, serviceCtx := errgroup.WithContext(ctx)
+	workers := lifecycle.NewWorkers(serviceCtx, func(ctx context.Context) error {
+		group, workerCtx := errgroup.WithContext(ctx)
+		group.Go(func() error { return maintainer.RunMetrics(workerCtx) })
+		group.Go(func() error { return maintainer.RunMaintenance(workerCtx) })
+		group.Go(func() error { return summarizer.Run(workerCtx) })
+		if engine != nil {
+			group.Go(func() error { return engine.Run(workerCtx) })
+		}
+		return group.Wait()
+	})
+	manager, err := backup.New(serviceCtx, pool, db, cfg, workers)
+	if err != nil {
+		return fmt.Errorf("初始化备份服务: %w", err)
+	}
+	if manager.Initialized() {
+		workers.Resume()
+	}
 	gin.SetMode(gin.ReleaseMode)
-	router := api.NewRouter(db, pool, adminToken, logger, cfg)
+	router := api.NewRouter(db, pool, adminToken, logger, cfg, manager)
 	webui.Register(router, os.DirFS("web/dist"))
 	server := &http.Server{
 		Addr:         cfg.Server.Listen,
@@ -141,15 +164,19 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		ReadTimeout:  time.Duration(cfg.Server.ReadTimeoutSeconds) * time.Second,
 		WriteTimeout: time.Duration(cfg.Server.WriteTimeoutSeconds) * time.Second,
 	}
-	group, serviceCtx := errgroup.WithContext(ctx)
 	group.Go(func() error { return serve(serviceCtx, server, logger) })
-	group.Go(func() error { return maintainer.RunMetrics(serviceCtx) })
-	group.Go(func() error { return maintainer.RunMaintenance(serviceCtx) })
-	group.Go(func() error { return summarizer.Run(serviceCtx) })
-	if engine != nil {
-		group.Go(func() error { return engine.Run(serviceCtx) })
-	}
+	group.Go(func() error { return manager.Run(serviceCtx) })
+	group.Go(func() error {
+		select {
+		case <-serviceCtx.Done():
+			return nil
+		case err := <-workers.Failure():
+			return err
+		}
+	})
 	err = group.Wait()
+	manager.Wait()
+	workers.Wait()
 	if errors.Is(err, context.Canceled) && ctx.Err() != nil {
 		return nil
 	}

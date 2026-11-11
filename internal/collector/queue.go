@@ -235,8 +235,14 @@ func (q Queue) Fail(ctx context.Context, job storage.Job, cause error, now time.
 			"status": status, "attempts": attempts, "available_at": next, "last_error_code": code,
 			"lease_token": nil, "lease_until": nil, "updated_at": now.UnixMilli(),
 		})
-		if result.Error != nil || result.RowsAffected != 1 || status != "dead" || job.RepoID == nil {
+		if result.Error != nil {
 			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return ErrLeaseLost
+		}
+		if status != "dead" || job.RepoID == nil {
+			return nil
 		}
 		var repo storage.Repository
 		if err := tx.Take(&repo, "repo_id = ?", *job.RepoID).Error; err != nil {

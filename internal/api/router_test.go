@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lifei6671/github-radar/internal/backup"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -39,7 +40,12 @@ func TestHealthAndSetupStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewRouter(db, pool, "test-token", logger, cfg.WithRuntime(snapshot.Settings))
+	cfg = cfg.WithRuntime(snapshot.Settings)
+	manager, err := backup.New(ctx, pool, db, cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(db, pool, "test-token", logger, cfg, manager)
 
 	// 健康检查公开，安装状态对未认证请求统一返回 401。
 	cases := []struct {
@@ -63,6 +69,30 @@ func TestHealthAndSetupStatus(t *testing.T) {
 		}
 		if tc.status == http.StatusUnauthorized && rec.Header().Get("WWW-Authenticate") != "Bearer" {
 			t.Error("401 响应应声明 Bearer 鉴权")
+		}
+	}
+
+	// 安装前状态查询可用，备份管理在完成初始化后才开放。
+	for _, tc := range []struct {
+		method, path, auth, code string
+		status                   int
+	}{
+		{"GET", "/system/backup/status", "", "unauthorized", 401},
+		{"GET", "/system/backup/status", "Bearer test-token", "initialized", 200},
+		{"GET", "/system/backup/settings", "Bearer test-token", "setup_required", 503},
+		{"GET", "/setup/backups", "Bearer test-token", "setup_session_expired", 409},
+		{"POST", "/setup/initialize", "Bearer test-token", "initialized", 200},
+		{"POST", "/setup/initialize", "Bearer test-token", "already_initialized", 409},
+		{"GET", "/system/backup/settings", "Bearer test-token", "retentionDays", 200},
+		{"POST", "/system/backup/run", "Bearer test-token", "r2_not_configured", 409},
+		{"GET", "/setup/operations/missing", "Bearer test-token", "backup_operation_not_found", 404},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, "/api/v1"+tc.path, nil)
+		req.Header.Set("Authorization", tc.auth)
+		router.ServeHTTP(rec, req)
+		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.code) {
+			t.Errorf("%s %s: %d %s", tc.method, tc.path, rec.Code, rec.Body)
 		}
 	}
 

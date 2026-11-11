@@ -90,6 +90,7 @@ export async function mockRadar(page: Page, startInitialized = true) {
     requests.push(method + ' ' + path + url.search)
     if (!authorized || request.headers().authorization !== 'Bearer ' + admin) return reply(route, { code: 'unauthorized' }, 401)
     if (path === '/setup/status') return reply(route, { initialized })
+    if (path === '/system/backup/status') return reply(route, { initialized, restoring: false, maintenance: false })
     if (path === '/setup/initialize' && method === 'POST') {
       initialized = true
       return reply(route, { initialized })
@@ -205,6 +206,8 @@ export async function mockRadar(page: Page, startInitialized = true) {
 
   return {
     requests, attempts,
+    completeSetup: () => { initialized = true },
+    renameFirstRepo: (fullName: string) => { repos[0].fullName = fullName },
     expire: () => { authorized = false },
     conflict: () => { conflict = true },
     unknown: (id = 31) => {

@@ -2,7 +2,7 @@
 
 - 版本：1.4.1
 - 日期：2026-11-11
-- 方案状态：待实现
+- 方案状态：阶段 5 已接入
 - 主方案：[GitHub 热点雷达技术设计](./github-radar-technical-design.md)
 - 前端方案：[AIHOT 视觉交互适配](./aihot-ui-adaptation.md)
 - 部署范围：单 VPS、单 Go 进程、单 SQLite 业务库
@@ -79,7 +79,7 @@ R2 连接整体更新，Secret Access Key 不回传；响应只含脱敏值与�
 4. 用带 Content-MD5 的 PutObject 上传。HeadObject 核对大小和 metadata；metadata 是自填摘要，不能声称 R2 重新计算了 SHA-256。响应丢失先核对远端对象。
 5. 成功后清理临时文件、记录结果并执行保留清理；失败不预先删除远端今日对象。上传提交结果未知时如实显示待核实，不保证仍是旧对象。
 
-每天上传成功后及配置时区 03:30 各清理一次。保留当天及之前 N-1 天的合法日期对象，默认 N=5；只删除本前缀下匹配命名且日期早于窗口的对象。清理与上传串行，不遍历删除其他路径。连续 N 天没有成功备份可能没有可用对象，后台显示最后成功时间；策略是最近 N 个自然日，不是最近 N 份。
+每天上传成功后及配置时区 03:30 各清理一次。保留当天及之前 N-1 天的合法日期对象，默认 N=5；只删除本前缀下匹配命名且日期早于窗口的对象。上传后的清理沿用该对象的计划日期，跨午夜时仍保留本次上传的对象。独立清理按运行日计算窗口。清理与上传串行，不遍历删除其他路径。连续 N 天没有成功备份可能没有可用对象，后台显示最后成功时间；策略是最近 N 个自然日。
 
 备份列表从 R2 分页获取，包含日期、大小、生成时间及 schema 版本，安装模式也可读取；不固定裁成 5 条。列表、下载、上传和删除沿用外部请求超时与有限重试机制，失败留待下次操作，不无限重试。
 
@@ -159,7 +159,7 @@ SQLite Backup API 将目标写入放在一个事务里；文件和 WAL 的提交
 
 objectKey 必须来自配置前缀内的合法日期命名；会话 ID 不承载凭据、不替代管理员认证。设置响应绝不回传原始 Secret Access Key。
 
-Operation 返回 `{id,kind,status,phase,databaseApplied,errorCode,updatedAt}`；status 为 running/completed/failed，phase 为 prepare/drain/copy/reload/done；databaseApplied 仅恢复提交后为 true，重启前失败丢失的记录不猜测结果。轮询遇到断网继续查原 operationId，404 时先刷新系统状态，不自动重复 POST。页面用“恢复期间暂不可访问项目数据”，无需展示数据库内部实现。
+Operation 返回 `{id,kind,status,phase,databaseApplied,errorCode,updatedAt}`，并记录操作期间采样到的暂存文件与 WAL 大小、维护用时。status 为 running/completed/failed，phase 为 prepare/drain/copy/reload/done；databaseApplied 仅恢复提交后为 true。最近恢复的 `preparedAt` 表示备份准备完成的时间。轮询遇到断网继续查原 operationId，404 时先刷新系统状态。受理响应丢失时，通过状态接口核对新任务 ID。页面用“恢复期间暂不可访问项目数据”。
 
 ## 6. 实施与验收
 
@@ -184,3 +184,4 @@ Operation 返回 `{id,kind,status,phase,databaseApplied,errorCode,updatedAt}`；
 - [SQLite VACUUM INTO](https://www.sqlite.org/lang_vacuum.html)
 - [Cloudflare R2 API 令牌权限](https://developers.cloudflare.com/r2/api/tokens/)
 - [R2 S3 API 兼容性](https://developers.cloudflare.com/r2/api/s3/api/)
+- [AWS SDK for Go v2：S3 客户端与签名](https://github.com/aws/aws-sdk-go-v2)

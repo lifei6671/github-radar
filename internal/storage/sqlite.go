@@ -74,6 +74,13 @@ func open(ctx context.Context, cfg config.Storage, configureJournal bool) (*sql.
 		pool.Close()
 		return nil, openErr
 	}
+	// 业务库会保存 R2 凭据，原文件和后续 SQLite 辅助文件需沿用受限权限。
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		if err := os.Chmod(path+suffix, 0o600); err != nil && (suffix == "" || !errors.Is(err, os.ErrNotExist)) {
+			pool.Close()
+			return nil, fmt.Errorf("设置 SQLite 文件权限: %w", err)
+		}
+	}
 	return pool, nil
 }
 

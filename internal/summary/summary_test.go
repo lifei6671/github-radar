@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/config"
 	gh "github.com/lifei6671/github-radar/internal/github"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/migrations"
 )
@@ -139,6 +141,88 @@ func row[T any](t *testing.T, db *gorm.DB, where string, args ...any) T {
 		t.Fatal(err)
 	}
 	return out
+}
+
+func TestDrainPreservesModelResultAndReservation(t *testing.T) {
+	for _, scenario := range []struct {
+		name, jobStatus, callStatus, code string
+		reserved, limit, unknown          bool
+	}{
+		{name: "已确认无效响应", jobStatus: "failed", callStatus: "failed", code: "invalid_output"},
+		{name: "发送结果未知", jobStatus: "unknown", callStatus: "unknown", code: "ai_delivery_unknown", unknown: true},
+		{name: "复用未发送预留", jobStatus: "failed", callStatus: "reserved", code: storage.MaintenanceInterrupted, reserved: true},
+		{name: "已到任务重试上限", jobStatus: "dead", callStatus: "failed", code: storage.MaintenanceInterrupted, reserved: true, limit: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			e, _, _, _ := fixture(t)
+			schedule(t, e)
+			job := row[storage.Job](t, e.Queue.DB, "repo_id=?", 1)
+			if scenario.limit {
+				if err := e.Queue.DB.Model(&job).Update("max_attempts", 1).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			started := make(chan struct{})
+			if scenario.reserved {
+				var first atomic.Bool
+				if err := e.Queue.DB.Callback().Update().Before("gorm:update").Register("test:drain_sending", func(tx *gorm.DB) {
+					if tx.Statement.Table == "ai_calls" && first.CompareAndSwap(false, true) {
+						close(started)
+						<-tx.Statement.Context.Done()
+					}
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var modelCalls atomic.Int32
+			e.Provider = modelFixture(func(ctx context.Context, _ string) ModelResult {
+				if modelCalls.Add(1) > 1 {
+					return ModelResult{Content: modelAnswer(false)}
+				}
+				close(started)
+				<-ctx.Done()
+				if scenario.unknown {
+					return ModelResult{Code: "ai_delivery_unknown", Unknown: true}
+				}
+				return ModelResult{Content: "{}", InputTokens: new(int64(31)), OutputTokens: new(int64(5))}
+			})
+			workers := lifecycle.NewWorkers(t.Context(), func(ctx context.Context) error { _, err := e.Step(ctx); return err })
+			workers.Resume()
+			drain, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			select {
+			case <-started:
+			case <-drain.Done():
+				t.Fatal("未到达模型调用边界")
+			}
+			if err := workers.Pause(drain); err != nil {
+				t.Fatal(err)
+			}
+			saved := row[storage.Job](t, e.Queue.DB, "id=?", job.ID)
+			call := row[storage.AICall](t, e.Queue.DB, "job_id=?", job.ID)
+			if saved.Status != scenario.jobStatus || saved.LeaseToken != nil || saved.LastErrorCode == nil ||
+				*saved.LastErrorCode != scenario.code || call.Status != scenario.callStatus || call.ReservedAt == 0 {
+				t.Fatalf("排空后的任务 %v 调用 %v", saved, call)
+			}
+			if !scenario.reserved && !scenario.unknown && (call.InputTokens == nil || *call.InputTokens != 31) {
+				t.Fatal("确定的用量未提交")
+			}
+			if scenario.reserved && modelCalls.Load() != 0 {
+				t.Fatal("排空后仍发送模型请求")
+			}
+			if scenario.callStatus == "reserved" {
+				if err := e.Queue.DB.Model(&saved).Update("available_at", 0).Error; err != nil {
+					t.Fatal(err)
+				}
+				e.Provider = modelFixture(func(context.Context, string) ModelResult { return ModelResult{Content: modelAnswer(false)} })
+				step(t, e)
+				reused := row[storage.AICall](t, e.Queue.DB, "job_id=?", job.ID)
+				if reused.CallKey != call.CallKey || reused.Status != "succeeded" {
+					t.Fatalf("预留未复用: %+v", reused)
+				}
+			}
+		})
+	}
 }
 
 func TestSummaryCacheSourceChangeAndPrivacy(t *testing.T) {

@@ -12,6 +12,9 @@ import (
 
 var ErrAlreadyInitialized = errors.New("应用已经初始化")
 
+const InitializedKey = "app.initialized"
+const AutoAIResumeKey = "ai.auto_resume_required"
+
 // InitializeEmpty 是阶段 1 启动采集所需的空库安装入口。
 // 备份默认关闭；同一事务内写入初始设置与安装标记。
 func InitializeEmpty(ctx context.Context, db *gorm.DB) error {
@@ -25,9 +28,9 @@ func InitializeEmpty(ctx context.Context, db *gorm.DB) error {
 		}
 		now := time.Now().UnixMilli()
 		for key, value := range map[string]string{
-			"app.initialized":         "true",
-			"ai.auto_resume_required": "false",
-			"backup.settings.v1":      `{"version":1,"enabled":false,"schedule":{"hour":3,"minute":0,"timezone":"Asia/Shanghai"},"retention_days":5,"r2":{"endpoint":"","bucket":"","prefix":"github-radar/backups/","access_key_id":"","secret_access_key":""}}`,
+			InitializedKey:       "true",
+			AutoAIResumeKey:      "false",
+			"backup.settings.v1": `{"version":1,"enabled":false,"schedule":{"hour":3,"minute":0,"timezone":"Asia/Shanghai"},"retention_days":5,"r2":{"endpoint":"","bucket":"","prefix":"github-radar/backups/","access_key_id":"","secret_access_key":""}}`,
 		} {
 			setting := SystemSetting{Key: key, ValueJSON: value, UpdatedAt: now}
 			if err := tx.Save(&setting).Error; err != nil {
@@ -62,18 +65,23 @@ func (CategorySetting) TableName() string { return "categories" }
 
 // Initialized 查询安装标记，空数据库没有记录时处于未初始化状态。
 func Initialized(ctx context.Context, db *gorm.DB) (bool, error) {
+	return BooleanSetting(ctx, db, InitializedKey)
+}
+
+// BooleanSetting 读取初始化与自动 AI 恢复标记，旧库缺失时为 false。
+func BooleanSetting(ctx context.Context, db *gorm.DB, key string) (bool, error) {
 	var setting SystemSetting
-	err := db.WithContext(ctx).Where("key = ?", "app.initialized").Take(&setting).Error
+	err := db.WithContext(ctx).Where("key = ?", key).Take(&setting).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("读取安装状态: %w", err)
+		return false, fmt.Errorf("读取布尔设置: %w", err)
 	}
 
 	var initialized *bool
 	if err := json.Unmarshal([]byte(setting.ValueJSON), &initialized); err != nil || initialized == nil {
-		return false, errors.New("app.initialized 必须是 JSON 布尔值")
+		return false, fmt.Errorf("%s 必须是 JSON 布尔值", key)
 	}
 	return *initialized, nil
 }

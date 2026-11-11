@@ -20,11 +20,15 @@ AND t.status IN ('candidate','shortlisted') AND t.updated_at>=?`
 func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 	ms := now.UnixMilli()
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		paused, err := storage.BooleanSetting(ctx, tx, storage.AutoAIResumeKey)
+		if err != nil || paused {
+			return err
+		}
 		var rows []struct {
 			RepoID       int64
 			HighPriority bool
 		}
-		err := tx.Raw(`
+		err = tx.Raw(`
 WITH hot AS (`+topReposSQL+`),
 eligible AS (
   SELECT r.repo_id,m.hotness_score,

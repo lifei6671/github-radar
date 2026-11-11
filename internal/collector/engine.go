@@ -13,6 +13,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/config"
 	gh "github.com/lifei6671/github-radar/internal/github"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/trending"
 )
@@ -135,6 +136,15 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 	if err != nil || job == nil {
 		return false, err
 	}
+	settled := false
+	defer func() {
+		if !settled {
+			if final, release, draining := lifecycle.Settlement(ctx); draining {
+				defer release()
+				lifecycle.RecordSettlement(ctx, storage.InterruptJob(final, e.Queue.DB, *job))
+			}
+		}
+	}()
 	taskCtx, cancel := context.WithCancel(ctx)
 	renewed := make(chan error, 1)
 	go func() {
@@ -157,6 +167,7 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 	apply, operationErr := e.execute(taskCtx, *job)
 	if operationErr == nil {
 		operationErr = e.Queue.Complete(taskCtx, *job, apply)
+		settled = operationErr == nil
 	}
 	cancel()
 	renewErr := <-renewed
@@ -174,7 +185,12 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 	}
 	if operationErr != nil {
 		e.Logger.Warn("采集任务失败", "jobId", job.ID, "type", job.Type, "error", operationErr)
-		return true, e.Queue.Fail(ctx, *job, operationErr, time.Now())
+		err := e.Queue.Fail(ctx, *job, operationErr, time.Now())
+		settled = err == nil
+		if errors.Is(err, ErrLeaseLost) {
+			return true, nil
+		}
+		return true, err
 	}
 	if job.Type != "refresh_repo" {
 		// 新发现的仓库立即安排首采，无需等待下一个五分钟扫描。

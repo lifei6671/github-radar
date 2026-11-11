@@ -6,9 +6,11 @@ import type { Items, Job, Limits, StorageStatus } from '../api/types'
 import { Badge, Empty, Notice, PageError, Skeleton, Spinner } from '../components/ui'
 import { formatBytes, jobLabel, number, timestamp } from '../lib/format'
 import { CategoryEditor, RulesEditor, RuntimeEditor } from './settings'
+import { BackupPage } from './backup'
 
 const tabs = [
   ['overview', '概览'], ['jobs', '任务'], ['runtime', '运行配置'], ['categories', '分类映射'], ['rules', '发现规则'],
+  ['backup', '备份与恢复'],
 ] as const
 
 export function System() {
@@ -27,6 +29,7 @@ export function System() {
     {tab === 'runtime' && <RuntimeEditor />}
     {tab === 'categories' && <CategoryEditor />}
     {tab === 'rules' && <RulesEditor />}
+    {tab === 'backup' && <BackupPage />}
   </>
 }
 

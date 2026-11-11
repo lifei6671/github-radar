@@ -18,6 +18,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/config"
 	gh "github.com/lifei6671/github-radar/internal/github"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/trending"
@@ -114,6 +115,44 @@ func step(t *testing.T, e *Engine) {
 	t.Helper()
 	if processed, err := e.Step(t.Context()); err != nil || !processed {
 		t.Fatalf("任务未执行: processed=%v err=%v", processed, err)
+	}
+}
+
+func TestDrainInterruptsCollectorFailureWrite(t *testing.T) {
+	e := newEngine(t)
+	discover(t, e, source(291, "interrupt", 12))
+	job := manual(t, e, 291, "collect-drain", time.Now())
+	e.GitHub = fixtureGitHub{get: func() (gh.RepositoryResult, error) {
+		return gh.RepositoryResult{}, errors.New("采集请求失败")
+	}}
+	started := make(chan struct{})
+	var first atomic.Bool
+	if err := e.Queue.DB.Callback().Update().Before("gorm:update").Register("test:drain_failure_write", func(tx *gorm.DB) {
+		if tx.Statement.Table == "jobs" && first.CompareAndSwap(false, true) {
+			close(started)
+			<-tx.Statement.Context.Done()
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	workers := lifecycle.NewWorkers(t.Context(), func(ctx context.Context) error { _, err := e.Step(ctx); return err })
+	workers.Resume()
+	drain, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	select {
+	case <-started:
+	case <-drain.Done():
+		t.Fatal("未到达采集失败写入")
+	}
+	if err := workers.Pause(drain); err != nil {
+		t.Fatal(err)
+	}
+	var saved storage.Job
+	if err := e.Queue.DB.Take(&saved, job.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != "failed" || saved.LeaseToken != nil || saved.LeaseUntil != nil || saved.LastErrorCode == nil || *saved.LastErrorCode != storage.MaintenanceInterrupted {
+		t.Fatalf("排空后的采集任务: %+v", saved)
 	}
 }
 

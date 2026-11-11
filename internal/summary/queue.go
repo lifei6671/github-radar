@@ -218,9 +218,11 @@ func (q Queue) claim(ctx context.Context, now time.Time) (*storage.Job, error) {
 UPDATE jobs SET status='running',attempts=attempts+1,lease_token=?,lease_until=?,updated_at=?
 WHERE id=(SELECT id FROM jobs WHERE type=? AND attempts<max_attempts AND available_at<=?
 AND (status IN ('pending','failed') OR (status='running' AND lease_until<=?))
+AND (json_extract(jobs.payload_json,'$.manual')=1 OR NOT EXISTS(
+ SELECT 1 FROM system_settings s WHERE s.key=? AND json_extract(s.value_json,'$')=1))
 AND NOT EXISTS(SELECT 1 FROM ai_calls a WHERE a.job_id=jobs.id AND a.status IN ('sending','unknown'))
 ORDER BY priority DESC,available_at,id LIMIT 1) RETURNING *`,
-		rand.Text(), now.Add(time.Duration(q.LeaseSeconds)*time.Second).UnixMilli(), now.UnixMilli(), JobType, now.UnixMilli(), now.UnixMilli()).Scan(&job).Error
+		rand.Text(), now.Add(time.Duration(q.LeaseSeconds)*time.Second).UnixMilli(), now.UnixMilli(), JobType, now.UnixMilli(), now.UnixMilli(), storage.AutoAIResumeKey).Scan(&job).Error
 	if err != nil || job.ID == 0 {
 		return nil, err
 	}

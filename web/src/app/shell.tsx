@@ -8,6 +8,7 @@ import type { FormEvent } from 'react'
 import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useNavigate } from 'react-router'
 import { api, ApiError, errorText, setToken, useSession } from '../api/client'
 import { BackToTop, Dialog, Notice, PageError, Skeleton, Spinner } from '../components/ui'
+import { SetupBackup, useBackupStatus, useRestoredData } from '../pages/backup'
 
 const navigation = [
   { path: '/', label: '发现', icon: Radar },
@@ -102,11 +103,12 @@ function SearchBox({ close }: { close: () => void }) {
   </Dialog>
 }
 
-function Shell() {
+function Shell({ maintenance }: { maintenance: boolean }) {
   const [search, setSearch] = useState(false)
   const location = useLocation()
   const mobile = [navigation[0], navigation[1], navigation[4], navigation[5], { ...navigation[6], label: '更多', icon: CircleUserRound }]
   const page = navigation.find(({ path }) => path !== '/' && location.pathname.startsWith(path))?.label
+  const showMaintenance = maintenance && (location.pathname !== '/system' || new URLSearchParams(location.search).get('tab') !== 'backup')
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -139,7 +141,12 @@ function Shell() {
         {location.pathname === '/system' && <button className="icon-button" aria-label="退出会话" onClick={() => setToken(null)}><LogOut size={18} /></button>}
       </div>
     </header>
-    <main id="main" className="main" aria-label={page ?? '发现'} tabIndex={-1}><div className="content"><Outlet /></div></main>
+    <main id="main" className="main" aria-label={page ?? '发现'} tabIndex={-1}><div className="content">
+      {showMaintenance ? <section className="panel system-panel">
+        <Notice>恢复期间暂不可访问项目数据。</Notice>
+        <Link className="button" to="/system?tab=backup">查看恢复进度</Link>
+      </section> : <Outlet />}
+    </div></main>
     <nav aria-label="手机导航" className="mobile-nav">
       {mobile.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'}>
         <Icon size={20} strokeWidth={1.7} /><span>{label}</span>
@@ -158,6 +165,8 @@ export function Root() {
 
 function Authenticated() {
   const location = useLocation()
+  const backup = useBackupStatus()
+  useRestoredData(backup.data)
   const status = useQuery({
     queryKey: ['setup'],
     queryFn: ({ signal }) => api<{ initialized: boolean }>('/setup/status', { signal }),
@@ -169,7 +178,7 @@ function Authenticated() {
     return <Navigate to="/setup" replace state={{ from: location.pathname + location.search }} />
   }
   if (location.pathname === '/setup') return <Outlet />
-  return <Shell />
+  return <Shell maintenance={Boolean(backup.data?.maintenance)} />
 }
 
 export function Setup() {
@@ -177,6 +186,7 @@ export function Setup() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const state = queryClient.getQueryData<{ initialized: boolean }>(['setup'])
+  const [restoring, setRestoring] = useState(false)
   const from: unknown = location.state?.from
   const destination = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') && from !== '/setup' ? from : '/'
   const setup = useMutation({
@@ -197,13 +207,14 @@ export function Setup() {
       <Radar size={30} className="tone-accent" />
       <h1>{state?.initialized ? '系统已初始化' : '初始化雷达'}</h1>
       {state?.initialized ? <Link to="/" className="button primary">进入发现<ArrowRight size={16} /></Link> : <>
-        <p className="muted">初始化空数据库，启用采集、指标和选题任务。</p>
         {setup.error && <Notice error>{errorText(setup.error)}</Notice>}
-        <button className="button primary" disabled={setup.isPending} onClick={() => setup.mutate()}>
+        <button className="button primary" disabled={setup.isPending || restoring} onClick={() => setup.mutate()}>
           {setup.isPending ? <Spinner /> : <ArrowDownRight size={17} />}初始化空库
         </button>
       </>}
     </section>
+    <SetupBackup initialized={Boolean(state?.initialized)} onRestoring={setRestoring}
+      onDone={() => { void navigate(destination, { replace: true }) }} />
   </main>
 }
 

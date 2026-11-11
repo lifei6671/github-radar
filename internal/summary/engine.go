@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	gh "github.com/lifei6671/github-radar/internal/github"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -121,6 +122,12 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 	err = e.runJob(taskCtx, *job)
 	cancel()
 	<-done
+	if final, release, draining := lifecycle.Settlement(ctx); draining {
+		defer release()
+		if err != nil {
+			lifecycle.RecordSettlement(ctx, storage.InterruptJob(final, e.Queue.DB, *job))
+		}
+	}
 	return true, err
 }
 

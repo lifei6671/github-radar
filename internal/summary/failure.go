@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	gh "github.com/lifei6671/github-radar/internal/github"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -40,6 +41,13 @@ func (e *Engine) fail(ctx context.Context, job storage.Job, code string, retry b
 
 func (e *Engine) finishFailure(ctx context.Context, job storage.Job, call storage.AICall, result ModelResult, duration time.Duration,
 	old storage.AISummary, check storage.SummaryCheck) error {
+	return settleCall(ctx, func(final context.Context) error {
+		return e.recordCallFailure(final, job, call, result, duration, old, check)
+	})
+}
+
+func (e *Engine) recordCallFailure(ctx context.Context, job storage.Job, call storage.AICall, result ModelResult, duration time.Duration,
+	old storage.AISummary, check storage.SummaryCheck) error {
 	retry := result.Retry
 	if result.Code == "invalid_output" && retry && e.Queue.AI.Summary.RepairAttempts < job.MaxAttempts-1 {
 		var count int64
@@ -56,7 +64,7 @@ func (e *Engine) finishFailure(ctx context.Context, job storage.Job, call storag
 	if result.Unknown {
 		status = "unknown"
 	}
-	return e.settleAfterCall(ctx, job, outcome{status: status, code: result.Code, next: retryAt(job, time.Now()),
+	return e.Queue.settle(ctx, job, outcome{status: status, code: result.Code, next: retryAt(job, time.Now()),
 		attempts: job.Attempts, call: &call, model: result, duration: duration, apply: func(tx *gorm.DB) error {
 			return saveObserved(tx, old, check)
 		}})
@@ -64,10 +72,26 @@ func (e *Engine) finishFailure(ctx context.Context, job storage.Job, call storag
 
 // settleAfterCall 退出时给已发出请求一次短暂的台账提交机会，仍须通过租约校验。
 func (e *Engine) settleAfterCall(ctx context.Context, job storage.Job, o outcome) error {
-	if ctx.Err() != nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		defer cancel()
+	return settleCall(ctx, func(final context.Context) error { return e.Queue.settle(final, job, o) })
+}
+
+// settleCall 在模型结果已返回后，用排空期限保护已确认的结果与用量。
+func settleCall(ctx context.Context, write func(context.Context) error) error {
+	if final, release, draining := lifecycle.Settlement(ctx); draining {
+		defer release()
+		return write(final)
 	}
-	return e.Queue.settle(ctx, job, o)
+	if ctx.Err() != nil {
+		final, release := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer release()
+		return write(final)
+	}
+	err := write(ctx)
+	if err != nil {
+		if final, release, draining := lifecycle.Settlement(ctx); draining {
+			defer release()
+			return write(final)
+		}
+	}
+	return err
 }
