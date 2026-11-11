@@ -2,13 +2,11 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -21,8 +19,8 @@ import (
 	"github.com/lifei6671/github-radar/internal/summary"
 )
 
-// NewRouter 分别注册公开只读接口与需要管理员令牌的业务接口。
-func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger, cfg config.Config, readmes *summary.Engine, backups ...*backup.Manager) *gin.Engine {
+// NewRouter 分别注册公开只读接口、登录接口和需要管理员会话的业务接口。
+func NewRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config, readmes *summary.Engine, backups ...*backup.Manager) *gin.Engine {
 	var manager *backup.Manager
 	if len(backups) > 0 {
 		manager = backups[0]
@@ -53,7 +51,10 @@ func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger
 		c.JSON(http.StatusOK, gin.H{"status": consts.StatusReady})
 	})
 
-	v1 := router.Group("/api/v1", requireAdmin(adminToken))
+	auth := newAdminAuth(cfg)
+	admin := router.Group(consts.APIPath, adminRequest(cfg.Server.SiteURL))
+	auth.register(admin.Group(consts.AuthGroupPath))
+	v1 := admin.Group("", auth.require)
 	v1.GET("/setup/status", func(c *gin.Context) {
 		if manager != nil {
 			c.JSON(http.StatusOK, gin.H{"initialized": manager.Initialized()})
@@ -124,20 +125,4 @@ func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger
 		registerBackup(v1, business, manager)
 	}
 	return router
-}
-
-// requireAdmin 在业务处理前统一校验 Bearer 令牌。
-func requireAdmin(token string) gin.HandlerFunc {
-	expected := []byte(token)
-	return func(c *gin.Context) {
-		c.Header("Cache-Control", "no-store")
-		parts := strings.Fields(c.GetHeader("Authorization"))
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") ||
-			subtle.ConstantTimeCompare([]byte(parts[1]), expected) != 1 {
-			c.Header("WWW-Authenticate", "Bearer")
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"code": "unauthorized"})
-			return
-		}
-		c.Next()
-	}
 }

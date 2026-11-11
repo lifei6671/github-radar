@@ -49,7 +49,7 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewRouter(db, pool, "admin", slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, nil)
+	router := NewRouter(db, pool, slog.New(slog.NewTextHandler(io.Discard, nil)), testAdminConfig(cfg), nil)
 	detailWithoutKey := request(t, router, "GET", "/api/v1/repos/1", "", "admin", 200)
 	if detailWithoutKey["summaryAvailable"] != false || detailWithoutKey["description"] != desc ||
 		detailWithoutKey["summaryZh"] != nil || len(detailWithoutKey["aiTopics"].([]any)) != 0 {

@@ -11,12 +11,14 @@ require (
 	github.com/aws/smithy-go v1.28.9
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/go-github/v88 v88.0.0
+	github.com/gorilla/securecookie v1.1.2
 	github.com/libtnb/sqlite v1.3.0
 	github.com/pressly/goose/v3 v3.30.0
 	github.com/yuin/goldmark v1.8.7
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
+	golang.org/x/time v0.15.0
 	gorm.io/gorm v1.31.2
 	modernc.org/sqlite v1.62.0
 )

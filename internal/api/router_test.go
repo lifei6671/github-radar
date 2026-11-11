@@ -45,51 +45,56 @@ func TestHealthAndSetupStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewRouter(db, pool, "test-token", logger, cfg, nil, manager)
+	router := NewRouter(db, pool, logger, testAdminConfig(cfg), nil, manager)
+	session := testAdminCookie(t)
 
 	// 健康检查公开，安装状态对未认证请求统一返回 401。
 	cases := []struct {
-		path, auth, body string
-		status           int
+		path, body string
+		cookie     *http.Cookie
+		status     int
 	}{
-		{"/healthz", "", `{"status":"ok"}`, http.StatusOK},
-		{"/readyz", "", `{"status":"ready"}`, http.StatusOK},
-		{"/api/v1/setup/status", "", `{"code":"unauthorized"}`, http.StatusUnauthorized},
-		{"/api/v1/setup/status", "Basic test-token", `{"code":"unauthorized"}`, http.StatusUnauthorized},
-		{"/api/v1/setup/status", "Bearer wrong", `{"code":"unauthorized"}`, http.StatusUnauthorized},
-		{"/api/v1/setup/status", "bearer test-token", `{"initialized":false}`, http.StatusOK},
+		{"/healthz", `{"status":"ok"}`, nil, http.StatusOK},
+		{"/readyz", `{"status":"ready"}`, nil, http.StatusOK},
+		{"/api/v1/setup/status", `{"code":"unauthorized"}`, nil, http.StatusUnauthorized},
+		{"/api/v1/setup/status", `{"initialized":false}`, session, http.StatusOK},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
-		req.Header.Set("Authorization", tc.auth)
+		if tc.cookie != nil {
+			req.AddCookie(tc.cookie)
+		}
 		router.ServeHTTP(rec, req)
 		if rec.Code != tc.status || strings.TrimSpace(rec.Body.String()) != tc.body {
 			t.Errorf("%s: 得到 %d %s，期望 %d %s", tc.path, rec.Code, rec.Body, tc.status, tc.body)
 		}
-		if tc.status == http.StatusUnauthorized && rec.Header().Get("WWW-Authenticate") != "Bearer" {
-			t.Error("401 响应应声明 Bearer 鉴权")
+		if tc.status == http.StatusUnauthorized && rec.Header().Get("Cache-Control") != "no-store" {
+			t.Error("管理接口的 401 不应被缓存")
 		}
 	}
 
 	// 安装前状态查询可用，备份管理在完成初始化后才开放。
 	for _, tc := range []struct {
-		method, path, auth, code string
-		status                   int
+		method, path, code string
+		auth               bool
+		status             int
 	}{
-		{"GET", "/system/backup/status", "", "unauthorized", 401},
-		{"GET", "/system/backup/status", "Bearer test-token", "initialized", 200},
-		{"GET", "/system/backup/settings", "Bearer test-token", "setup_required", 503},
-		{"GET", "/setup/backups", "Bearer test-token", "setup_session_expired", 409},
-		{"POST", "/setup/initialize", "Bearer test-token", "initialized", 200},
-		{"POST", "/setup/initialize", "Bearer test-token", "already_initialized", 409},
-		{"GET", "/system/backup/settings", "Bearer test-token", "retentionDays", 200},
-		{"POST", "/system/backup/run", "Bearer test-token", "r2_not_configured", 409},
-		{"GET", "/setup/operations/missing", "Bearer test-token", "backup_operation_not_found", 404},
+		{"GET", "/system/backup/status", "unauthorized", false, 401},
+		{"GET", "/system/backup/status", "initialized", true, 200},
+		{"GET", "/system/backup/settings", "setup_required", true, 503},
+		{"GET", "/setup/backups", "setup_session_expired", true, 409},
+		{"POST", "/setup/initialize", "initialized", true, 200},
+		{"POST", "/setup/initialize", "already_initialized", true, 409},
+		{"GET", "/system/backup/settings", "retentionDays", true, 200},
+		{"POST", "/system/backup/run", "r2_not_configured", true, 409},
+		{"GET", "/setup/operations/missing", "backup_operation_not_found", true, 404},
 	} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(tc.method, "/api/v1"+tc.path, nil)
-		req.Header.Set("Authorization", tc.auth)
+		if tc.auth {
+			req.AddCookie(session)
+		}
 		router.ServeHTTP(rec, req)
 		if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.code) {
 			t.Errorf("%s %s: %d %s", tc.method, tc.path, rec.Code, rec.Body)

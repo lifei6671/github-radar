@@ -8,7 +8,7 @@ const backupDate = process.env.RADAR_ACCEPTANCE_BACKUP_DATE
 test.skip(!origin || !admin, '需启动独立的验收实例')
 
 async function signIn(page: Page) {
-  await page.getByLabel('管理员令牌').fill(admin!)
+  await page.getByLabel('管理员密码').fill(admin!)
   await page.getByRole('button', { name: '登录', exact: true }).click()
 }
 
@@ -44,7 +44,7 @@ test('云端后台恢复真实 R2 备份', async ({ page }) => {
   expect(response.status()).toBe(202)
   const { statusUrl } = await response.json()
   await expect.poll(async () => {
-    const result = await page.request.get(statusUrl, { headers: { Authorization: 'Bearer ' + admin } })
+    const result = await page.request.get(statusUrl)
     return (await result.json()).status
   }, { timeout: 35_000 }).toBe('completed')
   await expect(page.getByText('恢复完成。', { exact: true })).toBeVisible({ timeout: 35_000 })

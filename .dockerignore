@@ -2,6 +2,8 @@
 .workbuddy/
 .env*
 s3-r2-test.local.json
+**/*.local.yaml
+**/*.local.yml
 data/
 docs/
 *.exe

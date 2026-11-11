@@ -5,8 +5,8 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router'
-import { api, ApiError, errorText, setToken, useSession } from '../api/client'
+import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useMatch, useNavigate, useOutletContext, useSearchParams } from 'react-router'
+import { api, ApiError, errorText, setAuthenticated, useSession } from '../api/client'
 import { ActionButton, BackToTop, Dialog, Notice, PageError, Skeleton } from '../components/ui'
 import { topicsPath } from '../lib/format'
 import { SetupBackup, useBackupStatus, useRestoredData } from '../pages/backup'
@@ -91,36 +91,50 @@ function adminReturn(raw: string | null, allowSetup = false) {
 }
 
 export function AdminLogin() {
-  const { token } = useSession()
+  const { authenticated } = useSession()
+  const context = useOutletContext<SessionContext>()
   const [params] = useSearchParams()
   const destination = adminReturn(params.get('return'), true)
   const [input, setInput] = useState('')
   const auth = useMutation({
-    mutationFn: (credential: string) => api<{ initialized: boolean }>('/setup/status', { token: credential }),
-    onSuccess: (_status, credential) => setToken(credential),
+    mutationFn: (password: string) => api('/auth/login', { method: 'POST', body: { password } }),
+    onSuccess: () => setAuthenticated(true),
   })
   function submit(event: FormEvent) {
     event.preventDefault()
-    if (input.trim() && !auth.isPending) auth.mutate(input.trim())
+    if (input && !auth.isPending) auth.mutate(input)
   }
-  if (token) return <Navigate to={destination} replace />
+  if (authenticated === null) return <SessionPending {...context} />
+  if (authenticated) return <Navigate to={destination} replace />
   return <main className="login-page">
     <div className="login-top"><Link to="/"><Brand /></Link><ThemeButton /></div>
     <div className="login-layout">
       <form className="panel login-form" onSubmit={submit}>
         <h1>登录雷达后台</h1>
         <label className="field">
-          管理员令牌
-          <input type="password" name="adminToken" autoComplete="off" spellCheck={false}
+          管理员密码
+          <input type="password" name="password" autoComplete="current-password" spellCheck={false}
             value={input} onChange={(event) => setInput(event.target.value)} required autoFocus />
         </label>
         {auth.error && <Notice error>{errorText(auth.error)}</Notice>}
-        <ActionButton type="submit" className="button primary" disabled={!input.trim()}
+        <ActionButton type="submit" className="button primary" disabled={!input}
           pending={auth.isPending} icon={<ArrowRight size={17} />}>登录</ActionButton>
         <Link to="/" className="admin-link">返回前台</Link>
       </form>
     </div>
   </main>
+}
+
+function LogoutButton() {
+  const logout = useMutation({
+    mutationFn: () => api('/auth/logout', { method: 'POST' }),
+    onSuccess: () => setAuthenticated(false),
+  })
+  return <>
+    <ActionButton className="icon-button" aria-label="退出会话" title="退出会话"
+      pending={logout.isPending} icon={<LogOut size={17} />} onClick={() => logout.mutate()} />
+    {logout.error && <Notice error>{errorText(logout.error)}</Notice>}
+  </>
 }
 
 function SearchBox({ close, admin }: { close: () => void; admin: boolean }) {
@@ -179,7 +193,7 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
         </Link>
         <a href="https://github.com/lifei6671/github-radar" target="_blank" rel="noopener noreferrer" className="side-action"
           aria-label="GitHub 开源" title="GitHub 开源"><Github size={16} aria-hidden /><span>GitHub 开源</span></a>
-        <div className="side-utility"><ThemeControl theme={theme} segmented />{admin && <button className="icon-button" aria-label="退出会话" title="退出会话" onClick={() => setToken(null)}><LogOut size={17} /></button>}</div>
+        <div className="side-utility"><ThemeControl theme={theme} segmented />{admin && <LogoutButton />}</div>
       </div>
     </aside>
     <header className="mobile-bar">
@@ -188,7 +202,7 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
       <div className="mobile-actions">
         <button className="icon-button" aria-label="搜索仓库" onClick={() => setSearch(true)}><Search size={19} /></button>
         <ThemeControl theme={theme} />
-        {admin && <button className="icon-button" aria-label="退出会话" onClick={() => setToken(null)}><LogOut size={18} /></button>}
+        {admin && <LogoutButton />}
       </div>
     </header>
     <main id="main" className="main" aria-label={page ?? '发现'} tabIndex={-1}><div className="content">
@@ -219,18 +233,41 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
 }
 
 export function Root() {
-  const { token, client, generation } = useSession()
-  return <QueryClientProvider key={generation} client={client}><SessionContent authenticated={Boolean(token)} /></QueryClientProvider>
+  const { authenticated, client, generation } = useSession()
+  return <QueryClientProvider key={generation} client={client}><SessionContent authenticated={authenticated} /></QueryClientProvider>
 }
 
-function SessionContent({ authenticated }: { authenticated: boolean }) {
-  const backup = useBackupStatus(authenticated)
+type SessionContext = { maintenance: boolean; sessionError: Error | null; retrySession: () => void }
+
+function SessionContent({ authenticated }: { authenticated: boolean | null }) {
+  const adminArea = useMatch('/admin/*')
+  const repoDetail = useMatch('/repos/:owner/:name')
+  // 前台仓库详情只查询是否显示管理入口，其余公开页面无需探测会话。
+  const check = useQuery({
+    queryKey: ['auth-session'],
+    queryFn: ({ signal }) => api<{ authenticated: boolean }>('/auth/session', { signal }),
+    enabled: authenticated === null && Boolean(adminArea || repoDetail),
+  })
+  const signedIn = check.data?.authenticated
+  useEffect(() => {
+    if (authenticated === null && signedIn !== undefined) setAuthenticated(signedIn)
+  }, [authenticated, signedIn])
+  const backup = useBackupStatus(authenticated === true)
   useRestoredData(backup.data)
-  return <Outlet context={Boolean(backup.data?.maintenance)} />
+  const context: SessionContext = {
+    maintenance: Boolean(backup.data?.maintenance), sessionError: check.error, retrySession: () => { void check.refetch() },
+  }
+  return <Outlet context={context} />
+}
+
+function SessionPending({ sessionError, retrySession }: SessionContext) {
+  return <main className="standalone"><Brand />
+    {sessionError ? <PageError error={sessionError} retry={retrySession} /> : <Skeleton rows={1} />}
+  </main>
 }
 
 export function PublicLayout() {
-  return <Shell maintenance={useOutletContext<boolean>()} />
+  return <Shell maintenance={useOutletContext<SessionContext>().maintenance} />
 }
 
 export function LegacyAdminPage({ to }: { to: string }) {
@@ -239,26 +276,27 @@ export function LegacyAdminPage({ to }: { to: string }) {
 }
 
 export function AdminLayout() {
-  const { token } = useSession()
+  const { authenticated } = useSession()
   const { pathname, search, hash } = useLocation()
-  const maintenance = useOutletContext<boolean>()
+  const context = useOutletContext<SessionContext>()
   const destination = pathname + search + hash
   const setup = pathname.replace(/\/+$/, '') === '/admin/setup'
   const status = useQuery({
     queryKey: ['setup'],
     queryFn: ({ signal }) => api<{ initialized: boolean }>('/setup/status', { signal }),
-    enabled: Boolean(token),
+    enabled: authenticated === true,
     staleTime: 60_000,
   })
   // 管理页面只有通过会话检查后才挂载，并继续保留原来的深链接。
-  if (!token) return <Navigate to={'/admin/login?' + new URLSearchParams({ return: destination })} replace />
+  if (authenticated === null) return <SessionPending {...context} />
+  if (!authenticated) return <Navigate to={'/admin/login?' + new URLSearchParams({ return: destination })} replace />
   if (status.isPending) return <main className="standalone"><Brand /><Skeleton rows={1} /></main>
   if (status.error) return <main className="standalone"><Brand /><PageError error={status.error} retry={() => { void status.refetch() }} /></main>
   if (!status.data.initialized && !setup) {
     return <Navigate to={'/admin/setup?' + new URLSearchParams({ return: destination })} replace />
   }
   if (setup) return <Outlet />
-  return <Shell admin maintenance={maintenance} />
+  return <Shell admin maintenance={context.maintenance} />
 }
 
 export function Setup() {
@@ -282,7 +320,7 @@ export function Setup() {
     },
   })
   return <main className="standalone">
-    <div className="setup-top"><Brand /><ThemeButton /><button className="icon-button" aria-label="退出会话" onClick={() => setToken(null)}><LogOut size={18} /></button></div>
+    <div className="setup-top"><Brand /><ThemeButton /><LogoutButton /></div>
     <section className="panel setup-card">
       <Radar size={30} className="tone-accent" />
       <h1>{state?.initialized ? '系统已初始化' : '初始化雷达'}</h1>

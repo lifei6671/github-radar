@@ -55,8 +55,8 @@ AIHOT 的原业务是“新闻/事件/多信源讨论”；github-radar 的核�
 | 趋势图 | AIHOT Sparkline 适配 + ECharts 详情图 | 小图轻量，完整图表支持缩放/时间选择 |
 | API 数据 | Go Gin JSON，统一 /api/v1 | 前端与 Go 通过 HTTP 契约解耦 |
 | 数据 | SQLite | 全部写入由后端处理 |
-| 认证 | 单管理员 Bearer 令牌 | 输入 ADMIN_TOKEN，sessionStorage 持有；401 清空并重新输入，setup 使用同一令牌 |
-| 请求状态 | TanStack Query | 列表缓存、分页、任务轮询；统一 API client 添加 Authorization |
+| 认证 | 单管理员密码和签名 Cookie | 输入部署 YAML 中的密码，浏览器保存 HttpOnly Cookie。401 后重新登录，setup 共用会话 |
+| 请求状态 | TanStack Query | 列表缓存、分页和任务轮询。管理请求携带会话 Cookie |
 | 部署 | Go 可执行文件 + 静态资源 | 单实例，支持 Docker 与本地运行 |
 
 ## 2. AIHOT 源文件审查与组件迁移矩阵
@@ -378,11 +378,11 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 | 立即备份 | POST /api/v1/system/backup/run | 异步生成并覆盖当天备份对象 |
 | 一键恢复 | POST /api/v1/system/backup/restore | 临时库准备后进入维护模式，同一 Go 进程内原生事务恢复，复用连接池 |
 | 恢复状态 | GET /api/v1/system/backup/operations/:id | 通过独立内存操作管理器跟踪恢复状态；短暂维护期间仍可轮询 |
-| 首次安装 | /api/v1/setup/r2/test、r2/session、backups、restore、initialize | R2 设置仅存临时进程内存，预先写入待恢复库；使用同一 ADMIN_TOKEN |
-| 安装/恢复状态 | GET /api/v1/setup/status、GET /api/v1/setup/operations/:id | ADMIN_TOKEN 鉴权，初始化完成后仍可读取进度 |
+| 首次安装 | /api/v1/setup/r2/test、r2/session、backups、restore、initialize | R2 设置仅存临时进程内存，预先写入待恢复库。使用管理员会话 |
+| 安装/恢复状态 | GET /api/v1/setup/status、GET /api/v1/setup/operations/:id | 管理员会话鉴权，初始化完成后仍可读取进度 |
 | 重试配置加载 | POST /api/v1/system/backup/reload | databaseApplied=true 且重载失败时只重试加载，不再次复制 |
 
-查询参数、分类和游标使用主方案第 3.4、9.2 节契约。cursor 由后端生成，前端原样透传，修改筛选或排序后清空游标与分页结果。前台使用 /api/v1/public 的只读接口，后台和安装接口统一经 Bearer 鉴权。两类仓库响应分别缓存。License 无对象时为 null，NOASSERTION 原样传递并显示“未识别许可”，其他有效对象优先显示 name。
+查询参数、分类和游标使用主方案第 3.4、9.2 节契约。cursor 由后端生成，前端原样透传，修改筛选或排序后清空游标与分页结果。前台使用 /api/v1/public 的只读接口，后台和安装接口统一使用管理员会话。两类仓库响应分别缓存。License 无对象时为 null，NOASSERTION 原样传递并显示“未识别许可”，其他有效对象优先显示 name。
 
 ### 4.4 加载、失败和异步状态
 
@@ -391,7 +391,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 - 手动刷新：后端接受任务后显示“已排队”并可查看任务状态；前端只轮询任务查询接口，不因按钮点击直接修改星数。
 - failed 是仍可能退避重试的任务状态；succeeded/dead/canceled 为终态。unknown 停止自动轮询并提示人工处理；404 表示任务不存在或已过保留期，重新查询仓库结果，不能直接显示成功。
 - 已有摘要的更新任务失败或 unknown 时继续展示上次成功摘要及生成时间；任务状态与摘要内容有效性分开，不清空旧摘要。
-- /admin/setup 使用管理员令牌。恢复 completed 后清空查询缓存、重新加载数据。若 databaseApplied=true 但重载失败，显示“数据已恢复，加载失败”及重试加载操作。进程重启后操作 404 表示无法确认，刷新安装状态和系统状态。
+- /admin/setup 使用管理员会话。恢复 completed 后清空查询缓存、重新加载数据。若 databaseApplied=true 但重载失败，显示“数据已恢复，加载失败”及重试加载操作。进程重启后操作 404 表示无法确认，刷新安装状态和系统状态。
 - 429/503：显示上次成功采集时间与可重试提示；不用旧值冒充实时数据。
 - 退出页面取消无关 GET 请求；对 POST/PATCH 避免重复提交；网络超时对用户可解释。
 - 手动采集/摘要的 requestId 按用户操作生成，网络重试沿用，明确再次操作才更新；409 summary_in_progress 时转而查询 existingJobId，不自动生成新 ID 连续重试。
@@ -495,7 +495,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 ### UI-08 备份与恢复（阶段 5）
 
 - 实现后台 R2 设置、备份时间/时区/保留期、云端列表、立即备份和一键恢复。
-- 实现 /admin/setup 的内存 R2 会话、全新初始化和恢复入口，共用 ADMIN_TOKEN。
+- 实现 /admin/setup 的内存 R2 会话、全新初始化和恢复入口，共用管理员会话。
 - 实现独立操作轮询、维护状态、配置重载失败后的重试及自动 AI 重新启用。
 - 对新增页面补做 UI-07 的响应式、亮暗主题与交互回归。
 
@@ -554,7 +554,7 @@ github-radar/
 - 备份配置区：开关、每日执行时间、时区、保留天数（默认 5）、R2 端点、存储桶、对象前缀和可更新的访问凭据；“测试连接”“保存设置”两种操作状态独立。
 - 列表区：按日期倒序展示实际保留期内的备份（默认五天）、大小、时间、数据库版本与恢复按钮，并允许分页查看未清理旧对象；当前对象由后端 R2 列表返回，不依赖本地 SQLite 索引。首次安装不固定限制五天。
 - 任务区：“立即备份”“从 R2 恢复”均显示异步操作状态；恢复前确认后端将短暂停止数据库访问。Go HTTP 进程保持运行，原生事务复制期间展示维护状态并继续轮询。
-- 新 VPS 的 /admin/setup：填写**本次新的 R2 连接**（仅当前 Go 内存会话）、加载云端最近备份、默认选择最新、点击恢复、展示进度；恢复库的旧 R2 连接必须被当前新连接**整体覆盖并校验**，完成后才显示成功。空库时可用，使用同一管理员令牌。
+- 新 VPS 的 /admin/setup：填写**本次新的 R2 连接**（仅当前 Go 内存会话）、加载云端最近备份、默认选择最新、点击恢复、展示进度。恢复库的旧 R2 连接必须被当前新连接**整体覆盖并校验**，完成后才显示成功。空库时可用，使用同一管理员会话。
 - 后台保存配置后更新 SQLite system_settings 并即时重设定时调度；运行中恢复时优先使用本次操作提交的新 R2 连接，没有新连接则使用当前实例生效配置；临时库复制前完成旧 R2 连接覆盖和校验，原生复制提交后加载配置再重新调度。
 - 恢复进行中设置区禁止保存，后端仍以 409 拒绝并发修改；恢复完成提示自动 AI 暂停，用户在该处明确选择重新启用。Go/SQLite 等实现细节只用于技术文档，产品页面用“恢复期间暂不可访问项目数据”等与决策有关的文案。
 - 验收界限、HTTP 接口与恢复安全顺序见 [备份专项方案](./backup-and-restore.md)。

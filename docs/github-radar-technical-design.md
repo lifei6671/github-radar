@@ -65,10 +65,10 @@
 | 问题 | 一期决定 | 实现前置阶段 |
 | --- | --- | --- |
 | 分类 | SQLite 保存可编辑的 GitHub topics 映射，YAML 仅提供初始数据 | 阶段 1，UI-03/04 前 |
-| 配置 | 后台维护分类、发现规则和运行参数，部署 YAML 仅需监听地址和数据库路径 | 阶段 1 |
+| 配置 | 后台维护分类、发现规则和运行参数，部署 YAML 保存监听地址、网站对外地址、数据库路径和管理员登录配置 | 阶段 1 |
 | 采样槽 | UTC 五分钟固定网格；等级只影响调度频率，不改变网格 | 阶段 1 |
 | 仓库状态 | candidate/active/paused/unavailable/address_pending，转换见 3.4 | 阶段 1 |
-| 鉴权 | 单管理员 ADMIN_TOKEN，Bearer 传递；安装也使用同一令牌，无账号/登录会话系统 | 阶段 0 |
+| 鉴权 | 单管理员密码登录，签名 HttpOnly Cookie；首次安装共用同一会话 | 阶段 0 |
 | 元数据 | 保存 license_spdx_id、license_name、followed_at | 阶段 1 |
 | 备份前端 | UI-06 只做业务管理，UI-08 在阶段 5 实现备份恢复 | 阶段 4/5 |
 | 恢复 | 保留同进程一键恢复，使用 SQLite 原生 Backup API；删除文件交换及自定义恢复日志 | 阶段 5 |
@@ -135,7 +135,7 @@ github-radar/
 - React + TypeScript + Vite + Tailwind CSS 4 + React Router 客户端路由 + ECharts。页面布局与交互参考 AIHOT，按本项目仓库数据重写业务组件；后端嵌入构建后的静态资源。前端不保留 AIHOT 的 Node SSR、Fastify、PostgreSQL 或 pg-boss。
 - GORM 显式映射表与列，Goose 管理版本化 SQL 迁移。每个持久化模型提供对应的 `ModelColumns`，Go 中构造查询条件、排序、更新和冲突键时引用表名常量及字段映射。
 - 查询优先使用简单的条件、索引和参数绑定。原子任务领取、跨层保留检查等场景保留必要的复合 SQL。SQLite 专有语法用于通用 SQL 无法满足现有需求的场景。状态、任务类型、操作阶段和错误码等业务标识统一定义在 `internal/consts`。
-- 浏览器端使用 TanStack Query 管理请求缓存、失效和任务轮询；fetch 封装只负责 Bearer、JSON 和错误解析，不再自研并行缓存层。
+- 浏览器端使用 TanStack Query 管理请求缓存、失效和任务轮询。fetch 封装处理管理会话、JSON 和错误解析。
 
 部署形态：单 Go 进程运行 API、调度器、GitHub 工作池、AI 工作池和维护任务；SQLite 存于持久化卷。第一版禁止多个进程同时对同一套任务进行调度，数据库仍需具备租约和幂等防护以处理重启场景。
 
@@ -813,7 +813,7 @@ WHERE (repo_id, sample_slot) IN (
 
 不交换 db/WAL/SHM 文件，不替换连接池，不建立 RecoveryJournal 或 recovery_pending。SQLite 自己处理复制事务和崩溃恢复；提交时业务数据、当前 R2 连接、初始化标记和任务整理一起生效。旧任务不重放、自动 AI 暂停；提交后配置重载失败可重试加载，不自动回退旧数据。
 
-首次安装使用相同 ADMIN_TOKEN 和恢复引擎；临时 R2 会话只在内存。备份包含 R2 凭据，部署使用专用私有 bucket、仅该 bucket 对象读写令牌及受限本地文件权限。空间估算、错误分支、接口和验收以[备份专项方案](./backup-and-restore.md)为准。
+首次安装使用同一管理员会话和恢复引擎；临时 R2 会话只在内存。备份包含 R2 凭据，部署使用专用私有 bucket、仅该 bucket 对象读写令牌及受限本地文件权限。空间估算、错误分支、接口和验收以[备份专项方案](./backup-and-restore.md)为准。
 
 ## 9. API 设计
 
@@ -864,7 +864,7 @@ WHERE (repo_id, sample_slot) IN (
 | GET /api/v1/system/backup/operations/:id | 查询异步备份/恢复进度 |
 | POST /api/v1/system/backup/reload | 恢复已提交但配置重载失败时重试加载 |
 
-首次安装另提供 POST /api/v1/setup/r2/test、r2/session、restore、initialize，GET /api/v1/setup/backups、status、operations/:id，均使用 ADMIN_TOKEN。R2 会话仅保存在内存，恢复后的数据库包含本次新配置；已初始化时关闭 setup 写接口，状态和操作查询仍可用。维护期间健康检查、setup/status 和操作进度只读内存；重载入口仅在复制已结束且 databaseApplied=true 的加载失败状态下，受恢复互斥保护读取数据库。鉴权优先；恢复期间设置写入及冲突操作先返回 409，其余业务 API 返回 503。详见[专项方案](./backup-and-restore.md)。
+首次安装另提供 POST /api/v1/setup/r2/test、r2/session、restore、initialize，GET /api/v1/setup/backups、status、operations/:id，均使用管理员会话。R2 会话仅保存在内存，恢复后的数据库包含本次新配置；已初始化时关闭 setup 写接口，状态和操作查询仍可用。维护期间健康检查、setup/status 和操作进度只读内存；重载入口仅在复制已结束且 databaseApplied=true 的加载失败状态下，受恢复互斥保护读取数据库。鉴权优先；恢复期间设置写入及冲突操作先返回 409，其余业务 API 返回 503。详见[专项方案](./backup-and-restore.md)。
 
 这些配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending。Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。分类和发现规则接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
 
@@ -892,9 +892,9 @@ Trending 专用契约：GET /api/v1/trending 的 period 为 daily/weekly/monthly
 
 ### 9.1 单管理员认证
 
-环境变量 ADMIN_TOKEN 必填，由部署者生成随机高强度值。缺失时启动报错。现有 /api/v1 管理接口（包括原读取接口、setup、恢复进度）均通过 Authorization: Bearer 认证。前台通过 /api/v1/public 的独立 GET 路由获取仓库列表、详情、Star 趋势、分类、官方榜单及来源标识。公开读取仅展示当前可发布仓库，摘要仅展示已生成内容与来源，关注记录、摘要任务编号及模型配置留在管理接口。两组业务路由共用初始化与恢复门禁。静态资源、/healthz、/readyz 可公开，健康响应只提供就绪状态。对外部署使用 HTTPS。
+部署 YAML 必填 `server.site_url`、`auth.admin_password` 和 `auth.session_secret`，缺失时 HTTP 服务报错退出。管理接口通过签名会话 Cookie 鉴权，包括 setup 和恢复进度。前台通过 /api/v1/public 的独立 GET 路由获取仓库列表、详情、Star 趋势、分类、官方榜单及来源标识。公开读取仅展示当前可发布仓库，摘要仅展示已生成内容与来源，关注记录、摘要任务编号及模型配置留在管理接口。两组业务路由共用初始化与恢复门禁。静态资源、/healthz、/readyz 可公开，健康响应只提供就绪状态。
 
-首次进入后台时输入令牌，令牌仅保存在当前标签页的 sessionStorage，由 API client 随管理请求发送。管理接口返回 401 时清除令牌和查询缓存，后台返回登录页。退出时清理浏览器会话。轮换通过修改环境变量并重启服务完成，数据库恢复沿用当前实例的管理员令牌。
+首次进入后台时提交密码到 `POST /api/v1/auth/login`。Cookie 设为 HttpOnly、SameSite=Strict，有效期 24 小时，网站对外地址使用 HTTPS 时追加 Secure。后台写请求检查来源。刷新时通过 `GET /api/v1/auth/session` 确认状态，管理接口返回 401 时清理管理缓存并返回登录页。`POST /api/v1/auth/logout` 清除当前浏览器的 Cookie。会话校验独立于数据库，修改密码或签名密钥并重启会使既有会话失效，SQLite 恢复继续使用当前实例的部署配置。
 
 ### 9.2 列表与游标
 
@@ -923,7 +923,7 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 | /admin/watchlist | 重点监控 | 管理员指定优先跟踪的仓库 |
 | /admin/runs | 管理后台 | GitHub 限流、调度任务、SQLite 清理与备份恢复状态 |
 | /admin/repos、/admin/repos/:owner/:name | 后台仓库管理 | 加入或移出重点监控、刷新采样、摘要任务与加入选题池 |
-| /admin/login、/admin/setup | 后台登录与首次安装 | 验证管理员令牌、初始化空库或从 R2 恢复 |
+| /admin/login、/admin/setup | 后台登录与首次安装 | 验证管理员密码、初始化空库或从 R2 恢复 |
 
 ### 10.2 视觉系统与可复用组件
 
@@ -953,21 +953,14 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 
 ## 11. 示例配置与部署
 
-示例 configs/example.yaml：
-
-~~~yaml
-server:
-  listen: "127.0.0.1:8080"
-storage:
-  path: "./data/github-radar.db"
-~~~
+参见 [本地部署配置示例](../configs/example.yaml) 和 [容器部署配置示例](../deploy/container.yaml)。配置包含监听地址、网站对外地址、数据库路径、管理员密码和会话签名密钥。
 
 首次用新版服务启动时，先用临时连接执行迁移，再把初始运行参数、分类及缺失的规则集写入数据库。运行参数与统一修订号存于 `system_settings` 的 `runtime.settings.v1` 键，分类存于 `categories`，发现规则存于 `discovery_rules`。升级保留已有发现规则的 ID、定义及下次执行时间。旧 YAML 的业务值、分类文件和 AI 地址/模型环境变量可用于这次导入；已写入运行设置后，启动直接读取数据库。可编辑的 HTTP 超时、SQLite 连接参数、GitHub 请求预算和并发、采样周期和容量、AI 开关、地址及模型由下一次启动应用。分类与发现规则的生效方式见第 3 章和第 9 章。
 
 后续阶段新增的推荐时刻、增长计算周期、AI 预算、保留期和清理计划随各自功能存入数据库。采样槽、聚合和 AI 日预算的 UTC 口径属于数据契约。
 
 部署要求：
-- GITHUB_TOKEN、AI_API_KEY、ADMIN_TOKEN 通过环境变量提供；configs/example.yaml 不包含真实凭据。
+- GITHUB_TOKEN、AI_API_KEY 通过环境变量提供。后台密码与会话签名由部署 YAML 提供，示例文件使用空凭据，Compose 以只读方式挂载实际配置。
 - GitHub API 接口使用 api.github.com，Trending 使用 github.com；网络超时/重试分别设置。
 - Docker 镜像可多阶段编译 Go + React；SQLite 数据目录 ./data 挂载持久化卷。
 - 运行单实例；可选 Caddy/Nginx 反向代理并配置 HTTPS/访问控制。
@@ -1083,7 +1076,7 @@ storage:
 43. **手动请求幂等**：相同 requestId 跨调度窗口重试返回同一任务；同一窗口内两个已先后完成的不同 force 请求可各自创建任务；存在其他未决任务时返回 409 并可查询 existingJobId。
 44. **输出无效与修复**：模型完整响应但 JSON 无效时，本次调用落库为 failed/invalid_output，下一次修复使用新 call_key 且占新名额；终态落库前崩溃仍按 unknown 停止自动重发。
 
-45. **新增契约**：分类多重匹配及 other 回退一致；同槽手动/自动/304 去重、重试跨槽仍沿原槽；非法状态被 CHECK 拒绝；关注时间幂等；License 缺失可空；游标同值/null 续页与筛选不匹配处理正确；所有 API 含 setup/读取的 Bearer 认证与 401 清理一致。
+45. **新增契约**：分类多重匹配及 other 回退一致；同槽手动/自动/304 去重、重试跨槽仍沿原槽；非法状态被 CHECK 拒绝；关注时间幂等；License 缺失可空；游标同值/null 续页与筛选不匹配处理正确；后台及 setup 共用会话鉴权与 401 清理。
 
 46. **计算与榜单契约**：模拟 15 分钟边界验证指标、热度及评级更新，不依赖日汇总；无新采样仍处理窗口过期，积压不补算旧窗口。titleZh 的空值、短句及 40 字截断一致；Trending 无批次/成功空榜/失败保留旧榜的响应可区分，单批次成员与 rank 一致。
 

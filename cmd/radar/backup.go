@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,7 +17,7 @@ import (
 )
 
 // runBackup 使用运行中服务的同一协调器，避免离线命令与恢复并发写库。
-func runBackup(ctx context.Context, listen, token string, logger *slog.Logger) error {
+func runBackup(ctx context.Context, listen, password string, logger *slog.Logger) error {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		return err
@@ -36,13 +37,17 @@ func runBackup(ctx context.Context, listen, token string, logger *slog.Logger) e
 	ctx, cancel := context.WithTimeout(ctx, 11*time.Minute)
 	defer cancel()
 	client := http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	session, err := loginAdmin(ctx, &client, base.String(), password)
+	if err != nil {
+		return err
+	}
 	request := func(method, path string, dest any) error {
 		base.Path = path
 		req, err := http.NewRequestWithContext(ctx, method, base.String(), nil)
 		if err != nil {
 			return err
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.AddCookie(session)
 		res, err := client.Do(req)
 		if err != nil {
 			return err
@@ -84,4 +89,34 @@ func runBackup(ctx context.Context, listen, token string, logger *slog.Logger) e
 		case <-tick.C:
 		}
 	}
+}
+
+// loginAdmin 用运行中服务签发的会话访问管理接口，备份命令全程走本机回环地址。
+func loginAdmin(ctx context.Context, client *http.Client, origin, password string) (*http.Cookie, error) {
+	payload, err := json.Marshal(struct {
+		Password string `json:"password"`
+	}{Password: password})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		origin+consts.APIPath+consts.AuthGroupPath+consts.AuthLoginPath, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("管理员登录失败，HTTP %d", res.StatusCode)
+	}
+	for _, cookie := range res.Cookies() {
+		if cookie.Name == consts.AdminSessionCookie && cookie.Value != "" {
+			return cookie, nil
+		}
+	}
+	return nil, errors.New("管理员登录响应缺少会话 Cookie")
 }

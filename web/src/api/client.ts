@@ -27,23 +27,19 @@ function newQueryClient() {
   })
 }
 
-const authKey = 'radar.adminToken'
 const listeners = new Set<() => void>()
-const initialToken = (() => {
-  try { return sessionStorage.getItem(authKey) } catch { return null }
-})()
-let session = { token: initialToken, client: newQueryClient(), generation: 0 }
+// 清理旧版浏览器留下的明文令牌，新的凭据由 HttpOnly Cookie 持有。
+try { sessionStorage.removeItem('radar.adminToken') } catch { /* 隐私模式下可能不可用。 */ }
+let session = { authenticated: null as boolean | null, client: newQueryClient(), generation: 0 }
 
-export function setToken(value: string | null) {
-  if (session.token === value) return
+export function setAuthenticated(value: boolean) {
+  if (session.authenticated === value) return
   const previous = session
   // 会话间不共享缓存。旧请求的回调只能持有已退出会话的 QueryClient。
-  session = { token: value, client: newQueryClient(), generation: previous.generation + 1 }
-  try {
-    if (value) sessionStorage.setItem(authKey, value)
-    else sessionStorage.removeItem(authKey)
-  } catch { /* 禁用会话存储时仍可在当前页面使用。 */ }
-  previous.client.clear()
+  session = previous.authenticated === null
+    ? { ...previous, authenticated: value }
+    : { authenticated: value, client: newQueryClient(), generation: previous.generation + 1 }
+  if (previous.client !== session.client) previous.client.clear()
   for (const listener of listeners) listener()
 }
 
@@ -60,17 +56,14 @@ interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT'
   body?: unknown
   signal?: AbortSignal
-  token?: string
   setupSession?: string
   timeoutMs?: number
 }
 
 // API 仅使用同源请求。迟到的旧会话 401 不应清除新会话。
 async function request<T>(path: string, options: RequestOptions, anonymous: boolean): Promise<T> {
-  const requestedSession = session
-  const usedToken = anonymous ? null : options.token ?? requestedSession.token
+  const generation = session.generation
   const headers = new Headers({ Accept: 'application/json' })
-  if (usedToken) headers.set('Authorization', 'Bearer ' + usedToken)
   if (options.setupSession) headers.set('X-Setup-Session', options.setupSession)
   if (options.body !== undefined) headers.set('Content-Type', 'application/json')
   const timeout = AbortSignal.timeout(options.timeoutMs ?? 15_000)
@@ -82,6 +75,7 @@ async function request<T>(path: string, options: RequestOptions, anonymous: bool
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal,
+      credentials: anonymous ? 'omit' : 'same-origin',
       cache: 'no-store',
       redirect: 'error',
     })
@@ -89,13 +83,10 @@ async function request<T>(path: string, options: RequestOptions, anonymous: bool
     if (options.signal?.aborted) throw error
     throw new ApiError(0, { code: timeout.aborted ? 'timeout' : 'network_error' })
   }
-  if (requestedSession !== session) throw new ApiError(409, { code: 'session_changed' })
-  if (response.status === 401 && !anonymous && options.token === undefined) {
-    setToken(null)
-    throw new ApiError(401, { code: 'unauthorized' })
-  }
+  if (generation !== session.generation) throw new ApiError(409, { code: 'session_changed' })
   const payload = await response.json().catch(() => null)
-  if (requestedSession !== session) throw new ApiError(409, { code: 'session_changed' })
+  if (generation !== session.generation) throw new ApiError(409, { code: 'session_changed' })
+  if (!anonymous && response.status === 401 && payload?.code === 'unauthorized') setAuthenticated(false)
   if (!response.ok) throw new ApiError(response.status, payload ?? {})
   if (payload === null) throw new ApiError(500, { code: 'invalid_response' })
   return payload as T
@@ -111,7 +102,10 @@ export function publicApi<T>(path: string, options: Pick<RequestOptions, 'signal
 }
 
 const messages: Record<string, string> = {
-  unauthorized: '管理员令牌无效，请重新输入。',
+  unauthorized: '管理员会话已失效，请重新登录。',
+  invalid_admin_password: '管理员密码错误，请重新输入。',
+  invalid_origin: '请通过网站配置的对外地址访问后台。',
+  login_rate_limited: '登录请求过于频繁，请稍后重试。',
   timeout: '请求超时。可重试同一次操作。',
   network_error: '无法连接服务，请检查网络后重试。',
   setup_required: '请先完成系统初始化。',

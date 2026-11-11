@@ -21,11 +21,13 @@ import (
 )
 
 const acceptanceAdmin = "radar-acceptance-local-admin"
+const acceptanceSessionSecret = "radar-acceptance-session-signing-key"
 
 type acceptanceServer struct {
 	base    string
 	pid     int
 	admin   string
+	session *http.Cookie
 	stop    func()
 	running func() bool
 	logs    func() string
@@ -35,10 +37,17 @@ func acceptanceConfig(t *testing.T, dir string) string {
 	t.Helper()
 	path := filepath.Join(dir, "radar.yaml")
 	db := filepath.ToSlash(filepath.Join(dir, "radar.db"))
-	if err := os.WriteFile(path, []byte(fmt.Sprintf("server:\n  listen: '127.0.0.1:0'\nstorage:\n  path: %q\n", db)), 0o600); err != nil {
+	writeAcceptanceConfig(t, path, "127.0.0.1:0", db, 0o600)
+	return path
+}
+
+func writeAcceptanceConfig(t *testing.T, path, listen, db string, mode os.FileMode) {
+	t.Helper()
+	content := fmt.Sprintf("server:\n  listen: %q\n  site_url: 'http://127.0.0.1'\nstorage:\n  path: %q\nauth:\n  admin_password: %q\n  session_secret: %q\n",
+		listen, db, acceptanceAdmin, acceptanceSessionSecret)
+	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		t.Fatal(err)
 	}
-	return path
 }
 
 // 每次启动真实服务子进程，使用系统分配的端口。关闭 stdin 触发与生产相同的优雅停机。
@@ -51,7 +60,7 @@ func startAcceptanceServer(t *testing.T, path string, env ...string) acceptanceS
 	cmd := exec.Command(executable, "-test.run=^TestAcceptanceProcess$")
 	cmd.Dir = filepath.Join("..", "..")
 	cmd.Env = append(os.Environ(),
-		"RADAR_ACCEPTANCE_CHILD_CONFIG="+path, "ADMIN_TOKEN="+acceptanceAdmin,
+		"RADAR_ACCEPTANCE_CHILD_CONFIG="+path,
 		"GITHUB_TOKEN=", "AI_API_KEY=", "AI_BASE_URL=", "AI_MODEL=", "RADAR_ACCEPTANCE_UPSTREAM=")
 	cmd.Env = append(cmd.Env, env...)
 	stdin, err := cmd.StdinPipe()
@@ -115,7 +124,7 @@ func startAcceptanceServer(t *testing.T, path string, env ...string) acceptanceS
 		if listen == "" {
 			t.Fatal("验收进程未成功启动")
 		}
-		return acceptanceServer{base: "http://" + listen, admin: acceptanceAdmin, pid: cmd.Process.Pid, stop: stop,
+		server := acceptanceServer{base: "http://" + listen, pid: cmd.Process.Pid, stop: stop,
 			running: func() bool {
 				select {
 				case <-exited:
@@ -130,10 +139,22 @@ func startAcceptanceServer(t *testing.T, path string, env ...string) acceptanceS
 				return logOutput.String()
 			},
 		}
+		server.login(t)
+		return server
 	case <-time.After(15 * time.Second):
 		t.Fatal("验收进程启动超时")
 	}
 	return acceptanceServer{}
+}
+
+func (s *acceptanceServer) login(t *testing.T) {
+	t.Helper()
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	cookie, err := loginAdmin(t.Context(), client, s.base, acceptanceAdmin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.admin, s.session = acceptanceAdmin, cookie
 }
 
 func TestAcceptanceProcess(t *testing.T) {
@@ -191,7 +212,7 @@ func (s acceptanceServer) request(ctx context.Context, method, path string, body
 		return 0, nil, err
 	}
 	if s.admin != "" {
-		req.Header.Set("Authorization", "Bearer "+s.admin)
+		req.AddCookie(s.session)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

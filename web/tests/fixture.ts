@@ -3,7 +3,10 @@ import type { Page, Route } from '@playwright/test'
 import type { CategorySetting, DiscoverySelection, DiscoveryTab, Job, Limits, ListSettings, ProjectThemeGroup, ProjectThemeSetting, Quality, RepoDetail, RepoReadme, RuleSetting, Topic } from '../src/api/types'
 
 const at = '2026-11-11T12:00:00Z'
-const admin = 'fixture-token'
+const adminPassword = 'fixture-admin-password'
+const adminCookie = 'radar_admin_session'
+const signedSession = 'fixture-session'
+const sessionCookie = adminCookie + '=' + signedSession
 const categories = [
   { slug: 'agent', name: 'AI 智能体' },
   { slug: 'coding', name: 'AI 编程' },
@@ -55,8 +58,8 @@ function repository(index: number): RepoDetail {
   }
 }
 
-function reply(route: Route, json: unknown, status = 200) {
-  return route.fulfill({ status, json })
+function reply(route: Route, json: unknown, status = 200, headers?: Record<string, string>) {
+  return route.fulfill({ status, json, headers })
 }
 
 function published(repo: RepoDetail) {
@@ -136,13 +139,27 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     const method = request.method()
     const query = url.searchParams
     requests.push(method + ' ' + path + url.search)
+    const headers = await request.allHeaders()
+    const signedIn = authorized && Boolean(headers.cookie?.split('; ').includes(sessionCookie))
     if (publicRead) {
-      expect(request.headers().authorization).toBeUndefined()
+      expect(headers.authorization).toBeUndefined()
+      expect(headers.cookie).toBeUndefined()
       if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/\d+\/(?:trend|readme)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
         return reply(route, { code: 'not_found' }, 404)
       }
       if (query.get('followed') === 'true') return reply(route, { code: 'invalid_filter' }, 400)
-    } else if (!authorized || request.headers().authorization !== 'Bearer ' + admin) return reply(route, { code: 'unauthorized' }, 401)
+    } else {
+      if (path === '/auth/session') return reply(route, { authenticated: signedIn })
+      if (path === '/auth/login' && method === 'POST') {
+        if (request.postDataJSON().password !== adminPassword) return reply(route, { code: 'invalid_admin_password' }, 401)
+        authorized = true
+        return reply(route, { authenticated: true }, 200, { 'Set-Cookie': sessionCookie + '; Path=/api/v1; HttpOnly; SameSite=Strict' })
+      }
+      if (path === '/auth/logout' && method === 'POST') {
+        return reply(route, { authenticated: false }, 200, { 'Set-Cookie': adminCookie + '=; Path=/api/v1; Max-Age=0; HttpOnly' })
+      }
+      if (!signedIn) return reply(route, { code: 'unauthorized' }, 401)
+    }
     if (path === '/setup/status') return reply(route, { initialized })
     if (path === '/system/backup/status') return reply(route, { initialized, restoring: false, maintenance: false })
     if (path === '/setup/initialize' && method === 'POST') {
@@ -420,13 +437,17 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
   }
 }
 
-export async function login(page: Page, token = admin) {
-  await page.getByLabel('管理员令牌').fill(token)
+export async function login(page: Page, password = adminPassword) {
+  await page.getByLabel('管理员密码').fill(password)
   await page.getByRole('button', { name: '登录', exact: true }).click()
 }
 
 export async function session(page: Page) {
-  await page.addInitScript((value) => sessionStorage.setItem('radar.adminToken', value), admin)
+  const origin = new URL(process.env.RADAR_TEST_ORIGIN ?? 'http://127.0.0.1:4173')
+  await page.context().addCookies([{
+    name: adminCookie, value: signedSession, domain: origin.hostname, path: '/api/v1',
+    httpOnly: true, sameSite: 'Strict', secure: origin.protocol === 'https:',
+  }])
 }
 
 // 按拖动手柄实际移动鼠标，并验证松手前的拖影和吸附目标。

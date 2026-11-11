@@ -55,7 +55,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return fmt.Errorf("未知命令 %q，请使用 server、migrate、collect-once、maintenance-once 或 backup", command)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
-	configPath := flags.String("config", "", "YAML 配置文件路径，省略时使用默认配置")
+	configPath := flags.String("config", "", "YAML 配置文件路径，server 和 backup 命令必填")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -66,15 +66,13 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	var adminToken string
 	if command == consts.CommandServer || command == consts.CommandBackup {
-		adminToken, err = cfg.AdminToken()
-		if err != nil {
+		if err := cfg.ValidateAdmin(); err != nil {
 			return err
 		}
 	}
 	if command == consts.CommandBackup {
-		return runBackup(ctx, cfg.Server.Listen, adminToken, logger)
+		return runBackup(ctx, cfg.Server.Listen, cfg.Auth.AdminPassword, logger)
 	}
 
 	if command == consts.CommandMigrate {
@@ -159,7 +157,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		workers.Resume()
 	}
 	gin.SetMode(gin.ReleaseMode)
-	router := api.NewRouter(db, pool, adminToken, logger, cfg, &summarizer, manager)
+	router := api.NewRouter(db, pool, logger, cfg, &summarizer, manager)
 	webui.Register(router, os.DirFS("web/dist"))
 	server := &http.Server{
 		Addr:         cfg.Server.Listen,

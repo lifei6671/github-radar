@@ -4,27 +4,23 @@ GitHub 开源项目热点雷达，提供 Star 增长、GitHub Trending、中文�
 
 ## 本地启动
 
-在仓库根目录使用 Go 1.26 及以上和 Node.js 22.12 及以上版本。先构建前端，再为 Go 服务设置管理员令牌。
+在仓库根目录使用 Go 1.26 及以上和 Node.js 22.12 及以上版本。先构建前端，再复制部署配置。
 
 ```powershell
 npm --prefix web ci
 npm --prefix web run build
+Copy-Item configs/example.yaml configs/radar.local.yaml
 ```
 
-PowerShell 示例会为当前终端生成令牌。
+参照 [带注释的配置示例](configs/example.yaml)，在 `configs/radar.local.yaml` 中填入网站对外地址、管理员密码和会话签名密钥。密码和签名密钥分别生成，例如运行 `openssl rand -hex 24` 和 `openssl rand -hex 32`。本地配置包含真实凭据，请限制文件读取权限。
 
 ```powershell
-$bytes = New-Object byte[] 32
-$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-$rng.GetBytes($bytes)
-$rng.Dispose()
-$env:ADMIN_TOKEN = [Convert]::ToBase64String($bytes)
-go run ./cmd/radar
+go run ./cmd/radar server -config configs/radar.local.yaml
 ```
 
-服务默认监听 `127.0.0.1:8080`，在 `./data/github-radar.db` 建库并自动迁移。需要改变监听地址或数据库路径时，复制 [configs/example.yaml](configs/example.yaml) 并运行 `go run ./cmd/radar server -config <文件路径>`。相对路径以命令的工作目录为准。
+示例监听 `127.0.0.1:8080`，在 `./data/github-radar.db` 建库并自动迁移。相对路径以命令的工作目录为准。升级已有部署时沿用原数据库路径，在原 YAML 中补齐 `server.site_url`、`auth.admin_password`、`auth.session_secret`，移除旧的 `auth.admin_token_env`，重启后用新密码登录。
 
-在浏览器打开 `http://127.0.0.1:8080` 即可浏览前台。从「后台管理」或 `/admin` 进入后台，用当前终端的 `$env:ADMIN_TOKEN` 登录。空库首次登录后进入 `/admin/setup`。Gin 从 `web/dist` 提供页面与静态资源，运行时只需 Go 服务。开发前端时可另开终端执行 `npm --prefix web run dev`，Vite 默认将 API 转发到本地 8080 端口。
+在浏览器打开 `http://127.0.0.1:8080` 即可浏览前台。从「后台管理」或 `/admin` 进入后台，输入 YAML 中设置的管理员密码。空库首次登录后进入 `/admin/setup`。Gin 从 `web/dist` 提供页面与静态资源，运行时只需 Go 服务。开发前端时可另开终端执行 `npm --prefix web run dev`，Vite 默认将 API 转发到本地 8080 端口。
 
 | 接口 | 行为 |
 | --- | --- |
@@ -32,22 +28,27 @@ go run ./cmd/radar
 | `GET /readyz` | 公开数据库就绪检查，连接失败时返回 503 |
 | `GET /api/v1/public/repos`、`/repos/by-name/:owner/:name`、`/repos/:id/trend` | 公开项目列表、详情与 Star 趋势，路径共用 `/api/v1/public` 前缀 |
 | `GET /api/v1/public/categories`、`/trending`、`/trending/sources` | 公开分类、官方榜单和榜单来源标识，路径共用 `/api/v1/public` 前缀 |
-| `GET /api/v1/setup/status` | 需要 `Authorization: Bearer <ADMIN_TOKEN>`，新库返回 `{"initialized":false}` |
-| `POST /api/v1/setup/initialize` | 使用同一令牌初始化空库，重复初始化返回 409 |
+| `POST /api/v1/auth/login` | 提交 `{"password":"…"}`，成功后签发签名会话 Cookie |
+| `GET /api/v1/auth/session`、`POST /api/v1/auth/logout` | 查询登录状态、清除当前浏览器的会话 Cookie |
+| `GET /api/v1/setup/status` | 需要管理员会话，新库返回 `{"initialized":false}` |
+| `POST /api/v1/setup/initialize` | 使用同一会话初始化空库，重复初始化返回 409 |
 
-服务启动时缺少管理员令牌会报错退出。缺少 `GITHUB_TOKEN` 时提示采集待配置。AI 地址、模型和开关通过管理接口配置，API 密钥由环境变量提供。
+网站对外地址、管理员密码和会话签名密钥为 HTTP 服务的必填项。会话有效期为 24 小时，修改密码或签名密钥并重启后需要重新登录。缺少 `GITHUB_TOKEN` 时提示采集待配置。AI 地址、模型和开关通过管理接口配置，API 密钥由环境变量提供。
 
 ## 启用采集
 
-使用可读取公共仓库的 GitHub 令牌，在启动服务的终端设置 `GITHUB_TOKEN`。后台「运行状态 → 运行配置 → GitHub 采集」可查看或修改环境变量名。设置后重启服务。新部署可在后台初始化空库，或在另一个终端使用同一个管理员令牌调用初始化接口。
+使用可读取公共仓库的 GitHub 令牌，在启动服务的终端设置 `GITHUB_TOKEN`。后台「运行状态 → 运行配置 → GitHub 采集」可查看或修改环境变量名。设置后重启服务。新部署可在后台初始化空库，或用同一 HTTP 会话调用初始化接口。以下 PowerShell 7 示例适用于本地 HTTP 部署。
 
 ```powershell
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/setup/initialize -Headers @{Authorization = "Bearer $env:ADMIN_TOKEN"}
+$password = Read-Host "管理员密码" -MaskInput
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/auth/login -ContentType 'application/json' -Body (@{password = $password} | ConvertTo-Json -Compress) -SessionVariable radarSession
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/setup/initialize -WebSession $radarSession
+Remove-Variable password
 ```
 
 初始化前业务 API 返回 `503 setup_required`，业务 Worker 等待安装完成。初始化会保存关闭备份的默认设置。已有数据库重启后会自动恢复采集，普通任务租约到期可接管。缺少 GitHub 令牌时可以读取已有数据，配置令牌并重启后开始采集。
 
-后台提供仓库管理、重点监控、选题池和运行状态。旧 `/system`、`/watchlist`、`/topics`、`/setup` 链接继续跳转到对应后台页。公开仓库接口仅提供可展示的仓库和摘要，重点监控、任务、配置与备份需管理员令牌。
+后台提供仓库管理、重点监控、选题池和运行状态。旧 `/system`、`/watchlist`、`/setup` 链接继续跳转到对应后台页。前台专题目录位于 `/topics`。重点监控、任务、配置与备份需管理员会话。
 
 - 默认采集全站和 Go、Python、TypeScript、Rust 的 Trending 日榜、周榜、月榜，保存每个来源的完整成功批次。解析失败保留上次榜单及其真实时间。
 - 每 30 分钟轮换一个 AI 主题 Search。默认限制为近 90 天更新且至少 20 Star 的公共仓库，查询中显式提供的 `pushed:`、`stars:` 条件优先。超过一千条的查询按 Star 和创建时间拆分，分页请求单独排队。
@@ -59,7 +60,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/setup/initializ
 
 ## 管理配置
 
-初始化后使用同一管理员 Bearer 令牌调用以下接口。数据库保存一份当前配置。`revision` 用于防止并发编辑互相覆盖。每次写入先 GET，再提交返回的 `revision` 和修改后的完整配置。计数已变化时返回 `409 settings_conflict`，重新读取后再提交。
+初始化后使用同一管理员会话调用以下接口。数据库保存一份当前配置。`revision` 用于防止并发编辑互相覆盖。每次写入先 GET，再提交返回的 `revision` 和修改后的完整配置。计数已变化时返回 `409 settings_conflict`，重新读取后再提交。
 
 | GET / PUT 路径 | PUT 请求体 | 生效方式 |
 | --- | --- | --- |
@@ -73,7 +74,7 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 
 ## 采集接口
 
-以下接口均使用管理员 Bearer 令牌，空库需先初始化。
+以下接口均使用管理员会话，空库需先初始化。
 
 | 接口 | 用途 |
 | --- | --- |
@@ -123,9 +124,9 @@ GitHub Topics 为空的活跃仓库会在同一模型预算内按调度补充主
 
 在「运行状态 → 备份与恢复」填写 R2 端点、存储桶、备份前缀和对象读写凭据。备份计划和 R2 设置由 SQLite 保存，默认关闭。启用后默认每天北京时间 03:00 备份，上传成功后及 03:30 清理，保留当天及之前 4 个自然日。后台可调整时间、时区和 1～30 天的保留期。
 
-「立即备份」会更新同一天的云端对象。也可在服务运行时使用相同的管理员令牌和配置文件执行 `go run ./cmd/radar backup`，该命令通过本机 API 等待结果。离线维护、迁移和采集命令应在停止服务后运行。
+「立即备份」会更新同一天的云端对象。也可在服务运行时执行 `go run ./cmd/radar backup -config configs/radar.local.yaml`，该命令使用同一配置文件中的管理员密码登录本机 API 并等待结果。离线维护、迁移和采集命令应在停止服务后运行。
 
-恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后自动 AI 摘要保持暂停，在管理页确认用量记录可能不完整后再启用。迁移到新实例时，登录后在 `/admin/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的环境变量和管理员令牌。
+恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后自动 AI 摘要保持暂停，在管理页确认用量记录可能不完整后再启用。迁移到新实例时，登录后在 `/admin/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的部署配置和环境变量。
 
 使用专用私有存储桶和仅限该桶的 Object Read & Write 令牌。备份包含数据库内的 R2 凭据，请限制数据库目录、暂存文件和 R2 对象的访问权限。R2 请求由 AWS SDK for Go v2 签名，接口与恢复边界见专项方案。[Cloudflare R2 令牌权限](https://developers.cloudflare.com/r2/api/tokens/)、[AWS SDK for Go v2](https://github.com/aws/aws-sdk-go-v2)、[备份专项方案](docs/backup-and-restore.md)
 
@@ -166,7 +167,7 @@ Compose 使用本机随机端口和专用数据卷，重建容器后核对持久
 
 ## Docker
 
-设置 `ADMIN_TOKEN` 后运行 `docker compose -f deploy/compose.yaml up --build`。镜像构建阶段生成 Vite 产物，运行镜像由 Gin 提供 UI 与 API。Compose 将端口发布到宿主机回环地址，并通过 `radar-data` 卷保存数据库。
+将 [容器配置示例](deploy/container.yaml) 复制为 `deploy/radar.local.yaml`，填入网站对外地址和两项登录凭据，再运行 `docker compose -f deploy/compose.yaml up --build`。也可用 `RADAR_CONFIG_FILE` 指定实际配置的绝对路径。Compose 以只读方式挂载该文件，容器进程使用 UID `10001`，在 Linux 上需授予该 UID 读取权限。镜像运行时由 Gin 提供 UI 与 API，默认将端口发布到宿主机回环地址，并通过 `radar-data` 卷保存数据库。
 
 ## 设计文档
 

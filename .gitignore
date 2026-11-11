@@ -28,6 +28,8 @@ go.work.sum
 # env file
 .env
 /s3-r2-test.local.json
+*.local.yaml
+*.local.yml
 
 # 本地 SQLite 数据库及日志文件
 /data/

@@ -19,10 +19,28 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/migrations"
 )
+
+func testAdminConfig(cfg config.Config) config.Config {
+	cfg.Server.SiteURL = "http://example.com"
+	cfg.Auth = config.Auth{AdminPassword: "test-admin-password", SessionSecret: "test-session-signing-secret-at-least-32-bytes"}
+	return cfg
+}
+
+// 业务测试直接签发测试会话，登录协议由独立用例覆盖。
+func testAdminCookie(t *testing.T) *http.Cookie {
+	t.Helper()
+	auth := newAdminAuth(testAdminConfig(config.Config{}))
+	value, err := auth.codec.Encode(consts.AdminSessionCookie, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Cookie{Name: consts.AdminSessionCookie, Value: value}
+}
 
 func collectionRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	t.Helper()
@@ -47,15 +65,15 @@ func collectionRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRouter(db, pool, "admin", slog.New(slog.NewTextHandler(io.Discard, nil)), cfg.WithRuntime(snapshot.Settings), nil), db
+	return NewRouter(db, pool, slog.New(slog.NewTextHandler(io.Discard, nil)), testAdminConfig(cfg.WithRuntime(snapshot.Settings)), nil), db
 }
 
-func request(t *testing.T, router http.Handler, method, path, body, token string, want int) map[string]any {
+func request(t *testing.T, router http.Handler, method, path, body, admin string, want int) map[string]any {
 	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if admin != "" {
+		req.AddCookie(testAdminCookie(t))
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -71,7 +89,7 @@ func request(t *testing.T, router http.Handler, method, path, body, token string
 
 func TestInitializeAndBusinessAuthentication(t *testing.T) {
 	router, _ := collectionRouter(t)
-	// 所有读取和写操作都先验证同一管理员令牌。
+	// 所有读取和写操作都先验证同一管理员会话。
 	for _, path := range []string{"/api/v1/repos", "/api/v1/categories", "/api/v1/trending", "/api/v1/system/limits", "/api/v1/jobs/1"} {
 		request(t, router, "GET", path, "", "", 401)
 		request(t, router, "GET", path, "", "admin", 503)

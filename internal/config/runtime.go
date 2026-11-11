@@ -24,7 +24,7 @@ type Runtime struct {
 func (cfg Config) RuntimeSettings() Runtime {
 	values := Runtime{Server: cfg.Server, Storage: cfg.Storage, GitHub: cfg.GitHub, Scheduler: cfg.Scheduler, AI: cfg.AI,
 		Metrics: cfg.Metrics, Maintenance: cfg.Maintenance, Recommendations: cfg.Recommendations}
-	values.Server.Listen, values.Storage.Path = "", ""
+	values.Server.Listen, values.Server.SiteURL, values.Storage.Path = "", "", ""
 	values.Scheduler.TrendingDailyMinutes, values.Scheduler.TrendingOtherMinutes, values.Scheduler.SearchRoundMinutes = 0, 0, 0
 	values.AI.BaseURLEnv, values.AI.ModelEnv = "", ""
 	return values
@@ -45,7 +45,7 @@ func (cfg Config) SeedRuntime() Runtime {
 
 // WithRuntime 保留启动所需的部署字段，其余由数据库快照提供。
 func (cfg Config) WithRuntime(values Runtime) Config {
-	values.Server.Listen, values.Storage.Path = cfg.Server.Listen, cfg.Storage.Path
+	values.Server.Listen, values.Server.SiteURL, values.Storage.Path = cfg.Server.Listen, cfg.Server.SiteURL, cfg.Storage.Path
 	cfg.Server, cfg.Storage, cfg.GitHub, cfg.Scheduler, cfg.AI = values.Server, values.Storage, values.GitHub, values.Scheduler, values.AI
 	cfg.Metrics, cfg.Maintenance = values.Metrics, values.Maintenance
 	cfg.Recommendations = values.Recommendations

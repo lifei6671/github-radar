@@ -120,9 +120,12 @@ func TestAcceptanceBusiness(t *testing.T) {
 	defer fixture.Close()
 	path := acceptanceConfig(t, t.TempDir())
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	t.Setenv("ADMIN_TOKEN", "")
-	if err := run(t.Context(), []string{"server", "-config", path}, logger); err == nil || !strings.Contains(err.Error(), "ADMIN_TOKEN") {
-		t.Fatal("缺少 ADMIN_TOKEN 应拒绝启动")
+	incomplete := filepath.Join(t.TempDir(), "missing-auth.yaml")
+	if err := os.WriteFile(incomplete, []byte("server:\n  site_url: 'http://127.0.0.1'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(t.Context(), []string{"server", "-config", incomplete}, logger); err == nil || !strings.Contains(err.Error(), "auth.admin_password") {
+		t.Fatal("缺少管理员密码应拒绝启动")
 	}
 	for range 2 {
 		if err := run(t.Context(), []string{"migrate", "-config", path}, logger); err != nil {
@@ -137,6 +140,9 @@ func TestAcceptanceBusiness(t *testing.T) {
 	acceptanceJSON[map[string]string](t, anonymous, http.MethodGet, "/api/v1/setup/status", nil, 401)
 	acceptanceJSON[map[string]string](t, initial, http.MethodGet, "/api/v1/repos", nil, 503)
 	acceptanceJSON[map[string]bool](t, initial, http.MethodPost, "/api/v1/setup/initialize", nil, 200)
+	if err := runBackup(t.Context(), strings.TrimPrefix(initial.base, "http://"), acceptanceAdmin, logger); err == nil || !strings.Contains(err.Error(), "r2_not_configured") {
+		t.Fatalf("备份命令应完成密码登录并返回实际的 R2 配置状态: %v", err)
+	}
 	const rulePath = "/api/v1/system/discovery-rules"
 	rules := acceptanceJSON[acceptanceRules](t, initial, http.MethodGet, rulePath, nil, 200)
 	rules.Items = []settings.Rule{

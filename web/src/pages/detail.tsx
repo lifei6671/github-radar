@@ -21,7 +21,7 @@ const repoNotFound = new ApiError(404, { code: 'not_found' })
 export function Detail() {
   const { owner, name } = useParams()
   const admin = useAdminArea()
-  const { token } = useSession()
+  const { authenticated } = useSession()
   const location = useLocation()
   const from: unknown = location.state?.from
   const back = typeof from === 'string' && from.startsWith('/') && !from.startsWith('//') ? from : admin ? '/admin/repos' : '/repos'
@@ -97,7 +97,7 @@ export function Detail() {
   return <div className="repo-detail">
     <nav className="detail-breadcrumbs" aria-label="当前位置">
       <Link to={back}><ArrowLeft size={14} />返回列表</Link><span aria-current="page">仓库详情</span>
-      {!admin && token && <Link className="detail-text-link" to={repoPath(repo.fullName, true) + location.search + location.hash}
+      {!admin && authenticated && <Link className="detail-text-link" to={repoPath(repo.fullName, true) + location.search + location.hash}
         state={{ repoId: repo.id }}>管理仓库</Link>}
     </nav>
     <header className="article-head">

@@ -1,3 +1,17 @@
-# 容器内监听所有网卡，由 Compose 控制宿主机发布地址。
+# 容器部署示例。复制为 deploy/radar.local.yaml 并填写凭据后由 Compose 只读挂载。
 server:
+  # 容器内监听所有网卡。Compose 默认只把端口发布到宿主机回环地址。
   listen: "0.0.0.0:8080"
+  # 浏览器访问的源地址。对外通过 HTTPS 反代时填写实际的 https://域名。
+  site_url: "http://127.0.0.1:8080"
+
+storage:
+  # 使用 Compose 的持久卷，容器重建后仍保留数据库。
+  path: "/app/data/github-radar.db"
+
+auth:
+  # 后台及首次安装密码，单行至少 12 个字符，最多 512 字节。请填写独立的随机密码。
+  admin_password: ""
+  # Cookie 签名密钥，至少 32 字节。建议用 openssl rand -hex 32 独立生成。
+  # 修改任一凭据并重启服务后，管理员需要重新登录。
+  session_secret: ""

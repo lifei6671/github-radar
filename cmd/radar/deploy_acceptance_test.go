@@ -30,10 +30,13 @@ func TestAcceptanceCompose(t *testing.T) {
 	project := "radar-acceptance-" + strings.ToLower(rand.Text())
 	name := project + "-radar"
 	compose := []string{"compose", "--project-name", project, "--file", "deploy/compose.yaml"}
+	configPath := filepath.Join(t.TempDir(), "container.yaml")
+	// 此文件仅含验收凭据，容器内非 root 用户须能读取挂载文件。
+	writeAcceptanceConfig(t, configPath, "0.0.0.0:8080", "/app/data/github-radar.db", 0o644)
 	docker := func(ctx context.Context, args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "docker", args...)
 		cmd.Dir = filepath.Join("..", "..")
-		cmd.Env = append(os.Environ(), "ADMIN_TOKEN="+acceptanceAdmin, "GITHUB_TOKEN=", "AI_API_KEY=", "AI_BASE_URL=", "AI_MODEL=")
+		cmd.Env = append(os.Environ(), "RADAR_CONFIG_FILE="+configPath, "GITHUB_TOKEN=", "AI_API_KEY=", "AI_BASE_URL=", "AI_MODEL=")
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
 	}
@@ -75,11 +78,12 @@ func TestAcceptanceCompose(t *testing.T) {
 		if err != nil || host != "127.0.0.1" {
 			t.Fatal("Compose 验收服务未绑定到本机回环地址")
 		}
-		s := acceptanceServer{base: "http://" + binding, admin: acceptanceAdmin}
+		s := acceptanceServer{base: "http://" + binding}
 		waitAcceptance(t, 20*time.Second, "容器 SQLite 就绪", func(ctx context.Context) (bool, error) {
 			code, _, err := s.request(ctx, http.MethodGet, "/readyz", nil)
 			return err == nil && code == 200, nil
 		})
+		s.login(t)
 		return id, s
 	}
 
