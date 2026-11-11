@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -113,7 +114,7 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 				return
 			case now := <-t.C:
 				if err := checked(fence(e.Queue.DB.WithContext(taskCtx), *job, now.UnixMilli()).
-					Update("lease_until", now.Add(time.Duration(e.Queue.LeaseSeconds)*time.Second).UnixMilli())); err != nil {
+					Update(storage.JobColumns.LeaseUntil, now.Add(time.Duration(e.Queue.LeaseSeconds)*time.Second).UnixMilli())); err != nil {
 					cancel()
 					return
 				}
@@ -136,14 +137,14 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	q := e.Queue
 	var p payload
 	if json.Unmarshal([]byte(job.PayloadJSON), &p) != nil {
-		return e.fail(ctx, job, "summary_invalid_job", false, 0, false)
+		return e.fail(ctx, job, consts.CodeSummaryInvalidJob, false, 0, false)
 	}
 	var repo storage.Repository
-	if err := q.DB.WithContext(ctx).Take(&repo, "repo_id=?", *job.RepoID).Error; err != nil {
+	if err := q.DB.WithContext(ctx).Take(&repo, storage.RepositoryColumns.RepoID+"=?", *job.RepoID).Error; err != nil {
 		return err
 	}
-	if repo.Blocked || repo.Disabled || !repo.NameIsCurrent || repo.State == "unavailable" {
-		return e.fail(ctx, job, "summary_repo_unavailable", false, 0, false)
+	if repo.Blocked || repo.Disabled || !repo.NameIsCurrent || repo.State == consts.StatusUnavailable {
+		return e.fail(ctx, job, consts.CodeSummaryRepoUnavailable, false, 0, false)
 	}
 	if job.Type == TranslationJob {
 		return e.runTranslation(ctx, job, repo, p.Manual)
@@ -152,15 +153,15 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	var check storage.SummaryCheck
 	var oldTopics storage.RepoAITopics
 	db := q.DB.WithContext(ctx)
-	if err := db.Find(&old, "repo_id=?", repo.RepoID).Error; err != nil {
+	if err := db.Find(&old, storage.AISummaryColumns.RepoID+"=?", repo.RepoID).Error; err != nil {
 		return err
 	}
-	if err := db.Find(&check, "repo_id=?", repo.RepoID).Error; err != nil {
+	if err := db.Find(&check, storage.SummaryCheckColumns.RepoID+"=?", repo.RepoID).Error; err != nil {
 		return err
 	}
 	missingTopics := len(repo.GitHubTopics()) == 0 && (p.Manual || q.AI.Summary.AutoDailyCalls > 0)
 	if missingTopics {
-		if err := db.Find(&oldTopics, "repo_id=?", repo.RepoID).Error; err != nil {
+		if err := db.Find(&oldTopics, storage.RepoAITopicsColumns.RepoID+"=?", repo.RepoID).Error; err != nil {
 			return err
 		}
 	}
@@ -168,8 +169,9 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	if err != nil {
 		return err
 	}
-	wantsSummary := func(language string) bool { return p.Manual || (eligible && language != "zh") }
-	cachedSummary := old.SummaryStatus == "ready" && q.matches(old, check.SourceFingerprint)
+	wantsSummary := func(language string) bool { return p.Manual || (eligible && language != consts.LanguageChinese) }
+	// NULL 表示旧摘要尚未尝试生成推荐理由，空字符串表示没有可用理由。
+	cachedSummary := old.SummaryStatus == consts.StatusReady && old.RecommendationReason != nil && q.matches(old, check.SourceFingerprint)
 	topicModelMatches := q.matchesTopicModel(oldTopics)
 	cachedTopics := topicModelMatches &&
 		strings.HasPrefix(oldTopics.SourceFingerprint, check.SourceFingerprint+"|")
@@ -192,19 +194,19 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	next := q.nextCheck(repo, now)
 	if unchanged {
 		check.LastCheckedAt, check.NextCheckAt, check.LastErrorCode = now.UnixMilli(), next, nil
-		return q.settle(ctx, job, outcome{status: "succeeded", attempts: job.Attempts, apply: func(tx *gorm.DB) error {
+		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts, apply: func(tx *gorm.DB) error {
 			return saveCheck(tx, check)
 		}})
 	}
 	check = sourceCheck(repo.RepoID, input, now, next)
 	summaryMatches := q.matches(old, input.fingerprint)
-	makeSummary := wantsSummary(input.language) && (p.Force || !summaryMatches)
+	makeSummary := wantsSummary(input.language) && (p.Force || !summaryMatches || old.RecommendationReason == nil)
 	fingerprint := topicsFingerprint(input.fingerprint, input.description)
 	makeTopics := missingTopics && !input.hasGitHubTopics && (p.Force || !topicModelMatches || oldTopics.SourceFingerprint != fingerprint)
 	if (!makeSummary && !makeTopics) || (input.body == "" && input.description == "") {
-		return q.settle(ctx, job, outcome{status: "succeeded", attempts: job.Attempts, apply: func(tx *gorm.DB) error {
-			if summaryMatches && old.SummaryStatus != "ready" {
-				if err := tx.Model(&old).Update("summary_status", "ready").Error; err != nil {
+		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts, apply: func(tx *gorm.DB) error {
+			if summaryMatches && old.SummaryStatus != consts.StatusReady {
+				if err := tx.Model(&old).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusReady).Error; err != nil {
 					return err
 				}
 			}
@@ -217,23 +219,23 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 		return e.sourceFailed(ctx, job, err)
 	}
 	if !strings.EqualFold(confirmed.GetFullName(), input.fullName) {
-		return e.fail(ctx, job, "summary_repo_address_changed", true, 0, false)
+		return e.fail(ctx, job, consts.CodeSummaryRepoAddressChanged, true, 0, false)
 	}
 	makeTopics = makeTopics && len(confirmed.GetTopics()) == 0
 	if !makeSummary && !makeTopics {
-		return q.settle(ctx, job, outcome{status: "succeeded", attempts: job.Attempts, apply: func(tx *gorm.DB) error {
+		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts, apply: func(tx *gorm.DB) error {
 			return saveObserved(tx, old, check, fingerprint)
 		}})
 	}
 	prompt, sent := input.prompt(q.AI.Summary.InputTokens, makeSummary, makeTopics)
 	if sent.body == "" && sent.description == "" {
-		return e.fail(ctx, job, "summary_input_budget_too_small", false, 0, false)
+		return e.fail(ctx, job, consts.CodeSummaryInputBudgetTooSmall, false, 0, false)
 	}
 	reservedAt := time.Now()
 	call, err := q.reserve(ctx, job, p.Manual, reservedAt)
 	if errors.Is(err, errBudget) {
 		nextDay := reservedAt.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour).UnixMilli()
-		return q.settle(ctx, job, outcome{status: "failed", code: "ai_budget_exhausted", next: nextDay, attempts: job.Attempts - 1, apply: func(tx *gorm.DB) error {
+		return q.settle(ctx, job, outcome{status: consts.StatusFailed, code: consts.CodeAIBudgetExhausted, next: nextDay, attempts: job.Attempts - 1, apply: func(tx *gorm.DB) error {
 			return saveObserved(tx, old, check, fingerprint)
 		}})
 	}
@@ -260,7 +262,7 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 		valid = valid && (makeSummary || topicsValid)
 	}
 	if result.Code == "" && !valid {
-		result.Code, result.Retry = "invalid_output", true
+		result.Code, result.Retry = consts.CodeInvalidOutput, true
 	}
 	if result.Code != "" {
 		return e.finishFailure(ctx, job, call, result, duration, old, check, fingerprint)
@@ -279,30 +281,30 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	topicsChanged := observedFingerprint != fingerprint
 	if changed {
 		check = sourceCheck(repo.RepoID, latest, time.Now(), time.Now().UnixMilli())
-		record.SummaryStatus = "stale"
+		record.SummaryStatus = consts.StatusStale
 	}
 	if makeTopics && topicsChanged {
 		check.NextCheckAt = completed.UnixMilli()
 	}
 	if verifyErr != nil {
 		check.NextCheckAt = completed.Add(time.Minute).UnixMilli()
-		record.SummaryStatus = "stale"
+		record.SummaryStatus = consts.StatusStale
 	}
 	if errors.Is(verifyErr, ErrRepoUnavailable) {
 		// 已不可见的仓库不保存本轮新摘要，调用账目仍按实际结果提交。
-		return e.settleAfterCall(ctx, job, outcome{status: "dead", code: "summary_repo_unavailable",
+		return e.settleAfterCall(ctx, job, outcome{status: consts.StatusDead, code: consts.CodeSummaryRepoUnavailable,
 			attempts: job.Attempts, call: &call, model: result, duration: duration,
 			apply: withdrawRepository(verifyErr, repo.RepoID)})
 	}
-	if makeSummary && record.SummaryStatus == "stale" && old.RepoID != 0 && verifyErr == nil {
+	if makeSummary && record.SummaryStatus == consts.StatusStale && old.RepoID != 0 && verifyErr == nil {
 		record = old
-		record.SummaryStatus = "stale"
+		record.SummaryStatus = consts.StatusStale
 	}
-	status, code := "succeeded", ""
+	status, code := consts.StatusSucceeded, ""
 	if (changed || (!makeSummary && topicsChanged)) && p.Manual {
-		status, code = "failed", "summary_source_changed"
+		status, code = consts.StatusFailed, consts.CodeSummarySourceChanged
 		if job.Attempts >= job.MaxAttempts {
-			status = "dead"
+			status = consts.StatusDead
 		}
 	}
 	return e.settleAfterCall(ctx, job, outcome{status: status, code: code, attempts: job.Attempts, call: &call, model: result, duration: duration,
@@ -314,8 +316,8 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 				if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&record).Error; err != nil {
 					return err
 				}
-			} else if summaryMatches && !changed && verifyErr == nil && old.SummaryStatus != "ready" {
-				if err := tx.Model(&old).Update("summary_status", "ready").Error; err != nil {
+			} else if summaryMatches && !changed && verifyErr == nil && old.SummaryStatus != consts.StatusReady {
+				if err := tx.Model(&old).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusReady).Error; err != nil {
 					return err
 				}
 			}
@@ -342,12 +344,12 @@ func saveObserved(tx *gorm.DB, old storage.AISummary, check storage.SummaryCheck
 		return err
 	}
 	// 已确认来源变化时停止使用旧 AI Topics，失败或额度用尽时也生效。
-	if err := tx.Where("repo_id=? AND source_fingerprint<>?", check.RepoID, topicsFingerprint).
+	if err := tx.Where(storage.RepoAITopicsColumns.RepoID+"=? AND "+storage.RepoAITopicsColumns.SourceFingerprint+"<>?", check.RepoID, topicsFingerprint).
 		Delete(&storage.RepoAITopics{}).Error; err != nil {
 		return err
 	}
 	if old.RepoID != 0 && old.SourceFingerprint != check.SourceFingerprint {
-		return tx.Model(&old).Update("summary_status", "stale").Error
+		return tx.Model(&old).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusStale).Error
 	}
 	return nil
 }
@@ -382,7 +384,7 @@ func (e *Engine) publicRepo(ctx context.Context, id int64, p gh.Policy) (*sdk.Re
 
 func (e *Engine) checkRepoUnblocked(ctx context.Context, id int64) error {
 	var count int64
-	if err := e.Queue.DB.WithContext(ctx).Model(&storage.Repository{}).Where("repo_id=? AND blocked=1", id).Count(&count).Error; err != nil {
+	if err := e.Queue.DB.WithContext(ctx).Model(&storage.Repository{}).Where(storage.RepositoryColumns.RepoID+"=? AND "+storage.RepositoryColumns.Blocked+"=1", id).Count(&count).Error; err != nil {
 		return err
 	}
 	if count > 0 {
@@ -418,14 +420,14 @@ func (e *Engine) readSource(ctx context.Context, id int64, etag string, p gh.Pol
 			return source{}, false, err
 		}
 		if readme.NotModified {
-			return source{}, false, &gh.Failure{Code: "github_unexpected_readme_304", Status: 304}
+			return source{}, false, &gh.Failure{Code: consts.CodeGitHubUnexpectedReadme304, Status: 304}
 		}
 	}
 	if readme.Missing {
 		s.fingerprint, s.quality = descriptionKey(s.description), insufficient
 	} else {
 		s.sha, s.etag, s.url = readme.SHA, readme.ETag, readme.URL
-		s.fingerprint = "readme:" + s.sha
+		s.fingerprint = consts.ReadmeFingerprintPrefix + s.sha
 		s.body = prose(readme.Body)
 		if readme.Truncated {
 			s.quality = incomplete

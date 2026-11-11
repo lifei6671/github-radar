@@ -1,26 +1,41 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { arrayMove } from '@dnd-kit/sortable'
 import { ArrowLeft, Pencil, Plus, Trash2, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError, errorText } from '../api/client'
-import type { CategorySetting, DiscoveryTab, DiscoveryTabSettings, ListSettings, RuleSetting, RuntimeSettings, SettingFields, SettingValue } from '../api/types'
+import type { CategorySetting, DiscoverySelection, DiscoveryTab, DiscoveryTabSettings, ListSettings, ProjectThemeGroup, ProjectThemeSetting, RuleSetting, RuntimeSettings, SettingFields, SettingValue } from '../api/types'
 import { AdminMetrics, AdminPanel } from '../components/admin'
+import { ThemeIconPicker } from '../components/theme-icon-picker'
 import { SortableSettings, SortableSettingsRow } from '../components/sortable-settings'
 import { ActionButton, Badge, Dialog, Notice, PageError, Skeleton, Spinner } from '../components/ui'
 import { number } from '../lib/format'
+import { runtimeHelp } from './runtime-help'
 
 type Snapshot = { revision: number }
-const configScopes = { '/system/settings': 'runtime', '/system/categories': 'categories', '/system/discovery-rules': 'rules', '/system/discovery-tabs': 'discovery-tabs' } as const
+const configScopes = {
+  '/system/settings': 'runtime',
+  '/system/categories': 'categories',
+  '/system/discovery-rules': 'rules',
+  '/system/discovery-tabs': 'discovery-tabs',
+  '/system/project-themes': 'project-themes',
+  '/system/project-theme-groups': 'project-theme-groups',
+} as const
 type ConfigPath = keyof typeof configScopes
 
 function useConfig<T extends Snapshot>(path: ConfigPath) {
   return useQuery({ queryKey: ['settings', configScopes[path]], queryFn: ({ signal }) => api<T>(path, { signal }), staleTime: 0 })
 }
 
-function refreshSettings(queryClient: ReturnType<typeof useQueryClient>) {
+function refreshSettings(queryClient: ReturnType<typeof useQueryClient>, path: ConfigPath) {
+  if (path === '/system/project-themes' || path === '/system/project-theme-groups') {
+    // 编辑或删除专题后，重新读取公开目录和受该专题限制的项目列表。
+    void queryClient.resetQueries({ queryKey: ['project-themes'] })
+    void queryClient.resetQueries({ queryKey: ['repos'], predicate: ({ queryKey: [, source] }) =>
+      typeof source === 'string' && /(?:^|[?&])theme=/.test(source) })
+  }
   for (const key of ['settings', 'categories', 'discovery-tabs', 'repos', 'trending']) {
     void queryClient.invalidateQueries({ queryKey: [key] })
   }
@@ -48,7 +63,12 @@ function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields,
       queryClient.setQueryData(queryKey, value)
       setDraft(null)
       setSaved(true)
-      refreshSettings(queryClient)
+      if (path === '/system/discovery-tabs') {
+        // 保存后清掉旧精选，返回前台等待新规则的查询结果。
+        void queryClient.resetQueries({ queryKey: ['repos'], predicate: ({ queryKey: [, source] }) =>
+          source === 'discover-hot' || (typeof source === 'string' && source.startsWith('/discovery?')) })
+      }
+      refreshSettings(queryClient, path)
     },
     onError: (error) => {
       if (error instanceof ApiError && error.code === 'settings_conflict') void query.refetch()
@@ -130,6 +150,13 @@ const settingsNames: Record<string, string> = {
   busyTimeoutMs: '写锁等待（毫秒）', maxOpenConns: '最大连接数', wal: '启用 WAL',
   day: '日窗口', week: '周窗口', month: '月窗口', exact: '精确容差（分钟）', max: '最大容差（分钟）',
   weights: '评分权重', hotGrowth: 'S 级增长门槛', activeGrowth: 'A 级增长门槛',
+  coreSoftBudgetPerHour: 'Core 每小时请求上限', repoSoftBudgetPerHour: '采样每小时请求上限',
+  coreReserveRemaining: 'Core 预留请求数', searchSoftBudgetPerMinute: 'Search 每分钟请求上限',
+  hotDemotionHours: 'S 级降档等待（小时）', activeDemotionHours: 'A 级降档等待（小时）',
+  normalDemotionHours: 'B 级降档等待（小时）', topGrowthRepos: 'S 级增长榜入选名次',
+  relativeStarFloor: '相对增长的起始 Star 下限', velocity24Cap: '24h 增长评分封顶值',
+  velocity7Cap: '7 天增长评分封顶值', accelerationCap: '加速度评分封顶值',
+  minPersistenceDays: '持续增长的最少观测天数',
 }
 function settingName(key: string) { return settingsNames[key] ?? key }
 
@@ -140,21 +167,34 @@ function NumberInput({ label, value, onChange }: { label: string; value: number;
   }} /></label>
 }
 
-function Setting({ name, value, update }: { name: string; value: SettingValue; update: (value: SettingValue) => void }) {
-  const label = settingName(name)
-  if (typeof value === 'boolean') return <label className="check-field"><input type="checkbox" checked={value} onChange={(e) => update(e.target.checked)} />{label}</label>
-  if (typeof value === 'number') return <NumberInput label={label} value={value} onChange={update} />
-  if (typeof value === 'string' || value === null) return <label className="field">{label}<input value={value ?? ''} onChange={(e) => update(e.target.value)} /></label>
+function Setting({ name, path, value, update }: { name: string; path: string; value: SettingValue; update: (value: SettingValue) => void }) {
+  const id = useId()
+  const label = path === 'metrics.hour' ? '小时窗口' : settingName(name)
+  const help = runtimeHelp[path]
+  if (typeof value !== 'object' || value === null) {
+    const description = help ? id : undefined
+    const field = typeof value === 'boolean' ?
+      <label className="check-field"><input type="checkbox" checked={value} aria-describedby={description}
+        onChange={(e) => update(e.target.checked)} />{label}</label> :
+      <label className="field">{label}{typeof value === 'number' ?
+        <input type="number" step="any" value={value} aria-describedby={description} onChange={(event) => {
+          const next = event.target.valueAsNumber
+          if (Number.isFinite(next)) update(next)
+        }} /> :
+        <input value={value ?? ''} aria-describedby={description} onChange={(e) => update(e.target.value)} />}
+      </label>
+    return <div className="runtime-setting">{field}{help && <p className="runtime-help" id={id}>{help}</p>}</div>
+  }
   if (Array.isArray(value)) return <fieldset className="nested-fields"><legend>{label}</legend><div className="settings-fields">
     {value.map((item, index) => <Setting key={index} name={name === 'weights' ? ['24h 增长', '7d 增长', '加速度', '持续性', 'Trending'][index] ?? String(index + 1) : String(index + 1)}
-      value={item} update={(next) => update(value.map((old, i) => i === index ? next : old))} />)}
+      path={path + '.' + index} value={item} update={(next) => update(value.map((old, i) => i === index ? next : old))} />)}
   </div></fieldset>
-  return <fieldset className="nested-fields"><legend>{label}</legend><Fields value={value} update={update} /></fieldset>
+  return <fieldset className="nested-fields"><legend>{label}</legend><Fields path={path} value={value} update={update} /></fieldset>
 }
 
-function Fields({ value, update }: { value: SettingFields; update: (value: SettingFields) => void }) {
+function Fields({ path, value, update }: { path: string; value: SettingFields; update: (value: SettingFields) => void }) {
   return <div className="settings-fields">{Object.entries(value).map(([key, item]) =>
-    <Setting key={key} name={key} value={item} update={(next) => update({ ...value, [key]: next })} />)}</div>
+    <Setting key={key} name={key} path={path + '.' + key} value={item} update={(next) => update({ ...value, [key]: next })} />)}</div>
 }
 
 export function RuntimeEditor() {
@@ -234,7 +274,7 @@ export function RuntimeEditor() {
               <h2 id={'runtime-title-' + key}>{settingName(key)}</h2>
               {key === 'github' && <p className="minor muted">将令牌设置到服务进程的 <code>{String(fields?.tokenEnv || 'GITHUB_TOKEN')}</code> 环境变量，重启服务后启用采集。</p>}
               {key === 'ai' && <p className="minor muted">仅支持 OpenAI 兼容供应商，需支持 Chat Completions 的 JSON 模式和 <code>max_completion_tokens</code>。API Key 通过服务进程的 <code>{String(fields?.apiKeyEnv || 'AI_API_KEY')}</code> 环境变量提供。</p>}
-              {fields ? <Fields value={fields} update={setValue} /> : <Setting name={key} value={value} update={setValue} />}
+              {fields ? <Fields path={key} value={fields} update={setValue} /> : <Setting name={key} path={key} value={value} update={setValue} />}
             </div>
           </section>
         })}
@@ -272,7 +312,7 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
     onSuccess: (value) => {
       queryClient.setQueryData(['settings', configScopes[directory.path]], value)
       setDeleting(null)
-      refreshSettings(queryClient)
+      refreshSettings(queryClient, directory.path)
     },
     onError: (error) => {
       if (error instanceof ApiError && error.code === 'settings_conflict') void query.refetch()
@@ -488,18 +528,95 @@ export function CategoryEditor() {
   return <SettingsDirectory directory={categories} />
 }
 
+function projectThemes(groups: ProjectThemeGroup[]): Directory<ProjectThemeSetting> {
+  const names = new Map(groups.map(({ slug, name }) => [slug, name]))
+  return {
+    path: '/system/project-themes', title: '专题管理', noun: '专题',
+    identity: (item) => item.slug, name: (item) => item.name, caption: (item) => item.slug,
+    search: (item) => [item.name, item.slug, item.description, names.get(item.groupSlug), ...item.anyTopics].join(' '),
+    columns: ['方向', '简介', '匹配 Topics'],
+    cells: (item) => [names.get(item.groupSlug), item.description, item.anyTopics.join('、')],
+    metrics: (items) => [
+      { label: '专题', value: number(items.length) },
+      { label: '匹配 Topics', value: number(new Set(items.flatMap((item) => item.anyTopics)).size) },
+    ],
+    initial: { slug: '', name: '', description: '', anyTopics: [], icon: '', iconColor: '', groupSlug: groups[0]?.slug ?? '' },
+    normalize: (item) => ({
+      ...item, slug: item.slug.trim(), name: item.name.trim(), description: item.description.trim(),
+      anyTopics: item.anyTopics.map((topic) => topic.trim()).filter(Boolean),
+    }),
+    fields: (item, edit) => <>
+      <label className="field">专题名称<input required value={item.name} onChange={(e) => edit({ ...item, name: e.target.value })} /></label>
+      <label className="field">专题标识<input required pattern="[a-z0-9][a-z0-9+_\x2d]*" value={item.slug} onChange={(e) => edit({ ...item, slug: e.target.value })} /></label>
+      <label className="field admin-field-wide">所属方向
+        <select required value={item.groupSlug} onChange={(e) => edit({ ...item, groupSlug: e.target.value })}>
+          {groups.map(({ slug, name }) => <option key={slug} value={slug}>{name}</option>)}
+        </select>
+      </label>
+      <ThemeIconPicker icon={item.icon} color={item.iconColor} onChange={(icon, iconColor) => edit({ ...item, icon, iconColor })} />
+      <label className="field admin-field-wide">简介<textarea required rows={3} value={item.description}
+        onChange={(e) => edit({ ...item, description: e.target.value })} /></label>
+      <label className="field admin-field-wide">匹配 Topics<input required placeholder="用逗号分隔" value={item.anyTopics.join(',')}
+        onChange={(e) => edit({ ...item, anyTopics: e.target.value.split(/[,，]/) })} /></label>
+    </>,
+    status: (item) => <Link className="admin-link" to={'/themes/' + encodeURIComponent(item.slug)}>查看专题</Link>,
+  }
+}
+
+const projectThemeGroups: Directory<ProjectThemeGroup> = {
+  path: '/system/project-theme-groups', title: '主题方向', noun: '方向',
+  identity: (item) => item.slug, name: (item) => item.name, caption: (item) => item.slug,
+  search: (item) => [item.name, item.slug, item.description].join(' '),
+  columns: ['简介'], cells: (item) => [item.description],
+  metrics: (items) => [{ label: '方向', value: number(items.length) }],
+  initial: { slug: '', name: '', description: '' },
+  normalize: (item) => ({ slug: item.slug.trim(), name: item.name.trim(), description: item.description.trim() }),
+  fields: (item, edit) => <>
+    <label className="field">方向名称<input required value={item.name} onChange={(e) => edit({ ...item, name: e.target.value })} /></label>
+    <label className="field">方向标识<input required pattern="[a-z0-9][a-z0-9+_\x2d]*" value={item.slug} onChange={(e) => edit({ ...item, slug: e.target.value })} /></label>
+    <label className="field admin-field-wide">方向简介<textarea required rows={3} value={item.description}
+      onChange={(e) => edit({ ...item, description: e.target.value })} /></label>
+  </>,
+  status: () => null,
+}
+
+export function ProjectThemeEditor() {
+  const [params] = useSearchParams()
+  const managingGroups = params.get('section') === 'groups'
+  const groups = useConfig<ListSettings<ProjectThemeGroup>>('/system/project-theme-groups')
+  const list = '/admin/runs?tab=project-themes'
+  return <div className="admin-stack">
+    <nav className="pills" aria-label="专题维护">
+      <Link className="pill-link" aria-current={!managingGroups ? 'page' : undefined} to={list}>专题</Link>
+      <Link className="pill-link" aria-current={managingGroups ? 'page' : undefined} to={list + '&section=groups'}>管理方向</Link>
+    </nav>
+    {managingGroups ? <SettingsDirectory key="groups" directory={projectThemeGroups} /> :
+      groups.data ? groups.data.items.length > 0 ? <SettingsDirectory key="themes" directory={projectThemes(groups.data.items)} /> :
+        <Notice>请先创建一个方向，再添加专题。</Notice> :
+        groups.isPending ? <Skeleton /> : <PageError error={groups.error} retry={() => { void groups.refetch() }} />}
+  </div>
+}
+
 export function DiscoveryTabEditor() {
   const path = '/system/discovery-tabs'
   const query = useConfig<DiscoveryTabSettings>(path)
   return <ConfigEditor<DiscoveryTabSettings, DiscoveryTabDraft> path={path} query={query}
-    apply={(server, draft) => ({ ...server, items: draft.items })}
-    payload={({ revision, items }, draft) => ({ revision, items, newCategories: draft?.newCategories })}
+    apply={(server, draft) => ({ ...server, items: draft.items, selection: draft.selection })}
+    payload={({ revision, items, selection }, draft) => ({ revision, items, selection, newCategories: draft?.newCategories })}
     fields={(server, draft, edit) => <DiscoveryTabFields options={server.options}
-      draft={draft ?? { items: server.items, newCategories: [] }} edit={edit} />} />
+      draft={draft ?? { items: server.items, selection: server.selection, newCategories: [] }} edit={edit} />} />
 }
 
-type DiscoveryTabDraft = { items: DiscoveryTab[]; newCategories: CategorySetting[] }
+type DiscoveryTabDraft = { items: DiscoveryTab[]; newCategories: CategorySetting[]; selection: DiscoverySelection }
 type DiscoveryTabOptions = DiscoveryTabSettings['options']
+
+const discoverySelectionFields = [
+  ['recentDays', '首次发现窗口（天）'],
+  ['recentSampleHours', '新项目采样窗口（小时）'],
+  ['growthSampleHours', '增长采样窗口（小时）'],
+  ['trendingHours', '全站日榜有效期（小时）'],
+  ['trendingTop', '全站日榜入选名次'],
+] as const
 
 function DiscoveryTabFields({ draft, options, edit }: { draft: DiscoveryTabDraft; options: DiscoveryTabOptions; edit: (value: DiscoveryTabDraft) => void }) {
   const [adding, setAdding] = useState(false)
@@ -528,6 +645,7 @@ function DiscoveryTabFields({ draft, options, edit }: { draft: DiscoveryTabDraft
             items: items.map((tab) => tab.slug === item.slug ? { ...tab, label } : tab) })} />
           <ActionButton className="icon-button" aria-label={'移除 ' + entries[index].label} title="移除" icon={<X size={16} />}
             onClick={() => edit({
+              ...draft,
               items: items.filter(({ slug }) => slug !== item.slug), newCategories: newCategories.filter(({ slug }) => slug !== item.slug),
             })} />
         </>}</SortableSettingsRow>
@@ -535,9 +653,19 @@ function DiscoveryTabFields({ draft, options, edit }: { draft: DiscoveryTabDraft
     </ol></SortableSettings>}
     {adding && createPortal(<AddDiscoveryTab available={available} options={allOptions} onClose={() => setAdding(false)}
       onAdd={(slug, category) => {
-        edit({ items: [...items, { slug, label: '' }], newCategories: category ? [...newCategories, category] : newCategories })
+        edit({ ...draft, items: [...items, { slug, label: '' }], newCategories: category ? [...newCategories, category] : newCategories })
         setAdding(false)
       }} />, document.body)}
+    <section className="panel runtime-section-card">
+      <h3>精选规则</h3>
+      <div className="admin-fields">
+        {discoverySelectionFields.map(([key, label]) => <label className="field" key={key}>{label}
+          <input type="number" min="1" step="1" required
+            value={Number.isFinite(draft.selection[key]) ? draft.selection[key] : ''}
+            onChange={(event) => edit({ ...draft, selection: { ...draft.selection, [key]: event.target.valueAsNumber } })} />
+        </label>)}
+      </div>
+    </section>
   </>
 }
 

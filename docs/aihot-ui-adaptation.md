@@ -133,10 +133,10 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 ### 3.1 统一导航
 
 **桌面侧栏**（保留 AIHOT 样式和层级）：
-- 首页 /：展示当前热点和项目时间线，顶部标签可在后台配置，右侧提供搜索。
+- 首页 /：展示当前热点和近期精选时间线，顶部标签和入选门槛可在后台配置，右侧提供搜索。
 - 热点榜 /trending：24h/7d 增长排名与官方 Trending 上榜标签。
 - 全部项目 /repos：已监控仓库按发现时间展示，顶部分类标签从数据库读取，右侧提供搜索。
-- 主题 /categories：从后台维护的 topics 映射获取分类，默认含 AI 智能体、AI 编程、MCP、AI 多媒体、开发工具及其他。
+- 主题 /themes：浏览后台维护的专题目录。顶部分类筛选继续使用分类映射。
 - 收藏 /starred：展示当前浏览器收藏的仓库，按收藏时间倒序排列，支持取消收藏。
 - 选题池 /admin/topics：按入池日期展示选题版面，往期索引、状态筛选和反馈使用已保存的仓库数据。
 - 重点监控 /admin/watchlist：按加入时间展示重点监控仓库，顶部提供搜索和结果数量。
@@ -154,7 +154,7 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 | 热点榜 | /trending | 榜首跨两行、右侧叠放第二第三名，后续排名按同一列宽展示 | 自算热度/净增、累计 Star 和原始 Trending 名次 |
 | 全部动态 | /repos | 分类标签、搜索、日期流和右侧书签 | 分类映射、repositories 分页与浏览器收藏 |
 | 文章/事件详情 | /repos/:owner/:name | 独立公开页面、面包屑、粘性章节导航、摘要与趋势正文、分卡信息栏 | repo + metrics + ai_summary |
-| 主题列表/主题页 | /categories、/categories/:slug | 宽屏四列卡片、窄桌面三列、手机列表、分类标签与日期流 | 分类统计、最新仓库预览与项目收藏 |
+| 专题目录/详情 | /themes、/themes/:slug | 宽屏四列卡片、窄桌面三列、手机列表、精选时间线 | 专题简介、最近发现的仓库、近 30 天新增数及全部项目入口 |
 | 收藏 | /starred | 浏览器存储提示、桌面阅读卡片、手机分隔线列表 | 浏览器 localStorage |
 | 重点监控 | /admin/watchlist | 顶部搜索、仓库数量，与收藏共用阅读卡片和手机分隔线布局 | starred_by_user、followed_at 和仓库摘要 |
 | 日报/精选 | /admin/topics | 往期索引、日期报头、头条、状态分版、反馈与导出 | topic_candidates 的入池日期与已保存内容 |
@@ -186,7 +186,7 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 
 ### 3.5 热点榜 HotRanking
 
-首页的「全部」标签有有效热点时展示热点前五名、热度分、小趋势图和最近成功计算时间。各标签直接展示项目时间线，空列表复用收藏空态。完整榜单的榜首使用大卡和 Star 趋势，第二、第三名在右侧叠放。后续排名对齐名次、仓库信息、Star 趋势和当前榜单指标。窄屏依次展示前三卡片与排名列表。
+首页的「全部」标签有有效热点时展示入选项目中的热度前五名、热度分、小趋势图和最近成功计算时间。各标签展示精选项目时间线，空列表复用收藏空态。完整榜单的榜首使用大卡和 Star 趋势，第二、第三名在右侧叠放。后续排名对齐名次、仓库信息、Star 趋势和当前榜单指标。窄屏依次展示前三卡片与排名列表。
 
 - 可切换 24h 净增长、7d 净增长、热度综合分、最近上榜。
 - 显示每条数据对应的时间窗口和采样质量；增长不完整时降级显示。
@@ -197,7 +197,7 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 ### 3.6 主题和选题池
 
 - 分类多选、关键词搜索，支持“AI 智能体 / AI 编程 / MCP / AI 多媒体 / 开发者工具”等。
-- 主题目录展示每个分类的最新监控仓库、简介、发现时间和仓库数。主题详情用分类标签切换，项目行右侧可收藏。
+- 专题名称、简介和匹配词由后台维护。详情默认展示该专题的近期精选，可切换全部匹配项目，项目行右侧可收藏。
 - 分类以仓库标签与规则为基础，中文摘要仅用于增强说明，不作为唯一分类证据。
 - 选题卡片保留“用户收益、可演示程度、复现要求、技术亮点、证据链接、人工状态”。
 - status 操作：candidate → shortlisted / accepted / ignored / published；状态变化在 API 成功后更新。
@@ -359,7 +359,7 @@ TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 ba
 | 查询采集/摘要任务 | GET /api/v1/jobs/:id | 管理鉴权，返回 JobView；维护期可 503 |
 | 确认再次调用模型 | POST /api/v1/jobs/:id/retry | 仅 unknown 摘要，{requestId,acceptPossibleCharge:true}，原子取消旧任务并创建手动任务 |
 | 恢复后启用自动 AI | POST /api/v1/system/ai/resume | {acceptIncompleteUsage:true}，提示恢复日计量不完整 |
-| 主题页 | GET /api/v1/repos?category=agent | 使用当前数据库的 topics 映射，重复 category 参数为 OR |
+| 专题页 | GET /api/v1/public/project-themes、/project-themes/:slug | 目录按后台配置的方向分组，宽屏展示多列卡片。各方向有独立名称和简介。专题图标通过可搜索浮层选择 Lucide 图标及 Radix 颜色。详情在近期精选上方展示大事记。公开 discovery 与 repos 使用 `theme` 筛选 |
 | 分类列表 | GET /api/v1/categories | {items:CategoryView[]}，每项包含 active 计数和可为空的最新仓库预览 |
 | 重点监控 | GET /api/v1/repos?followed=true&sort=followed | 包含重点监控名单中的全部仓库状态，followedAt 降序 |
 | 选题池 | GET /api/v1/topics | 返回候选、得分和状态 |

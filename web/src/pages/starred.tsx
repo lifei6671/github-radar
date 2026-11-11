@@ -7,8 +7,7 @@ import { repoPath } from '../lib/format'
 
 export function Starred() {
   const favorites = useFavorites()
-  return <RepoCollection title="我的收藏">
-    <p className="repo-collection-note">收藏保存在此浏览器，清除浏览器数据后会丢失。</p>
+  return <RepoCollection title="我的收藏" subtitle="收藏保存在此浏览器，清除浏览器数据后会丢失。">
     {favorites.length ? <ul className="repo-collection-rows" aria-label="收藏仓库">
       {favorites.map((item) => <RepoCollectionRow key={item.id} metadata={<span>{item.language ?? 'GitHub'}</span>}
         title={<Link className="repo-name" to={repoPath(item.fullName) + '?repoId=' + item.id} state={{ from: '/starred' }}>{item.fullName}</Link>}

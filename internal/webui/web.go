@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 // Register 将浏览器路由交给 Vite 入口，API 与缺失静态文件保留各自的 404。
@@ -19,7 +21,7 @@ func Register(router *gin.Engine, dist fs.FS) {
 		name := strings.TrimPrefix(request.URL.Path, "/")
 		if name == "api" || strings.HasPrefix(name, "api/") {
 			c.Header("Cache-Control", "no-store")
-			c.JSON(http.StatusNotFound, gin.H{"code": "not_found"})
+			c.JSON(http.StatusNotFound, gin.H{"code": consts.CodeNotFound})
 			return
 		}
 		if request.Method != http.MethodGet && request.Method != http.MethodHead {
@@ -66,14 +68,14 @@ func pageRoute(name string) bool {
 		return true
 	}
 	switch name {
-	case "", "trending", "repos", "categories", "starred":
+	case "", "trending", "repos", "categories", "themes", "starred":
 		return true
 	}
 	prefix, value, found := strings.Cut(name, "/")
 	if !found || value == "" {
 		return false
 	}
-	if prefix == "categories" {
+	if prefix == "categories" || prefix == "themes" {
 		return !strings.ContainsAny(value, "/.")
 	}
 	if prefix == "repos" {

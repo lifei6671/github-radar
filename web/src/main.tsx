@@ -5,7 +5,7 @@ import { RouterProvider } from 'react-router/dom'
 import { AdminLayout, AdminLogin, LegacyAdminPage, PageNotFound, PublicLayout, Root, Setup } from './app/shell'
 import { Skeleton } from './components/ui'
 import { Detail } from './pages/detail'
-import { Categories, Discover, Ranking, Repos } from './pages/repos'
+import { Categories, Discover, ProjectThemeDetail, ProjectThemes, Ranking, Repos } from './pages/repos'
 import { Starred } from './pages/starred'
 import { Watchlist } from './pages/watchlist'
 import { Topics } from './pages/topics'
@@ -22,6 +22,8 @@ const router = createBrowserRouter([{
       { path: 'starred', element: <Starred /> },
       { path: 'categories', element: <Categories /> },
       { path: 'categories/:slug', element: <Repos /> },
+      { path: 'themes', element: <ProjectThemes /> },
+      { path: 'themes/:slug', element: <ProjectThemeDetail /> },
       { path: '*', element: <PageNotFound /> },
     ] },
     { path: 'admin/login', element: <AdminLogin /> },

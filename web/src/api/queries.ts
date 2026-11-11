@@ -17,7 +17,7 @@ function usePages<T>(path: string, params: URLSearchParams, key: string, read = 
   const search = params.toString()
   return useInfiniteQuery({
     // 同一个登录会话切换前后台时，也必须分开缓存公开和管理数据。
-    queryKey: [key, search, read === api ? 'admin' : 'public'],
+    queryKey: [key, path === '/discovery' ? path + '?' + search : search, read === api ? 'admin' : 'public'],
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) => {
       const query = new URLSearchParams(search)
@@ -28,9 +28,10 @@ function usePages<T>(path: string, params: URLSearchParams, key: string, read = 
   })
 }
 
-export function useRepos(params: URLSearchParams) {
+export function useRepos(params: URLSearchParams, discovery = false) {
   const admin = useAdminArea()
-  return usePages<Repo>('/repos', params, 'repos', admin ? api : publicApi)
+  // 发现和完整列表使用独立的分页缓存，同时沿用仓库撤回时的缓存清理。
+  return usePages<Repo>(discovery ? '/discovery' : '/repos', params, 'repos', !discovery && admin ? api : publicApi)
 }
 export function useTopics(params: URLSearchParams) { return usePages<Topic>('/topics', params, 'topics') }
 
@@ -62,6 +63,8 @@ export function refreshRepo(queryClient: QueryClient, id: number) {
     queryClient.invalidateQueries({ queryKey: ['repo'], predicate: (query) => query.state.data === null || isRepoDetail(query, id) }),
     queryClient.invalidateQueries({ queryKey: ['repos'] }),
     queryClient.invalidateQueries({ queryKey: ['trending'] }),
+    // 采样或摘要可能更新匹配词，目录和详情计数也要重新计算。
+    queryClient.invalidateQueries({ queryKey: ['project-themes'] }),
   ])
 }
 
@@ -89,6 +92,7 @@ export function useRepoBlock(id: number) {
           client.resetQueries({ queryKey: ['repos'], predicate: ({ queryKey }) => queryKey[2] === 'public' || queryKey[1] === 'discover-hot' }),
           client.resetQueries({ queryKey: ['trending'], predicate: ({ queryKey }) => queryKey[1] !== 'sources' }),
           client.resetQueries({ queryKey: ['categories'] }),
+          client.resetQueries({ queryKey: ['project-themes'] }),
         ])
       }
       await Promise.all([

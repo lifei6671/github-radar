@@ -84,7 +84,8 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	sourceURL := "https://github.com/owner/repo-1/blob/main/README.md"
 	row := storage.AISummary{RepoID: 1, SourceFingerprint: "readme:test", ReadmeSHA: new("test"), SourceQuality: "sufficient",
 		SourceLanguage: "en", SummaryZh: "这个项目用于自动化。文档描述了工作流。", FeaturesJSON: `["工作流"]`,
-		AudienceJSON: "[]", ValueTagsJSON: `["自动化"]`, SourceReadmeURL: &sourceURL, SummaryStatus: "ready", ModelProvider: summary.ProviderKey(cfg.AI),
+		RecommendationReason: new("工作流维护者可以参考它的自动化编排方式。"),
+		AudienceJSON:         "[]", ValueTagsJSON: `["自动化"]`, SourceReadmeURL: &sourceURL, SummaryStatus: "ready", ModelProvider: summary.ProviderKey(cfg.AI),
 		ModelName: cfg.AI.Model, PromptVersion: cfg.AI.Summary.PromptVersion, GeneratedAt: now.UnixMilli()}
 	if err := db.Create(&row).Error; err != nil {
 		t.Fatal(err)
@@ -100,7 +101,8 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	}
 	request(t, router, "POST", path, `{"requestId":"cached"}`, "admin", 200)
 	detail := request(t, router, "GET", "/api/v1/repos/1", "", "admin", 200)
-	if detail["titleZh"] != "这个项目用于自动化" || detail["summaryZh"] != row.SummaryZh || detail["summaryModel"] != cfg.AI.Model || detail["summaryAvailable"] != true {
+	if detail["titleZh"] != "这个项目用于自动化" || detail["summaryZh"] != row.SummaryZh || detail["summaryModel"] != cfg.AI.Model ||
+		detail["summaryAvailable"] != true || detail["recommendationReason"] != *row.RecommendationReason {
 		t.Fatalf("摘要详情契约错误: %+v", detail)
 	}
 	page := request(t, router, "GET", "/api/v1/repos?grade=A&tag="+url.QueryEscape("自动化"), "", "admin", 200)

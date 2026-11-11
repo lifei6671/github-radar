@@ -2,24 +2,25 @@ package storage
 
 // AISummary 记录最近一次成功摘要，原始文档和模型响应仅存在于 Worker 内存。
 type AISummary struct {
-	RepoID            int64   `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
-	ReadmeSHA         *string `gorm:"column:readme_sha"`
-	SourceFingerprint string  `gorm:"column:source_fingerprint"`
-	SourceQuality     string  `gorm:"column:source_quality"`
-	SourceLanguage    string  `gorm:"column:source_language"`
-	SummaryZh         string  `gorm:"column:summary_zh"`
-	FeaturesJSON      string  `gorm:"column:features_json"`
-	AudienceJSON      string  `gorm:"column:audience_json"`
-	ValueTagsJSON     string  `gorm:"column:value_tags_json"`
-	SourceReadmeURL   *string `gorm:"column:source_readme_url"`
-	ModelProvider     string  `gorm:"column:model_provider"`
-	ModelName         string  `gorm:"column:model_name"`
-	PromptVersion     int     `gorm:"column:prompt_version"`
-	SummaryStatus     string  `gorm:"column:summary_status"`
-	GeneratedAt       int64   `gorm:"column:generated_at"`
+	RepoID               int64   `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
+	ReadmeSHA            *string `gorm:"column:readme_sha"`
+	SourceFingerprint    string  `gorm:"column:source_fingerprint"`
+	SourceQuality        string  `gorm:"column:source_quality"`
+	SourceLanguage       string  `gorm:"column:source_language"`
+	SummaryZh            string  `gorm:"column:summary_zh"`
+	RecommendationReason *string `gorm:"column:recommendation_reason"`
+	FeaturesJSON         string  `gorm:"column:features_json"`
+	AudienceJSON         string  `gorm:"column:audience_json"`
+	ValueTagsJSON        string  `gorm:"column:value_tags_json"`
+	SourceReadmeURL      *string `gorm:"column:source_readme_url"`
+	ModelProvider        string  `gorm:"column:model_provider"`
+	ModelName            string  `gorm:"column:model_name"`
+	PromptVersion        int     `gorm:"column:prompt_version"`
+	SummaryStatus        string  `gorm:"column:summary_status"`
+	GeneratedAt          int64   `gorm:"column:generated_at"`
 }
 
-func (AISummary) TableName() string { return "ai_summaries" }
+func (AISummary) TableName() string { return AISummaryTable }
 
 // RepoAITopics 保存模型提取的主题词及其生成依据，空数组表示已分析但未提取到主题。
 type RepoAITopics struct {
@@ -32,7 +33,7 @@ type RepoAITopics struct {
 	GeneratedAt       int64  `gorm:"column:generated_at"`
 }
 
-func (RepoAITopics) TableName() string { return "repo_ai_topics" }
+func (RepoAITopics) TableName() string { return RepoAITopicsTable }
 
 // RepoReadmeTranslation 按 README 版本缓存译文片段，已保存的批次可在重试时继续使用。
 type RepoReadmeTranslation struct {
@@ -44,7 +45,7 @@ type RepoReadmeTranslation struct {
 	Complete    bool   `gorm:"column:complete"`
 }
 
-func (RepoReadmeTranslation) TableName() string { return "repo_readme_translations" }
+func (RepoReadmeTranslation) TableName() string { return RepoReadmeTranslationTable }
 
 type SummaryCheck struct {
 	RepoID            int64   `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
@@ -57,7 +58,7 @@ type SummaryCheck struct {
 	LastErrorCode     *string `gorm:"column:last_error_code"`
 }
 
-func (SummaryCheck) TableName() string { return "summary_checks" }
+func (SummaryCheck) TableName() string { return SummaryCheckTable }
 
 // AICall 保存费用边界和可核实的计量元数据。
 type AICall struct {
@@ -76,7 +77,7 @@ type AICall struct {
 	ErrorCode         *string  `gorm:"column:error_code"`
 }
 
-func (AICall) TableName() string { return "ai_calls" }
+func (AICall) TableName() string { return AICallTable }
 
 type TopicCandidate struct {
 	ID                int64    `gorm:"column:id;primaryKey;autoIncrement"`
@@ -97,4 +98,4 @@ type TopicCandidate struct {
 	UpdatedAt         int64    `gorm:"column:updated_at;autoUpdateTime:false"`
 }
 
-func (TopicCandidate) TableName() string { return "topic_candidates" }
+func (TopicCandidate) TableName() string { return TopicCandidateTable }

@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react'
 import { timestamp } from '../lib/format'
+import { PageTitle } from './page-title'
 
-export function RepoCollection({ title, actions, children }: { title: string; actions?: ReactNode; children: ReactNode }) {
+export function RepoCollection({ title, subtitle, actions, children }: { title: string; subtitle: string; actions?: ReactNode; children: ReactNode }) {
   return <section className="repo-collection">
-    <header className="repo-collection-head"><h1>{title}</h1>{actions}</header>
+    <header className="repo-collection-head"><PageTitle title={title} subtitle={subtitle} />{actions}</header>
     {children}
   </section>
 }

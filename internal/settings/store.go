@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -25,16 +26,17 @@ func (e *Invalid) Error() string { return e.Err.Error() }
 
 // Snapshot 以统一修订号协调后台的整表替换，避免覆盖其他管理员的修改。
 type Snapshot struct {
-	Revision      int64          `json:"revision"`
-	Settings      config.Runtime `json:"settings"`
-	DiscoveryTabs []DiscoveryTab `json:"discoveryTabs"` // nil 跟随分类映射，空数组只显示「全部」。
+	Revision           int64              `json:"revision"`
+	Settings           config.Runtime     `json:"settings"`
+	DiscoveryTabs      []DiscoveryTab     `json:"discoveryTabs"` // nil 跟随分类映射，空数组只显示「全部」。
+	DiscoverySelection DiscoverySelection `json:"discoverySelection"`
 }
 
 type Store struct{ DB *gorm.DB }
 
 func read(tx *gorm.DB) (Snapshot, error) {
 	var row storage.SystemSetting
-	if err := tx.Take(&row, "key = ?", runtimeKey).Error; err != nil {
+	if err := tx.Take(&row, storage.SystemSettingColumns.Key+" = ?", runtimeKey).Error; err != nil {
 		return Snapshot{}, err
 	}
 	var snapshot Snapshot
@@ -43,6 +45,7 @@ func read(tx *gorm.DB) (Snapshot, error) {
 	snapshot.Settings.Maintenance = config.DefaultMaintenance()
 	snapshot.Settings.AI.Summary = config.DefaultSummary()
 	snapshot.Settings.Recommendations = config.DefaultRecommendations()
+	snapshot.DiscoverySelection = defaultDiscoverySelection()
 	if err := json.Unmarshal([]byte(row.ValueJSON), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("解析数据库运行设置: %w", err)
 	}
@@ -106,7 +109,7 @@ func (s Store) Initialize(ctx context.Context, seed config.Config) (Snapshot, er
 				return err
 			}
 		}
-		snapshot = Snapshot{Revision: 1, Settings: values}
+		snapshot = Snapshot{Revision: 1, Settings: values, DiscoverySelection: defaultDiscoverySelection()}
 		return write(tx, snapshot)
 	})
 	return snapshot, err
@@ -132,7 +135,7 @@ func (s Store) SaveRuntime(ctx context.Context, revision int64, values config.Ru
 
 func checkCapacity(tx *gorm.DB, values config.Runtime) error {
 	var followed int64
-	if err := tx.Model(&storage.Repository{}).Where("state='active' AND starred_by_user=1").Count(&followed).Error; err != nil {
+	if err := tx.Model(&storage.Repository{}).Where(storage.RepositoryColumns.State + "='" + consts.StatusActive + "' AND " + storage.RepositoryColumns.StarredByUser + "=1").Count(&followed).Error; err != nil {
 		return err
 	}
 	if followed > int64(values.Scheduler.MaxMonitoredRepos) {

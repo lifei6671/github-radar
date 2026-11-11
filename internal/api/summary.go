@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
 )
@@ -50,7 +52,7 @@ func (a *collectionAPI) requestAI(c *gin.Context, translate bool) {
 		Force     bool   `json:"force"`
 	}
 	if c.ShouldBindJSON(&input) != nil || !validRequestID(input.RequestID) {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_request_id"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidRequestID})
 		return
 	}
 	queue, now := a.summaryQueue(), time.Now()
@@ -67,9 +69,9 @@ func (a *collectionAPI) requestAI(c *gin.Context, translate bool) {
 	}
 	switch {
 	case decision.Conflict:
-		c.JSON(http.StatusConflict, gin.H{"code": "summary_in_progress", "existingJobId": decision.Job.ID, "statusUrl": jobStatusURL(decision.Job.ID)})
+		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeSummaryInProgress, "existingJobId": decision.Job.ID, "statusUrl": jobStatusURL(decision.Job.ID)})
 	case decision.Cached:
-		c.JSON(http.StatusOK, gin.H{"cached": true, "summaryStatus": "ready"})
+		c.JSON(http.StatusOK, gin.H{"cached": true, "summaryStatus": consts.StatusReady})
 	default:
 		c.JSON(http.StatusAccepted, gin.H{"jobId": decision.Job.ID, "statusUrl": jobStatusURL(decision.Job.ID)})
 	}
@@ -85,11 +87,11 @@ func (a *collectionAPI) retrySummary(c *gin.Context) {
 		AcceptPossibleCharge bool   `json:"acceptPossibleCharge"`
 	}
 	if c.ShouldBindJSON(&input) != nil || !validRequestID(input.RequestID) {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_request_id"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidRequestID})
 		return
 	}
 	if !input.AcceptPossibleCharge {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "possible_charge_not_accepted"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodePossibleChargeNotAccepted})
 		return
 	}
 	job, err := a.summaryQueue().RetryUnknown(c.Request.Context(), id, input.RequestID, a.summaryAvailable(), time.Now())
@@ -103,11 +105,11 @@ func (a *collectionAPI) retrySummary(c *gin.Context) {
 func (a *collectionAPI) summaryError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, summary.ErrUnavailable):
-		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "summary_unavailable"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": consts.CodeSummaryUnavailable})
 	case errors.Is(err, summary.ErrRepoUnavailable):
-		c.JSON(http.StatusConflict, gin.H{"code": "summary_repo_unavailable"})
+		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeSummaryRepoUnavailable})
 	case errors.Is(err, summary.ErrNotUnknown):
-		c.JSON(http.StatusConflict, gin.H{"code": "summary_not_unknown"})
+		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeSummaryNotUnknown})
 	default:
 		a.fail(c, err)
 	}
@@ -127,7 +129,7 @@ func (v summaryView) state() string {
 	if v.row.SummaryStatus != "" {
 		return v.row.SummaryStatus
 	}
-	return "missing"
+	return consts.StatusMissing
 }
 
 func (v summaryView) preview() *string {
@@ -150,6 +152,13 @@ func textPtr(s string) *string {
 
 func (v summaryView) title() *string { return textPtr(summary.Title(v.row.SummaryZh)) }
 
+func (v summaryView) reason() *string {
+	if v.row.SummaryStatus != consts.StatusReady || v.row.RecommendationReason == nil {
+		return nil
+	}
+	return textPtr(*v.row.RecommendationReason)
+}
+
 // summaryViews 批量读取摘要、AI Topics 和当前任务，避免列表逐仓库查询。
 func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (map[int64]summaryView, error) {
 	views := make(map[int64]summaryView, len(repos))
@@ -165,7 +174,7 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 		}
 	}
 	var rows []storage.AISummary
-	if err := db.Where("repo_id IN ?", ids).Find(&rows).Error; err != nil {
+	if err := db.Where(storage.AISummaryColumns.RepoID+" IN ?", ids).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
@@ -173,7 +182,7 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 	}
 	if len(missingTopics) > 0 {
 		var rows []storage.RepoAITopics
-		if err := db.Where("repo_id IN ?", missingTopics).Find(&rows).Error; err != nil {
+		if err := db.Where(storage.RepoAITopicsColumns.RepoID+" IN ?", missingTopics).Find(&rows).Error; err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
@@ -191,25 +200,26 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 		ID, RepoID int64
 		Status     string
 	}
-	if err := db.Raw(`
-SELECT id,repo_id,status FROM (
- SELECT id,repo_id,status,ROW_NUMBER() OVER(PARTITION BY repo_id ORDER BY
-  CASE WHEN status IN ('pending','running','failed','unknown') THEN 0 ELSE 1 END,id DESC) AS latest
- FROM jobs WHERE type=? AND repo_id IN ?
-) WHERE latest=1`, summary.JobType, ids).Scan(&jobs).Error; err != nil {
+	if err := db.Raw(fmt.Sprintf(`
+SELECT %[1]s,%[2]s,%[3]s FROM (
+ SELECT %[1]s,%[2]s,%[3]s,ROW_NUMBER() OVER(PARTITION BY %[2]s ORDER BY
+  CASE WHEN %[3]s IN ('%[4]s','%[5]s','%[6]s','%[7]s') THEN 0 ELSE 1 END,%[1]s DESC) AS latest
+ FROM %[8]s WHERE %[9]s=? AND %[2]s IN ?
+) WHERE latest=1`,
+		storage.JobColumns.ID, storage.JobColumns.RepoID, storage.JobColumns.Status, consts.StatusPending, consts.StatusRunning, consts.StatusFailed, consts.StatusUnknown, storage.JobTable, storage.JobColumns.Type), summary.JobType, ids).Scan(&jobs).Error; err != nil {
 		return nil, err
 	}
 	for _, job := range jobs {
 		v := views[job.RepoID]
 		switch job.Status {
-		case "pending":
-			v.status = "queued"
-		case "running", "unknown":
+		case consts.StatusPending:
+			v.status = consts.StatusQueued
+		case consts.StatusRunning, consts.StatusUnknown:
 			v.status = job.Status
-		case "failed", "dead":
-			v.status = "failed"
+		case consts.StatusFailed, consts.StatusDead:
+			v.status = consts.StatusFailed
 			if v.row.RepoID != 0 {
-				v.status = "stale"
+				v.status = consts.StatusStale
 			}
 		default:
 			continue
@@ -228,8 +238,8 @@ func (a *collectionAPI) aiLimits(db *gorm.DB, now time.Time) (gin.H, error) {
 	var rows []usage
 	day := now.UTC().Truncate(24 * time.Hour)
 	reset := day.Add(24 * time.Hour)
-	if err := db.Model(&storage.AICall{}).Select("origin,COUNT(*) AS calls").
-		Where("reserved_at>=? AND reserved_at<?", day.UnixMilli(), reset.UnixMilli()).Group("origin").Scan(&rows).Error; err != nil {
+	if err := db.Model(&storage.AICall{}).Select(storage.AICallColumns.Origin+",COUNT(*) AS calls").
+		Where(storage.AICallColumns.ReservedAt+">=? AND "+storage.AICallColumns.ReservedAt+"<?", day.UnixMilli(), reset.UnixMilli()).Group(storage.AICallColumns.Origin).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	counts := make(map[string]int64)
@@ -237,8 +247,8 @@ func (a *collectionAPI) aiLimits(db *gorm.DB, now time.Time) (gin.H, error) {
 		counts[row.Origin] = row.Calls
 	}
 	return gin.H{
-		"auto":    gin.H{"used": counts["auto"], "limit": a.cfg.AI.Summary.AutoDailyCalls},
-		"manual":  gin.H{"used": counts["manual"], "limit": a.cfg.AI.Summary.ManualDailyCalls},
-		"resetAt": iso(reset.UnixMilli()),
+		consts.OriginAuto:   gin.H{"used": counts[consts.OriginAuto], "limit": a.cfg.AI.Summary.AutoDailyCalls},
+		consts.OriginManual: gin.H{"used": counts[consts.OriginManual], "limit": a.cfg.AI.Summary.ManualDailyCalls},
+		"resetAt":           iso(reset.UnixMilli()),
 	}, nil
 }

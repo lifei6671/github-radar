@@ -127,6 +127,7 @@ export function Detail() {
             repo.description && <span className="minor muted">GitHub About</span>}
         </header>
         <p className="summary-body">{repo.summaryZh || repo.description || '暂无项目简介'}</p>
+        {repo.recommendationReason && <p className="recommendation-reason"><strong>推荐理由</strong>{repo.recommendationReason}</p>}
         {repo.features.length > 0 && <div className="topic-links">
           {repo.features.map((tag) => <Badge key={tag}>{tag}</Badge>)}
         </div>}

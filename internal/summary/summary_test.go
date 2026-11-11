@@ -120,7 +120,8 @@ func modelAnswer(short bool) string {
 		answer
 		Topics []string `json:"topics"`
 	}{answer{Language: "en", Summary: value, Features: []string{"脚本分组", "状态输出", "脚本分组"},
-		Tags: []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{marker}}, []string{"workflow", "dev-tools"}})
+		RecommendationReason: json.RawMessage(`"维护多服务工作区的团队可以借鉴它的脚本分组方式，统一组织本地任务。"`),
+		Tags:                 []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{marker}}, []string{"workflow", "dev-tools"}})
 	return string(raw)
 }
 
@@ -249,7 +250,8 @@ func TestSummaryCacheSourceChangeAndPrivacy(t *testing.T) {
 	step(t, e)
 	first := row[storage.AISummary](t, db, "repo_id=1")
 	if first.SummaryStatus != "ready" || first.SourceLanguage != "en" || first.SourceQuality != "sufficient" ||
-		first.ReadmeSHA == nil || *first.ReadmeSHA != source.sha || calls != 1 {
+		first.ReadmeSHA == nil || *first.ReadmeSHA != source.sha || calls != 1 ||
+		first.RecommendationReason == nil || *first.RecommendationReason != "维护多服务工作区的团队可以借鉴它的脚本分组方式，统一组织本地任务。" {
 		t.Fatalf("首次摘要错误: %+v calls=%d", first, calls)
 	}
 	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Update("stars", 500).Error; err != nil {
@@ -619,5 +621,39 @@ func TestModelInputBudgetAndCopiedSource(t *testing.T) {
 	raw, _ := json.Marshal(answer{Language: "zh", Summary: "这是一份项目使用说明。\n" + body + "\n实际运行仍需核实。", Evidence: []string{"仓库 README"}})
 	if _, ok := resultSummary(string(raw), source{body: "## " + body, quality: sufficient}, 1, "fixture", "test", 1, 0); ok {
 		t.Fatal("摘要加上前后缀后仍不得保存完整原文")
+	}
+	var generated answer
+	if err := json.Unmarshal([]byte(modelAnswer(false)), &generated); err != nil {
+		t.Fatal(err)
+	}
+	quote := "读者可按照仓库文档的调试步骤复现这套本地开发流程"
+	generated.RecommendationReason, _ = json.Marshal(quote + "。")
+	raw, _ = json.Marshal(generated)
+	saved, ok := resultSummary(string(raw), source{body: readmeText + "\n" + quote, quality: sufficient}, 1, "fixture", "test", 1, 0)
+	if !ok || saved.RecommendationReason == nil || *saved.RecommendationReason != "" {
+		t.Fatalf("推荐理由引用原句时应丢弃理由并保留有效摘要: %v %+v", ok, saved)
+	}
+}
+
+func TestLegacySummaryReasonRefreshWithModelOnly(t *testing.T) {
+	e, _, _, _ := fixture(t)
+	e.Provider = modelFixture(func(context.Context, string) ModelResult { return ModelResult{Content: modelAnswer(false)} })
+	schedule(t, e)
+	step(t, e)
+	if err := e.Queue.DB.Model(&storage.AISummary{RepoID: 1}).Update(storage.AISummaryColumns.RecommendationReason, nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	offline, err := e.Queue.Manual(t.Context(), 1, "offline-cache", false, false, time.Now())
+	if err != nil || !offline.Cached {
+		t.Fatalf("模型不可用时应复用有效的旧摘要: %+v %v", offline, err)
+	}
+	refresh, err := e.Queue.Manual(t.Context(), 1, "reason-refresh", false, true, time.Now())
+	if err != nil || refresh.Cached || refresh.Job.ID == 0 {
+		t.Fatalf("模型可用时旧摘要应安排补齐推荐理由: %+v %v", refresh, err)
+	}
+	step(t, e)
+	saved := row[storage.AISummary](t, e.Queue.DB, storage.AISummaryColumns.RepoID+"=1")
+	if saved.RecommendationReason == nil || *saved.RecommendationReason == "" {
+		t.Fatal("摘要任务未补齐推荐理由")
 	}
 }

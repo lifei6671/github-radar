@@ -1,10 +1,15 @@
 import { expect, test } from '@playwright/test'
 import { dragSetting, mockRadar, session } from './fixture'
 
-test('后台保存发现页标签的名称、顺序和显示范围', async ({ page }) => {
+test('后台保存发现页标签和精选门槛，返回前台等待新结果', async ({ page }) => {
   await mockRadar(page)
   await session(page)
-  await page.goto('/admin/runs?tab=discovery-tabs')
+  await page.goto('/')
+  const previous = page.getByRole('region', { name: '项目动态' }).getByRole('link', { name: 'vercel/ai' })
+  await expect(previous).toBeVisible()
+  await page.getByRole('link', { name: '后台管理', exact: true }).click()
+  await page.getByRole('link', { name: '运行状态', exact: true }).click()
+  await page.getByRole('link', { name: '发现页标签', exact: true }).click()
   await page.getByRole('button', { name: '编辑标签 AI 编程' }).click()
   const name = page.getByRole('textbox', { name: 'AI 编程的标签名称' })
   await name.fill('代码智能体')
@@ -20,10 +25,27 @@ test('后台保存发现页标签的名称、顺序和显示范围', async ({ pa
   await add.getByRole('combobox', { name: '选择分类' }).selectOption('media')
   await add.getByRole('button', { name: '添加', exact: true }).click()
   await dragSetting(page, '代码智能体', 'AI 智能体')
+  const top = page.getByRole('spinbutton', { name: '全站日榜入选名次' })
+  await expect(top).toHaveValue('10')
+  await top.fill('6')
   await page.getByRole('button', { name: '保存配置' }).click()
   await expect(page.getByText('已保存', { exact: true })).toBeVisible()
+  await expect(top).toHaveValue('6')
 
+  let started!: () => void
+  let release!: () => void
+  const requested = new Promise<void>((resolve) => { started = resolve })
+  const ready = new Promise<void>((resolve) => { release = resolve })
+  await page.route(/\/api\/v1\/public\/discovery\?/, async (route) => {
+    started()
+    await ready
+    await route.fallback()
+  })
   await page.getByRole('link', { name: '返回前台', exact: true }).click()
+  await requested
+  await expect(previous).toHaveCount(0)
+  await expect(page.getByRole('region', { name: '当前热点' })).toHaveCount(0)
+  release()
   const tabs = page.getByRole('group', { name: '项目分类' })
   await expect(tabs.getByRole('button')).toHaveText(['全部', '代码智能体', 'AI 智能体', 'MCP', '开发者工具', 'AI 多媒体'])
   await tabs.getByRole('button', { name: '代码智能体' }).click()
@@ -57,14 +79,28 @@ test('所有现有分类已显示时仍能新建标签与分类', async ({ page 
   await expect(page.getByRole('group', { name: '项目分类' }).getByRole('button', { name: '终端工具' })).toBeVisible()
 })
 
-test('匿名收藏在同一浏览器中持久化并跨标签页同步', async ({ page, browser }) => {
+test('发现页与全部项目共用匿名收藏，并在同一浏览器中跨标签页同步', async ({ page, browser }) => {
   const radar = await mockRadar(page)
-  await page.goto('/repos')
-  const add = page.getByRole('button', { name: '收藏 vercel/ai', exact: true })
+  radar.moveDiscoveryAcrossCursor()
+  await page.goto('/')
+  const discover = page.getByRole('region', { name: '项目动态' }).locator('.repo-row-head')
+  const add = discover.getByRole('button', { name: '收藏 vercel/ai', exact: true })
   await expect(add).toHaveAttribute('aria-pressed', 'false')
+  await expect(discover.getByRole('button', { name: '收藏 astral-sh/ruff', exact: true })).toHaveCount(0)
   await add.click()
+  const saved = discover.getByRole('button', { name: '取消收藏 vercel/ai', exact: true })
+  await expect(saved).toHaveAttribute('aria-pressed', 'true')
+  const timeline = page.getByRole('region', { name: '项目动态' })
+  await timeline.getByRole('button', { name: '加载更多' }).click()
+  await expect(timeline.getByRole('link', { name: 'charmbracelet/gum' })).toBeVisible()
+  await expect(saved).toHaveCount(1)
+  await page.getByRole('group', { name: '项目分类' }).getByRole('button', { name: 'AI 编程', exact: true }).click()
+  await expect(page).toHaveURL(/category=coding/)
+  await expect(saved).toHaveAttribute('aria-pressed', 'true')
+  await page.goto('/repos')
   const remove = page.getByRole('button', { name: '取消收藏 vercel/ai', exact: true })
   await expect(remove).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: '收藏 astral-sh/ruff', exact: true })).toBeVisible()
   await page.reload()
   await expect(remove).toHaveAttribute('aria-pressed', 'true')
 
@@ -100,7 +136,7 @@ test('匿名收藏在同一浏览器中持久化并跨标签页同步', async ({
   await tab.goto(url)
   await row.getByRole('button', { name: '取消收藏 vercel/ai', exact: true }).click()
   await expect(tab.getByText('还没有收藏的仓库')).toBeVisible()
-  await expect(add).toHaveAttribute('aria-pressed', 'false')
+  await expect(page.getByRole('button', { name: '收藏 vercel/ai', exact: true })).toHaveAttribute('aria-pressed', 'false')
   expect([...radar.requests, ...list.requests].every((request) => request.startsWith('GET '))).toBe(true)
   await page.getByRole('link', { name: '收藏', exact: true }).click()
   await expect(page).toHaveURL(/\/starred$/)

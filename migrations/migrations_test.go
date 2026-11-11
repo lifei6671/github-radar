@@ -22,7 +22,7 @@ func TestUpgradeFromPhaseZeroPreservesSettings(t *testing.T) {
 	}
 	defer pool.Close()
 	// 先用原有版本建立阶段 0 数据库，再通过正常入口升级。
-	phaseZero, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{2, 3, 4, 5, 6, 7, 8, 9}))
+	phaseZero, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,11 +32,18 @@ func TestUpgradeFromPhaseZeroPreservesSettings(t *testing.T) {
 	if _, err := pool.ExecContext(t.Context(), "INSERT INTO system_settings(key,value_json,updated_at) VALUES ('existing.setting','true',1234)"); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := Up(t.Context(), pool); err != nil || count != 8 {
-		t.Fatalf("阶段 0 应追加八个迁移版本: count=%d err=%v", count, err)
+	if count, err := Up(t.Context(), pool); err != nil || count != 11 {
+		t.Fatalf("阶段 0 应追加十一个迁移版本: count=%d err=%v", count, err)
+	}
+	if _, err := pool.ExecContext(t.Context(), "UPDATE project_themes SET name='自定义名称' WHERE slug='terminal-tools'"); err != nil {
+		t.Fatal(err)
 	}
 	if count, err := Up(t.Context(), pool); err != nil || count != 0 {
 		t.Fatalf("重复升级应无新迁移: count=%d err=%v", count, err)
+	}
+	var name string
+	if err := pool.QueryRowContext(t.Context(), "SELECT name FROM project_themes WHERE slug='terminal-tools'").Scan(&name); err != nil || name != "自定义名称" {
+		t.Fatalf("重复升级应保留已配置的专题: name=%s err=%v", name, err)
 	}
 	var value string
 	var updated int64
@@ -53,7 +60,7 @@ func TestUpgradeBackfillsPhaseOneAnchors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	old, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{4, 5, 6, 7, 8, 9}))
+	old, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{4, 5, 6, 7, 8, 9, 10, 11, 12}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +77,7 @@ func TestUpgradeBackfillsPhaseOneAnchors(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if count, err := Up(t.Context(), pool); err != nil || count != 6 {
+	if count, err := Up(t.Context(), pool); err != nil || count != 9 {
 		t.Fatalf("旧库应只应用新增版本: count=%d err=%v", count, err)
 	}
 	db, err := storage.OpenGORM(pool)

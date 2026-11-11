@@ -8,6 +8,11 @@ const day = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', d
 const monthDay = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric' })
 const weekday = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' })
 const clock = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+// 精选时间线与服务端使用同一个北京时间日期边界。
+const discoveryDay = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'long', timeZone: 'Asia/Shanghai' })
+const discoveryHeading = new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', timeZone: 'Asia/Shanghai' })
+const discoveryWeekday = new Intl.DateTimeFormat('zh-CN', { weekday: 'short', timeZone: 'Asia/Shanghai' })
+const discoveryClock = new Intl.DateTimeFormat('zh-CN', { timeStyle: 'short', hourCycle: 'h23', timeZone: 'Asia/Shanghai' })
 const relative = new Intl.RelativeTimeFormat('zh-CN')
 
 export function number(value: number | null | undefined) { return value == null ? '—' : digits.format(value) }
@@ -21,10 +26,10 @@ export function repoPath(fullName: string, admin = false, historicalId?: number)
   return (admin ? '/admin/repos/' : '/repos/') + encodedRepoName(fullName) +
     (admin && historicalId !== undefined ? '?repoId=' + historicalId : '')
 }
-export function dateGroup(value: string) { return day.format(new Date(value)) }
-export function dateHeading(value: string) { return monthDay.format(new Date(value)) }
-export function dayOfWeek(value: string) { return weekday.format(new Date(value)) }
-export function timeOfDay(value: string) { return clock.format(new Date(value)) }
+export function dateGroup(value: string, discovery = false) { return (discovery ? discoveryDay : day).format(new Date(value)) }
+export function dateHeading(value: string, discovery = false) { return (discovery ? discoveryHeading : monthDay).format(new Date(value)) }
+export function dayOfWeek(value: string, discovery = false) { return (discovery ? discoveryWeekday : weekday).format(new Date(value)) }
+export function timeOfDay(value: string, discovery = false) { return (discovery ? discoveryClock : clock).format(new Date(value)) }
 
 // 主题卡片用相对时间快速提示新旧，完整发现时间由 time 元素保留。
 export function relativeTime(value: string) {

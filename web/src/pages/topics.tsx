@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { api, errorText } from '../api/client'
 import { distinct, useTopics } from '../api/queries'
+import { PageTitle } from '../components/page-title'
 import type { Items, Topic, TopicDay, TopicStatus } from '../api/types'
 import { External } from '../components/repo'
 import { ActionButton, Badge, Empty, More, Notice, PageError, Skeleton } from '../components/ui'
@@ -89,7 +90,7 @@ function TopicMasthead({ day }: { day?: string }) {
   const date = day ? dateOf(day) : null
   const shown = date && !Number.isNaN(date.getTime()) ? date : null
   return <header className="topic-masthead">
-    <h1>选题池</h1>
+    <PageTitle title="选题池" subtitle="按日期浏览 GitHub 选题，记录审核状态与反馈。" />
     {shown && <time className="topic-date-tile" dateTime={day}>
       <strong className="numeric">{shown.getUTCDate()}</strong>
       <span>{editionMonth.format(shown)}</span><span>{editionWeekday.format(shown)}</span>

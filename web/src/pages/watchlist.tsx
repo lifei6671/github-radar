@@ -30,7 +30,7 @@ export function Watchlist() {
     setParams(next, { preventScrollReset: true })
   }
 
-  return <RepoCollection title="重点监控" actions={<InlineSearch key={q} value={q} onSearch={search} />}>
+  return <RepoCollection title="重点监控" subtitle="查看优先采样的仓库及其近期变化。" actions={<InlineSearch key={q} value={q} onSearch={search} />}>
     {repos.isPending ? <Skeleton /> : repos.error && !repos.data
       ? <PageError error={repos.error} retry={() => { void repos.refetch() }} />
       : <>

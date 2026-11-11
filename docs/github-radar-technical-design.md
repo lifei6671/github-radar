@@ -629,7 +629,7 @@ H = 0.35 * Velocity24
 
 ### 7.1 唯一持久化内容
 
-- 摘要保存 200～500 字的中文总结（资料不足时可更短）、精简的功能/受众/用途标签、README SHA、源链接、模型/提示词版本、生成时间和处理状态。AI Topics 另存于 `repo_ai_topics`。
+- 摘要保存 200～500 字的中文总结（资料不足时可更短）、可选的一句中文推荐理由、精简的功能/受众/用途标签、README SHA、源链接、模型/提示词版本、生成时间和处理状态。AI Topics 另存于 `repo_ai_topics`。推荐理由在同一次摘要调用中生成，只写一项有来源依据的阅读价值。旧摘要在下一次符合生成条件时补齐。
 - repo 的 description 可作为主表元数据保留。译文片段按 README SHA 与模型提示词标识保存，当前仓库只保留一版。
 - README 内容只作为临时内存数据：读取 → 清洗 → 模型调用 → 验证 → 保存总结 → 释放引用。
 - 任何临时文本不得写入 SQLite jobs.payload_json、数据库日志、结构化日志、磁盘缓存、失败追踪、任务审计详情或崩溃转储附件。
@@ -846,8 +846,11 @@ WHERE (repo_id, sample_slot) IN (
 | GET/PUT /api/v1/system/settings | 读取或保存进程级配置，返回是否需要重启 |
 | GET/PUT /api/v1/system/categories | 读取或替换分类映射 |
 | GET/PUT /api/v1/system/discovery-rules | 读取或替换 Trending 和 Search 规则 |
-| GET/PUT /api/v1/system/discovery-tabs | 读取或保存发现页分类标签的可见范围、顺序及名称 |
+| GET/PUT /api/v1/system/discovery-tabs | 读取或保存发现页分类标签及精选门槛 |
 | GET /api/v1/public/discovery-tabs | 读取发现页分类标签，按展示顺序返回分类标识和显示名称 |
+| GET /api/v1/public/discovery | 精选仓库，支持分类和游标，返回命中信号的时间 `discoveryAt`。`sort=hotness` 返回精选中的热度前五 |
+| GET /api/v1/public/project-themes、/project-themes/:slug | 专题目录和详情，返回简介、可选图标和颜色、项目总数、30 天新增数及最近发现的项目。详情额外返回 `milestones` |
+| GET/PUT /api/v1/system/project-themes | 后台读取和保存专题，使用共享修订号 |
 | GET /api/v1/system/storage | SQLite 大小、快照条数、清理水位 |
 | POST /api/v1/system/maintenance/run | 鉴权后手动启动维护任务 |
 | GET /api/v1/system/backup/settings | 读取后台备份配置（凭据脱敏） |
@@ -862,9 +865,17 @@ WHERE (repo_id, sample_slot) IN (
 
 首次安装另提供 POST /api/v1/setup/r2/test、r2/session、restore、initialize，GET /api/v1/setup/backups、status、operations/:id，均使用 ADMIN_TOKEN。R2 会话仅保存在内存，恢复后的数据库包含本次新配置；已初始化时关闭 setup 写接口，状态和操作查询仍可用。维护期间健康检查、setup/status 和操作进度只读内存；重载入口仅在复制已结束且 databaseApplied=true 的加载失败状态下，受恢复互斥保护读取数据库。鉴权优先；恢复期间设置写入及冲突操作先返回 409，其余业务 API 返回 503。详见[专项方案](./backup-and-restore.md)。
 
-四个配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending；Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。分类和发现规则接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
+这些配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending。Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。分类和发现规则接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
 
 发现页标签 PUT 传 `{revision,items:[{slug,label}]}`，按数组顺序展示，空 `label` 沿用分类名称。可选 `newCategories` 使用分类接口的条目格式，将新分类与标签在同一事务保存。分类映射新增条目后出现在可选列表，管理员可单独加入发现页。已有库首次修改分类映射时保留原有标签顺序。前台固定显示「全部」，保存空数组只保留「全部」。
+
+发现页只收录公开且处于监控中的仓库。近 7 天首次发现的 S/A 级项目需在近 48 小时采样成功。精确 24h 净增达到现有热度升档阈值的项目，以窗口终点是否在近 24 小时内为准。最近一次成功采集的全站日榜在近 24 小时内时，榜单前 10 也可入选。三项命中任意一项即可，同一仓库取最新命中时间，按北京时间日期、热度、命中时间倒序排列。后台通过 `selection` 保存 `recentDays`、`recentSampleHours`、`growthSampleHours`、`trendingHours` 和 `trendingTop`，保存立即生效。
+
+专题独立保存在 `project_themes`，通过匹配词筛选项目。GitHub Topics 非空时以原生主题为准，原生主题为空时使用 AI Topics。公开 `/discovery` 和 `/repos` 接受 `theme` 标识，分页游标绑定该专题。
+
+专题方向保存在 `project_theme_groups`，每个方向有名称、简介和显示顺序。后台通过 `/api/v1/system/project-theme-groups` 管理方向，在专题表单选择归属。移除仍有专题的方向前，须先迁移这些专题。公开目录返回 `groups`，每个专题以 `groupSlug` 指定所属方向。
+
+专题大事记从当前数据库保留的观测中取最近 12 个自然月。收录全站 GitHub Trending 日榜前三，同仓库每月只保留最佳名次。Star 里程碑使用日聚合首末实测值跨过 1,000、5,000、10,000、50,000 或 100,000 Star 的记录，同一天跨多档时取最高档。每月最多五件，榜单按名次优先，Star 事件按档位优先。事件按北京时间分月，展示顺序为时间倒序。
 
 分类映射和发现规则按提交数组持久化后台列表顺序。发现规则的 `display_position` 仅用于后台列表排序，规则的采集优先级、下次计划时间与任务租约按既有调度机制维护。
 
@@ -904,7 +915,8 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 | /trending | 热点榜 | 24h/7d Star 净增、排名、上榜与走势 |
 | /repos | 全部动态 | 仓库筛选、技术语言、主题、等级和浏览器收藏 |
 | /repos/:owner/:name | 新闻详情 | 独立公开页面，展示 Star 曲线、中文摘要和来源 |
-| /categories、/categories/:slug | 主题页 | AI 智能体、AI 编程、MCP、AI 多媒体、开发工具及其他 |
+| /themes、/themes/:slug | 专题页 | 独立专题目录，默认展示该专题近期精选，可切换全部项目 |
+| /categories、/categories/:slug | 分类页 | 复用顶部分类映射 |
 | /admin/topics | 日报与精选 | 候选选题、读者收益、审核状态、导出 |
 | /starred | 收藏 | 当前浏览器收藏的仓库 |
 | /admin/watchlist | 重点监控 | 管理员指定优先跟踪的仓库 |

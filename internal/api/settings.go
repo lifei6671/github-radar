@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
 )
 
@@ -22,6 +23,10 @@ func (a *collectionAPI) registerSettings(system *gin.RouterGroup) {
 	system.PUT("/discovery-rules", a.putDiscoveryRules)
 	system.GET("/discovery-tabs", a.getDiscoveryTabSettings)
 	system.PUT("/discovery-tabs", a.putDiscoveryTabSettings)
+	system.GET("/project-themes", a.getProjectThemeSettings)
+	system.PUT("/project-themes", a.putProjectThemeSettings)
+	system.GET("/project-theme-groups", a.getProjectThemeGroups)
+	system.PUT("/project-theme-groups", a.putProjectThemeGroups)
 }
 
 // decodeSettings 避免拼错字段时悄悄丢弃管理员设置。
@@ -30,7 +35,7 @@ func decodeSettings(c *gin.Context, dest any) bool {
 	decoder.DisallowUnknownFields()
 	var extra any
 	if err := decoder.Decode(dest); err != nil || decoder.Decode(&extra) != io.EOF {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings})
 		return false
 	}
 	return true
@@ -40,11 +45,11 @@ func (a *collectionAPI) settingsFailure(c *gin.Context, err error) {
 	var invalid *settings.Invalid
 	switch {
 	case errors.As(err, &invalid):
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings", "message": invalid.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings, "message": invalid.Error()})
 	case errors.Is(err, settings.ErrRevision):
-		c.JSON(http.StatusConflict, gin.H{"code": "settings_conflict"})
+		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeSettingsConflict})
 	case errors.Is(err, settings.ErrCapacity):
-		c.JSON(http.StatusConflict, gin.H{"code": "monitoring_capacity_below_followed"})
+		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeMonitoringCapacityBelowFollowed})
 	default:
 		a.fail(c, err)
 	}
@@ -75,7 +80,7 @@ func (a *collectionAPI) putRuntime(c *gin.Context) {
 		return
 	}
 	if input.Revision < 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings_revision"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettingsRevision})
 		return
 	}
 	snapshot, err := (settings.Store{DB: a.db}).SaveRuntime(c.Request.Context(), input.Revision, input.Settings)
@@ -104,7 +109,7 @@ func (a *collectionAPI) putCategorySettings(c *gin.Context) {
 		return
 	}
 	if input.Revision < 1 || input.Items == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings})
 		return
 	}
 	revision, items, err := (settings.Store{DB: a.db}).SaveCategories(c.Request.Context(), input.Revision, input.Items)
@@ -133,7 +138,7 @@ func (a *collectionAPI) putDiscoveryRules(c *gin.Context) {
 		return
 	}
 	if input.Revision < 1 || input.Items == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings})
 		return
 	}
 	revision, items, err := (settings.Store{DB: a.db}).SaveDiscoveryRules(c.Request.Context(), input.Revision, input.Items)
@@ -155,18 +160,19 @@ func (a *collectionAPI) getDiscoveryTabSettings(c *gin.Context) {
 
 func (a *collectionAPI) putDiscoveryTabSettings(c *gin.Context) {
 	var input struct {
-		Revision      int64                   `json:"revision"`
-		Items         []settings.DiscoveryTab `json:"items"`
-		NewCategories []config.Category       `json:"newCategories"`
+		Revision      int64                        `json:"revision"`
+		Items         []settings.DiscoveryTab      `json:"items"`
+		NewCategories []config.Category            `json:"newCategories"`
+		Selection     *settings.DiscoverySelection `json:"selection"`
 	}
 	if !decodeSettings(c, &input) {
 		return
 	}
 	if input.Revision < 1 || input.Items == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings})
 		return
 	}
-	result, err := (settings.Store{DB: a.db}).SaveDiscoveryTabs(c.Request.Context(), input.Revision, input.Items, input.NewCategories)
+	result, err := (settings.Store{DB: a.db}).SaveDiscoveryTabs(c.Request.Context(), input.Revision, input.Items, input.NewCategories, input.Selection)
 	if err != nil {
 		a.settingsFailure(c, err)
 		return

@@ -14,12 +14,13 @@ import (
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
-const sufficient = "sufficient"
-const insufficient = "insufficient_source"
-const incomplete = "incomplete_source"
+const sufficient = consts.SourceSufficient
+const insufficient = consts.SourceInsufficient
+const incomplete = consts.SourceIncomplete
 
 type source struct {
 	fullName                                                          string
@@ -61,7 +62,7 @@ func prose(data []byte) string {
 
 func language(value string) string {
 	if strings.TrimSpace(value) == "" {
-		return "und"
+		return consts.LanguageUndetermined
 	}
 	lang := whatlanggo.DetectLang(value)
 	if code := lang.Iso6391(); code != "" {
@@ -70,11 +71,11 @@ func language(value string) string {
 	if code := lang.Iso6393(); code != "" {
 		return code
 	}
-	return "und"
+	return consts.LanguageUndetermined
 }
 
 func descriptionKey(s string) string {
-	return fmt.Sprintf("description:%x", sha256.Sum256([]byte(strings.Join(strings.Fields(s), " "))))
+	return fmt.Sprintf(consts.DescriptionFingerprintFormat, sha256.Sum256([]byte(strings.Join(strings.Fields(s), " "))))
 }
 
 // 主题词同时依赖简介和 README，单独更新简介也应触发刷新。
@@ -156,13 +157,14 @@ func (s source) prompt(budget int, summary, topics bool) (string, source) {
 }
 
 type answer struct {
-	Language    string   `json:"source_language"`
-	Summary     string   `json:"summary_zh"`
-	Features    []string `json:"features"`
-	Audience    []string `json:"audience"`
-	Tags        []string `json:"value_tags"`
-	Evidence    []string `json:"evidence"`
-	Uncertainty []string `json:"uncertainty"`
+	Language             string          `json:"source_language"`
+	Summary              string          `json:"summary_zh"`
+	RecommendationReason json.RawMessage `json:"recommendation_reason"`
+	Features             []string        `json:"features"`
+	Audience             []string        `json:"audience"`
+	Tags                 []string        `json:"value_tags"`
+	Evidence             []string        `json:"evidence"`
+	Uncertainty          []string        `json:"uncertainty"`
 }
 
 var topicSlug = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
@@ -241,12 +243,28 @@ func resultSummary(raw string, s source, repoID int64, provider, model string, v
 	if !validEvidence {
 		return storage.AISummary{}, false
 	}
+	var proposedReason string
+	_ = json.Unmarshal(a.RecommendationReason, &proposedReason)
+	reason := recommendationReason(proposedReason, a.Summary, s)
 	return storage.AISummary{
 		RepoID: repoID, ReadmeSHA: optional(s.sha), SourceFingerprint: s.fingerprint, SourceQuality: quality,
-		SourceLanguage: s.language, SummaryZh: a.Summary, FeaturesJSON: tags(a.Features), AudienceJSON: tags(a.Audience),
+		SourceLanguage: s.language, SummaryZh: a.Summary, RecommendationReason: &reason, FeaturesJSON: tags(a.Features), AudienceJSON: tags(a.Audience),
 		ValueTagsJSON: tags(a.Tags), SourceReadmeURL: optional(s.url), ModelProvider: provider, ModelName: model,
-		PromptVersion: version, SummaryStatus: "ready", GeneratedAt: now,
+		PromptVersion: version, SummaryStatus: consts.StatusReady, GeneratedAt: now,
 	}, true
+}
+
+// 推荐理由是可选字段，无效理由不影响已通过校验的摘要。
+func recommendationReason(raw, brief string, s source) string {
+	reason := strings.Join(strings.Fields(raw), " ")
+	sentence := strings.TrimRight(reason, "。！？!?.")
+	n := utf8.RuneCountInString(reason)
+	if n < 12 || n > 100 || !strings.ContainsFunc(reason, func(r rune) bool { return unicode.In(r, unicode.Han) }) ||
+		strings.ContainsAny(sentence, "。！？!?<>") || strings.Contains(brief, sentence) ||
+		copiesSource(sentence, s.body) || copiesSource(sentence, s.description) {
+		return ""
+	}
+	return reason
 }
 
 // copiesSource 拒绝把整段来源或长原文片段包装进摘要，忽略 Markdown 标题和空白差异。

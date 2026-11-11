@@ -14,7 +14,7 @@ const publicNav = [
   { path: '/', label: '发现', icon: Radar },
   { path: '/repos', label: '全部项目', icon: Layers3 },
   { path: '/trending', label: '热点榜', icon: ChartNoAxesCombined },
-  { path: '/categories', label: '主题', icon: Grid2X2 },
+  { path: '/themes', label: '主题', icon: Grid2X2 },
   { path: '/starred', label: '收藏', icon: Bookmark },
 ]
 const adminNav = [

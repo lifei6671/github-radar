@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
-import type { CategorySetting, DiscoveryTab, Job, Limits, ListSettings, Quality, RepoDetail, RepoReadme, RuleSetting, Topic } from '../src/api/types'
+import type { CategorySetting, DiscoverySelection, DiscoveryTab, Job, Limits, ListSettings, ProjectThemeGroup, ProjectThemeSetting, Quality, RepoDetail, RepoReadme, RuleSetting, Topic } from '../src/api/types'
 
 const at = '2026-11-11T12:00:00Z'
 const admin = 'fixture-token'
@@ -13,6 +13,7 @@ const categories = [
   { slug: 'other', name: '其他' },
 ]
 const names = ['vercel/ai', 'openai/codex', 'pydantic/pydantic-ai', 'modelcontextprotocol/servers', 'astral-sh/ruff', 'charmbracelet/gum']
+const fixtureTopics = ['llm', 'coding-agent', 'ai-agent', 'mcp-server', 'mcp-server', 'cli']
 const titles = ['用于构建 AI 应用的 TypeScript 工具包', '在终端中运行的开源代码智能体', '面向生产应用的 Python 智能体框架', 'Model Context Protocol 服务端实现集合', '以 Rust 编写的 Python 代码检查工具', '用于构建交互式 Shell 脚本的组件']
 const stars = [22_846, 59_480, 14_270, 32_881, 40_244, 15_830]
 const growth = [318, 212, 116, -12, null, 8]
@@ -42,6 +43,7 @@ function repository(index: number): RepoDetail {
       stars: h === 8 || index === 4 ? null : stars[index] - 318 + h * 14 + [0, 3, -8, 8, 1, 17][h % 6],
     })),
     dataQuality: index === 4 ? 'insufficient' : 'exact', metricsUpdatedAt: at, candidateBurst: false,
+    recommendationReason: index === 0 ? '应用开发者可借鉴它的统一接口来复用工具调用流程。' : null,
     summaryPreview: hasSummary ? summary : null, summaryZh: hasSummary ? summary : null, summaryStatus: hasSummary ? 'ready' : 'missing',
     summarySourceQuality: hasSummary ? 'sufficient' : null, summaryGeneratedAt: hasSummary ? at : null,
     summaryModel: hasSummary ? 'fixture-model' : null, sourceReadmeUrl: hasSummary ? 'https://github.com/' + names[index] + '/blob/main/README.md' : null,
@@ -86,7 +88,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
   }
   let delayedSave: { status: 200 | 401; started: () => void; gate: Promise<void> } | null = null
   let delayedFeedback: { started: () => void; gate: Promise<void> } | null = null
-  let runtime = { github: { tokenEnv: 'GITHUB_TOKEN' }, ai: { enabled: true, baseUrl: '', model: 'fixture-model', apiKeyEnv: 'AI_API_KEY', summary: { workers: 1 } }, recommendations: { enabled: true, hour: 8, minute: 30 } }
+  let runtime = { github: { tokenEnv: 'GITHUB_TOKEN', searchSoftBudgetPerMinute: 20 }, ai: { enabled: true, baseUrl: '', model: 'fixture-model', apiKeyEnv: 'AI_API_KEY', summary: { workers: 1 } }, recommendations: { enabled: true, hour: 8, minute: 30 } }
   let ruleSettings: ListSettings<RuleSetting> = { revision: 1, items: [
     { sourceType: 'trending', sourceKey: 'all:daily', query: '', enabled: true, intervalMinutes: 60, priority: 20 },
     { sourceType: 'search', sourceKey: 'coding', query: 'topic:code-assistant stars:>50', enabled: false, intervalMinutes: 30, priority: 20 },
@@ -94,6 +96,20 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
   let categorySettings: ListSettings<CategorySetting> = { revision: 1, items: [{ slug: 'agent', name: 'AI 智能体', anyTopics: ['agent'] }] }
   const discoveryOptions = [...categories]
   let discoveryTabs = categories.map(({ slug }) => ({ slug, label: '' }))
+  let themeGroups: ProjectThemeGroup[] = [
+    { slug: 'technology', name: '技术方向', description: '按技术领域追踪开源项目。' },
+    { slug: 'content', name: '内容方向', description: '按用途浏览工具和工作流。' },
+  ]
+  let projectThemes: ProjectThemeSetting[] = [
+    { slug: 'terminal-tools', groupSlug: 'content', name: '终端开发工具', description: '在终端使用的开发工具。', icon: 'terminal', iconColor: 'cyan', anyTopics: ['cli'] },
+    { slug: 'browser-automation', groupSlug: 'technology', name: '浏览器自动化', description: '自动操作浏览器。', icon: 'globe', iconColor: 'green', anyTopics: ['browser-automation'] },
+    { slug: 'mcp-servers', groupSlug: 'technology', name: 'MCP 服务端', description: '为模型提供工具和数据。', icon: 'plug', iconColor: 'cyan', anyTopics: ['mcp-server'] },
+    { slug: 'coding-agents', groupSlug: 'technology', name: '代码智能体', description: '辅助编写代码。', icon: 'bot', iconColor: 'amber', anyTopics: ['coding-agent'] },
+    { slug: 'llm-tooling', groupSlug: 'technology', name: '大模型工具链', description: '面向模型应用的工具。', icon: 'layers', iconColor: 'slate', anyTopics: ['llm'] },
+    { slug: 'webhook-tools', groupSlug: 'content', name: 'Webhook 与事件集成', description: '处理 Webhook 事件。', icon: '', iconColor: '', anyTopics: ['webhook'] },
+  ]
+  let selection: DiscoverySelection = { recentDays: 7, recentSampleHours: 48, growthSampleHours: 24, trendingHours: 24, trendingTop: 10 }
+  let moveDiscoveryAcrossCursor = false
   let topic: Topic = {
     id: 1, repoId: 1, fullName: names[0], titleZh: titles[0], readerValue: '工具调用与流式输出',
     sourceUrl: 'https://github.com/vercel/ai', summaryZh: repository(0).summaryZh, valueTags: ['开发工具'],
@@ -122,7 +138,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     requests.push(method + ' ' + path + url.search)
     if (publicRead) {
       expect(request.headers().authorization).toBeUndefined()
-      if (method !== 'GET' || !/^\/(?:categories|discovery-tabs|trending(?:\/sources)?|repos(?:\/\d+\/(?:trend|readme)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
+      if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/\d+\/(?:trend|readme)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
         return reply(route, { code: 'not_found' }, 404)
       }
       if (query.get('followed') === 'true') return reply(route, { code: 'invalid_filter' }, 400)
@@ -143,10 +159,30 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       const latestRepo = latest ? { id: latest.id, fullName: latest.fullName, description: latest.description, discoveredAt: latest.discoveredAt } : null
       return { ...category, count: matches.length, latestRepo }
     }) })
-    if (path === '/repos') {
+    if (publicRead && (path === '/project-themes' || path.startsWith('/project-themes/'))) {
+      const items = projectThemes.map(({ slug, name, description, anyTopics, icon, iconColor, groupSlug }) => {
+        const matches = repos.filter((repo) => !repo.blocked && repo.state === 'active' && anyTopics.includes(fixtureTopics[repo.id - 1]))
+        const latest = matches[0]
+        return { slug, name, description, icon, iconColor, groupSlug, count: matches.length, recentCount: matches.length,
+          latestRepo: latest ? { id: latest.id, fullName: latest.fullName, discoveredAt: latest.discoveredAt } : null }
+      })
+      if (path === '/project-themes') return reply(route, { items, groups: themeGroups })
+      const theme = items.find(({ slug }) => path === '/project-themes/' + encodeURIComponent(slug))
+      const milestones = theme?.slug === 'mcp-servers' ? Array.from({ length: 6 }, (_, index) => ({
+        kind: index === 5 ? 'trending' : 'stars', fullName: names[3], value: index === 5 ? 2 : 1_000 * (5 - index),
+        at: new Date(Date.parse(at) - index * 7 * 86_400_000).toISOString(),
+      })) : []
+      return theme ? reply(route, { ...theme, milestones }) : reply(route, { code: 'not_found' }, 404)
+    }
+    if (path === '/repos' || path === '/discovery') {
       const categoriesWanted = query.getAll('category')
+      const theme = projectThemes.find(({ slug }) => slug === query.get('theme'))
+      if (query.has('theme') && !theme) return reply(route, { code: 'not_found' }, 404)
       const filtered = repos.filter((repo) =>
         (!publicRead || !repo.blocked) &&
+        (!theme || theme.anyTopics.includes(fixtureTopics[repo.id - 1])) &&
+        (path !== '/discovery' || (repo.id !== 5 && repo.state === 'active')) &&
+        (path !== '/discovery' || query.get('sort') !== 'hotness' || repo.hotnessScore !== null) &&
         (!query.has('blocked') || Boolean(repo.blocked) === (query.get('blocked') === 'true')) &&
         (!query.get('q') || repo.fullName.includes(query.get('q')!)) &&
         (!categoriesWanted.length || repo.categories.some((category) => categoriesWanted.includes(category))) &&
@@ -155,12 +191,17 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
         (!query.get('language') || repo.language === query.get('language')) &&
         (query.get('followed') !== 'true' || repo.followed))
       if (query.get('sort') === 'hotness') filtered.sort((a, b) => (a.hotnessRank ?? Infinity) - (b.hotnessRank ?? Infinity))
-      const limit = query.get('limit') === '6' ? 6 : 5
+      const movingDiscovery = moveDiscoveryAcrossCursor && path === '/discovery' && !query.has('sort')
+      const limit = movingDiscovery ? 4 : query.get('limit') === '6' ? 6 : 5
       const offset = query.get('cursor') === 'opaque+cursor=1' ? limit : 0
-      const items = filtered.slice(offset, offset + limit)
+      const slice = filtered.slice(offset, offset + limit)
+      const page = movingDiscovery && offset > 0 && filtered.length > 0 ? [filtered[0], ...slice] : slice
+      const items = path === '/discovery' ? page.map((repo) => ({ ...repo, discoveryAt: at })) : page
       return reply(route, { items: publicRead ? items.map(published) : items, nextCursor: offset + limit < filtered.length ? 'opaque+cursor=1' : null, updatedAt: at })
     }
-    if (path === '/trending/sources') return reply(route, { items: [{ sourceKey: 'all:daily' }, { sourceKey: 'language:rust:weekly' }] })
+    if (path === '/trending/sources') return reply(route, {
+      items: ['all:daily', 'all:weekly', 'all:monthly', 'language:rust:weekly'].map((sourceKey) => ({ sourceKey })),
+    })
     if (path === '/trending') {
       const sourceKey = query.get('sourceKey') ?? 'all'
       const period = query.get('period') ?? 'daily'
@@ -299,16 +340,35 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     }
     if (path === '/system/discovery-tabs') {
       if (method === 'PUT') {
-        const body: ListSettings<DiscoveryTab> & { newCategories?: CategorySetting[] } = request.postDataJSON()
+        const body: ListSettings<DiscoveryTab> & { newCategories?: CategorySetting[]; selection?: DiscoverySelection } = request.postDataJSON()
         if (body.revision !== revision) return reply(route, { code: 'settings_conflict' }, 409)
         discoveryTabs = body.items
+        selection = body.selection ?? selection
         for (const category of body.newCategories ?? []) {
           discoveryOptions.push({ slug: category.slug, name: category.name })
           categorySettings.items.push(category)
         }
         revision++
       }
-      return reply(route, { revision, items: discoveryTabs, options: discoveryOptions })
+      return reply(route, { revision, items: discoveryTabs, options: discoveryOptions, selection })
+    }
+    if (path === '/system/project-theme-groups') {
+      if (method === 'PUT') {
+        const body: ListSettings<ProjectThemeGroup> = request.postDataJSON()
+        if (body.revision !== revision) return reply(route, { code: 'settings_conflict' }, 409)
+        themeGroups = body.items
+        revision++
+      }
+      return reply(route, { revision, items: themeGroups })
+    }
+    if (path === '/system/project-themes') {
+      if (method === 'PUT') {
+        const body: ListSettings<ProjectThemeSetting> = request.postDataJSON()
+        if (body.revision !== revision) return reply(route, { code: 'settings_conflict' }, 409)
+        projectThemes = body.items
+        revision++
+      }
+      return reply(route, { revision, items: projectThemes })
     }
     if (path === '/system/jobs') return reply(route, { items: (job ? [job, ...recentJobs] : recentJobs.slice())
       .sort((a, b) => b.id - a.id).map((item) => ({ ...item, repoFullName: repos.find(({ id }) => id === item.repoId)?.fullName ?? null })) })
@@ -323,6 +383,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
 
   return {
     requests, attempts,
+    moveDiscoveryAcrossCursor: () => { moveDiscoveryAcrossCursor = true },
     setLimits: (values: Partial<Limits>) => { systemLimits = { ...systemLimits, ...values } },
     setRecentJobs: (items: Job[]) => { recentJobs = items },
     completeSetup: () => { initialized = true },

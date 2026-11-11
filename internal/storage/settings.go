@@ -50,7 +50,7 @@ type SystemSetting struct {
 
 // TableName 固定表名，表结构由 SQL 迁移维护。
 func (SystemSetting) TableName() string {
-	return "system_settings"
+	return SystemSettingTable
 }
 
 // CategorySetting 显式映射后台分类规则，position 保留管理员设定的顺序。
@@ -61,7 +61,31 @@ type CategorySetting struct {
 	Position   int    `gorm:"column:position"`
 }
 
-func (CategorySetting) TableName() string { return "categories" }
+func (CategorySetting) TableName() string { return CategorySettingTable }
+
+// ProjectTheme 显式映射专题表，主题匹配词与展示顺序由后台维护。
+type ProjectTheme struct {
+	GroupSlug   string `gorm:"column:group_slug"`
+	Icon        string `gorm:"column:icon"`
+	IconColor   string `gorm:"column:icon_color"`
+	Slug        string `gorm:"column:slug;primaryKey"`
+	Name        string `gorm:"column:name"`
+	Description string `gorm:"column:description"`
+	TopicsJSON  string `gorm:"column:topics_json"`
+	Position    int    `gorm:"column:position"`
+}
+
+func (ProjectTheme) TableName() string { return ProjectThemeTable }
+
+// ProjectThemeGroup 保存公开目录的方向名称、简介和排序。
+type ProjectThemeGroup struct {
+	Slug        string `gorm:"column:slug;primaryKey" json:"slug"`
+	Name        string `gorm:"column:name" json:"name"`
+	Description string `gorm:"column:description" json:"description"`
+	Position    int    `gorm:"column:position" json:"-"`
+}
+
+func (ProjectThemeGroup) TableName() string { return ProjectThemeGroupTable }
 
 // Initialized 查询安装标记，空数据库没有记录时处于未初始化状态。
 func Initialized(ctx context.Context, db *gorm.DB) (bool, error) {
@@ -71,7 +95,7 @@ func Initialized(ctx context.Context, db *gorm.DB) (bool, error) {
 // BooleanSetting 读取初始化与自动 AI 恢复标记，旧库缺失时为 false。
 func BooleanSetting(ctx context.Context, db *gorm.DB, key string) (bool, error) {
 	var setting SystemSetting
-	err := db.WithContext(ctx).Where("key = ?", key).Take(&setting).Error
+	err := db.WithContext(ctx).Where(SystemSettingColumns.Key+" = ?", key).Take(&setting).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return false, nil
 	}

@@ -21,6 +21,24 @@ export interface Category {
   latestRepo: Pick<Repo, 'id' | 'fullName' | 'description' | 'discoveredAt'> | null
 }
 
+export interface ProjectTheme {
+  groupSlug: string
+  slug: string
+  name: string
+  description: string
+  icon: string
+  iconColor: string
+  count: number
+  recentCount: number
+  latestRepo: Pick<Repo, 'id' | 'fullName' | 'discoveredAt'> | null
+}
+
+export interface ProjectThemeGroup { slug: string; name: string; description: string }
+export interface ProjectThemeDirectory { items: ProjectTheme[]; groups: ProjectThemeGroup[] }
+
+export interface ThemeMilestone { kind: 'trending' | 'stars'; fullName: string; at: string; value: number }
+export interface ProjectThemeDetail extends ProjectTheme { milestones: ThemeMilestone[] }
+
 export interface TrendingEntry {
   sourceKey: string
   period: 'daily' | 'weekly' | 'monthly'
@@ -54,6 +72,7 @@ export interface Repo {
   metricsUpdatedAt: string | null
   candidateBurst: boolean
   summaryPreview: string | null
+  recommendationReason?: string | null
   summaryStatus: SummaryStatus
   summarySourceQuality: SourceQuality | null
   summaryJobId?: number | null
@@ -61,6 +80,7 @@ export interface Repo {
   blocked?: boolean
   followedAt?: string | null
   discoveredAt: string
+  discoveryAt?: string
   lastSuccessAt: string | null
 }
 
@@ -169,9 +189,20 @@ export type SettingValue = boolean | number | string | null | SettingValue[] | S
 export interface SettingFields { [key: string]: SettingValue }
 export interface RuntimeSettings { revision: number; settings: SettingFields; restartRequired: boolean }
 export interface CategorySetting { slug: string; name: string; anyTopics: string[] }
+export interface ProjectThemeSetting { slug: string; name: string; description: string; anyTopics: string[]; icon: string; iconColor: string; groupSlug: string }
 export interface DiscoveryTab { slug: string; label: string }
 export interface DiscoveryTabOption { slug: string; name: string }
-export interface DiscoveryTabSettings extends ListSettings<DiscoveryTab> { options: DiscoveryTabOption[] }
+export interface DiscoverySelection {
+  recentDays: number
+  recentSampleHours: number
+  growthSampleHours: number
+  trendingHours: number
+  trendingTop: number
+}
+export interface DiscoveryTabSettings extends ListSettings<DiscoveryTab> {
+  options: DiscoveryTabOption[]
+  selection: DiscoverySelection
+}
 export interface RuleSetting {
   sourceType: 'trending' | 'search'
   sourceKey: string

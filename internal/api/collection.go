@@ -15,6 +15,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
@@ -62,7 +63,7 @@ func (a *collectionAPI) loadCategories(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	c.Set(categoriesKey, append(items, config.Category{Slug: "other", Name: "其他"}))
+	c.Set(categoriesKey, append(items, config.Category{Slug: consts.CategoryOther, Name: "其他"}))
 	c.Next()
 }
 
@@ -81,8 +82,8 @@ func optionalISO(ms *int64) *string {
 }
 
 // 分类优先使用 GitHub Topics。仅当原生主题为空时才读取 AI Topics。
-const effectiveTopicsSQL = `CASE WHEN json_array_length(repositories.topics_json)>0 THEN repositories.topics_json
-ELSE COALESCE((SELECT topics_json FROM repo_ai_topics t WHERE t.repo_id=repositories.repo_id), '[]') END`
+var effectiveTopicsSQL = `CASE WHEN json_array_length(` + storage.RepositoryTable + `.` + storage.RepositoryColumns.TopicsJSON + `)>0 THEN ` + storage.RepositoryTable + `.` + storage.RepositoryColumns.TopicsJSON + `
+ELSE COALESCE((SELECT ` + storage.RepoAITopicsColumns.TopicsJSON + ` FROM ` + storage.RepoAITopicsTable + ` t WHERE t.` + storage.RepoAITopicsColumns.RepoID + `=` + storage.RepositoryTable + `.` + storage.RepositoryColumns.RepoID + `), '[]') END`
 
 // card 组合仓库元数据及本轮成功发布的增长和热度。
 func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries map[int64][]gin.H, view metricView, summary summaryView) gin.H {
@@ -100,17 +101,18 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 	}
 	quality := view.row.DataQuality
 	if quality == "" {
-		quality = "insufficient"
+		quality = consts.QualityInsufficient
 	}
 	body := gin.H{
 		"id": repo.RepoID, "fullName": repo.FullName, "htmlUrl": repo.HTMLURL,
 		"description": repo.Description, "titleZh": summary.title(), "language": repo.PrimaryLanguage,
 		"categories": config.Classify(categoriesFor(c), topics), "state": repo.State,
 		"stars": repo.Stars, "forks": repo.Forks, "grade": repo.Grade,
-		"growth24h": view.window("24h"), "growth7d": view.window("7d"),
+		"growth24h": view.window(consts.Window24h), "growth7d": view.window(consts.Window7d),
 		"hotnessScore": view.row.HotnessScore, "hotnessRank": view.rank, "trendingEntries": trending,
 		"dataQuality": quality, "metricsUpdatedAt": metricsUpdatedAt, "candidateBurst": view.row.CandidateBurst,
 		"sparkline": view.sparkline, "summaryPreview": summary.preview(), "summaryStatus": summary.state(),
+		"recommendationReason": summary.reason(),
 		"summarySourceQuality": textPtr(summary.row.SourceQuality), "summaryJobId": summary.jobID,
 		"followed": repo.StarredByUser, "followedAt": optionalISO(repo.FollowedAt),
 		"lastSuccessAt": optionalISO(repo.LastSuccessAt),
@@ -130,21 +132,21 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 
 func (a *collectionAPI) fail(c *gin.Context, err error) {
 	if errors.Is(err, storage.ErrRepositoryBlocked) {
-		c.JSON(http.StatusConflict, gin.H{"code": "repo_blocked"})
+		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeRepoBlocked})
 		return
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"code": "not_found"})
+		c.JSON(http.StatusNotFound, gin.H{"code": consts.CodeNotFound})
 		return
 	}
 	a.logger.Error("采集接口失败", "route", c.FullPath(), "error", err)
-	c.JSON(http.StatusInternalServerError, gin.H{"code": "internal_error"})
+	c.JSON(http.StatusInternalServerError, gin.H{"code": consts.CodeInternalError})
 }
 
 func parseID(c *gin.Context) (int64, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_id"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidID})
 		return 0, false
 	}
 	return id, true
@@ -156,24 +158,24 @@ func (a *collectionAPI) repo(c *gin.Context) {
 	lookup := publicRepos(c, db)
 	if owner := c.Param("owner"); owner != "" {
 		// 名称可被复用，名称路由只匹配当前映射并使用 SQLite 的现有唯一索引。
-		lookup = lookup.Where("name_is_current = 1")
+		lookup = lookup.Where(storage.RepositoryColumns.NameIsCurrent + " = 1")
 		if expected := c.Query("repoId"); c.GetBool(publicReadKey) && expected != "" {
 			// 收藏以仓库身份定位，打开后由前端使用返回的当前名称。
 			id, err := strconv.ParseInt(expected, 10, 64)
 			if err != nil || id <= 0 {
-				c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_id"})
+				c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidID})
 				return
 			}
-			lookup = lookup.Where("repo_id = ?", id)
+			lookup = lookup.Where(storage.RepositoryColumns.RepoID+" = ?", id)
 		} else {
-			lookup = lookup.Where("full_name COLLATE NOCASE = ?", owner+"/"+c.Param("name"))
+			lookup = lookup.Where(storage.RepositoryColumns.FullName+" COLLATE NOCASE = ?", owner+"/"+c.Param("name"))
 		}
 	} else {
 		id, ok := parseID(c)
 		if !ok {
 			return
 		}
-		lookup = lookup.Where("repo_id = ?", id)
+		lookup = lookup.Where(storage.RepositoryColumns.RepoID+" = ?", id)
 	}
 	if err := lookup.Take(&repo).Error; err != nil {
 		a.fail(c, err)
@@ -222,7 +224,7 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		_ = json.Unmarshal([]byte(raw), &tags)
 		body[name] = tags
 	}
-	body["growth1h"], body["growth30d"] = view.window("1h"), view.window("30d")
+	body["growth1h"], body["growth30d"] = view.window(consts.Window1h), view.window(consts.Window30d)
 	body["acceleration"], body["relativeGrowth"] = view.row.Acceleration, view.row.RelativeGrowth
 	body["persistenceScore"], body["dailyConcentration"] = view.row.PersistenceScore, view.row.DailyConcentration
 	body["trendingFrequency"], body["trendingStreak"], body["trendingRank"] = view.row.TrendingFrequency, view.row.TrendingStreak, view.row.TrendingRank
@@ -238,11 +240,11 @@ func (a *collectionAPI) refresh(c *gin.Context) {
 		RequestID string `json:"requestId"`
 	}
 	if c.ShouldBindJSON(&input) != nil || strings.TrimSpace(input.RequestID) == "" || len(input.RequestID) > 128 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_request_id"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidRequestID})
 		return
 	}
 	if strings.TrimSpace(os.Getenv(a.cfg.GitHub.TokenEnv)) == "" {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "github_not_configured"})
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": consts.CodeGitHubNotConfigured})
 		return
 	}
 	job, err := (collector.Queue{DB: a.db, Cfg: a.cfg.Scheduler}).Refresh(c.Request.Context(), id, input.RequestID, time.Now())
@@ -262,7 +264,7 @@ func (a *collectionAPI) block(c *gin.Context) {
 		Blocked *bool `json:"blocked"`
 	}
 	if c.ShouldBindJSON(&input) != nil || input.Blocked == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_block"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidBlock})
 		return
 	}
 	queue := collector.Queue{DB: a.db, Cfg: a.cfg.Scheduler}
@@ -282,12 +284,12 @@ func (a *collectionAPI) follow(c *gin.Context) {
 		Follow *bool `json:"follow"`
 	}
 	if c.ShouldBindJSON(&input) != nil || input.Follow == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_follow"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidFollow})
 		return
 	}
 	err := (collector.Queue{DB: a.db, Cfg: a.cfg.Scheduler}).Follow(c.Request.Context(), id, *input.Follow, time.Now())
 	if errors.Is(err, collector.ErrCapacity) {
-		c.JSON(http.StatusConflict, gin.H{"code": "monitoring_capacity_full"})
+		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeMonitoringCapacityFull})
 		return
 	}
 	if err != nil {
@@ -311,7 +313,7 @@ func (a *collectionAPI) job(c *gin.Context) {
 		return
 	}
 	var job storage.Job
-	if err := a.db.WithContext(c.Request.Context()).Take(&job, "id = ?", id).Error; err != nil {
+	if err := a.db.WithContext(c.Request.Context()).Take(&job, storage.JobColumns.ID+" = ?", id).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -321,7 +323,7 @@ func (a *collectionAPI) job(c *gin.Context) {
 func pageLimit(c *gin.Context) (int, bool) {
 	limit, err := strconv.Atoi(c.DefaultQuery("limit", "30"))
 	if err != nil || limit < 1 || limit > 100 {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_limit"})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidLimit})
 		return 0, false
 	}
 	return limit, true
@@ -339,9 +341,9 @@ func (a *collectionAPI) jobs(c *gin.Context) {
 	}
 	// 任务入口使用仓库名地址，关联名称和任务列表一次读取。
 	if err := a.db.WithContext(c.Request.Context()).Model(&storage.Job{}).
-		Select("jobs.*, repositories.full_name AS repo_full_name, repositories.name_is_current AS repo_name_is_current").
-		Joins("LEFT JOIN repositories ON repositories.repo_id = jobs.repo_id").
-		Order("jobs.id DESC").Limit(limit).Find(&jobs).Error; err != nil {
+		Select(storage.JobTable + ".*, " + storage.RepositoryTable + "." + storage.RepositoryColumns.FullName + " AS repo_full_name, " + storage.RepositoryTable + "." + storage.RepositoryColumns.NameIsCurrent + " AS repo_name_is_current").
+		Joins("LEFT JOIN " + storage.RepositoryTable + " ON " + storage.RepositoryTable + "." + storage.RepositoryColumns.RepoID + " = " + storage.JobTable + "." + storage.JobColumns.RepoID).
+		Order(storage.JobTable + "." + storage.JobColumns.ID + " DESC").Limit(limit).Find(&jobs).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -358,12 +360,12 @@ func (a *collectionAPI) jobs(c *gin.Context) {
 func (a *collectionAPI) limits(c *gin.Context) {
 	var states []storage.RateLimit
 	db := a.db.WithContext(c.Request.Context())
-	if err := db.Order("resource").Find(&states).Error; err != nil {
+	if err := db.Order(storage.RateLimitColumns.Resource).Find(&states).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
 	var waiting int64
-	if err := db.Model(&storage.Job{}).Where("status IN ('pending','failed','running')").Count(&waiting).Error; err != nil {
+	if err := db.Model(&storage.Job{}).Where(storage.JobColumns.Status + " IN ('" + consts.StatusPending + "','" + consts.StatusFailed + "','" + consts.StatusRunning + "')").Count(&waiting).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -389,8 +391,8 @@ func (a *collectionAPI) categoryList(c *gin.Context) {
 	categories := categoriesFor(c)
 	var repos []storage.Repository
 	if err := publicRepos(c, a.db.WithContext(c.Request.Context())).Model(&storage.Repository{}).
-		Select("repo_id, full_name, description, discovered_at, " + effectiveTopicsSQL + " AS topics_json").
-		Where("state='active'").Order("discovered_at DESC, repo_id ASC").Find(&repos).Error; err != nil {
+		Select(storage.RepositoryColumns.RepoID + ", " + storage.RepositoryColumns.FullName + ", " + storage.RepositoryColumns.Description + ", " + storage.RepositoryColumns.DiscoveredAt + ", " + effectiveTopicsSQL + " AS " + storage.RepositoryColumns.TopicsJSON).
+		Where(storage.RepositoryColumns.State + "='" + consts.StatusActive + "'").Order(storage.RepositoryColumns.DiscoveredAt + " DESC, " + storage.RepositoryColumns.RepoID + " ASC").Find(&repos).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -422,21 +424,21 @@ func (a *collectionAPI) categoryList(c *gin.Context) {
 func (a *collectionAPI) latestEntries(db *gorm.DB) (map[int64][]gin.H, error) {
 	result := make(map[int64][]gin.H)
 	var markers []storage.MaintenanceState
-	if err := db.Where("key LIKE 'trending:%' AND EXISTS (SELECT 1 FROM discovery_rules r WHERE r.source_type='trending' AND 'trending:'||r.source_key=maintenance_state.key)").
+	if err := db.Where(storage.MaintenanceStateColumns.Key + " LIKE '" + consts.TrendingStatePattern + "' AND EXISTS (SELECT 1 FROM " + storage.DiscoveryRuleTable + " r WHERE r." + storage.DiscoveryRuleColumns.SourceType + "='" + consts.SourceTrending + "' AND '" + consts.TrendingStatePrefix + "'||r." + storage.DiscoveryRuleColumns.SourceKey + "=" + storage.MaintenanceStateTable + "." + storage.MaintenanceStateColumns.Key + ")").
 		Find(&markers).Error; err != nil {
 		return nil, err
 	}
 	for _, marker := range markers {
 		parts := strings.Split(marker.Key, ":")
 		period := parts[len(parts)-1]
-		source := strings.TrimSuffix(strings.TrimPrefix(marker.Key, "trending:"), ":"+period)
+		source := strings.TrimSuffix(strings.TrimPrefix(marker.Key, consts.TrendingStatePrefix), ":"+period)
 		var batch collector.TrendingBatch
 		if err := json.Unmarshal([]byte(marker.Value), &batch); err != nil {
 			return nil, err
 		}
 		var entries []storage.TrendingObservation
-		if err := db.Where("source_key=? AND window=? AND observed_slot=?", source, period, batch.ObservedSlot).
-			Order("rank, repo_id").Find(&entries).Error; err != nil {
+		if err := db.Where(storage.TrendingObservationColumns.SourceKey+"=? AND "+storage.TrendingObservationColumns.Window+"=? AND "+storage.TrendingObservationColumns.ObservedSlot+"=?", source, period, batch.ObservedSlot).
+			Order(storage.TrendingObservationColumns.Rank + ", " + storage.TrendingObservationColumns.RepoID).Find(&entries).Error; err != nil {
 			return nil, err
 		}
 		for _, entry := range entries {
@@ -449,19 +451,19 @@ func (a *collectionAPI) latestEntries(db *gorm.DB) (map[int64][]gin.H, error) {
 }
 
 func (a *collectionAPI) trending(c *gin.Context) {
-	period, source := c.DefaultQuery("period", "daily"), c.DefaultQuery("sourceKey", "all")
+	period, source := c.DefaultQuery("period", consts.PeriodDaily), c.DefaultQuery("sourceKey", consts.TrendingAll)
 	db := a.db.WithContext(c.Request.Context())
 	var count int64
-	if err := db.Model(&storage.DiscoveryRule{}).Where("source_type='trending' AND source_key=?", source+":"+period).Count(&count).Error; err != nil {
+	if err := db.Model(&storage.DiscoveryRule{}).Where(storage.DiscoveryRuleColumns.SourceType+"='"+consts.SourceTrending+"' AND "+storage.DiscoveryRuleColumns.SourceKey+"=?", source+":"+period).Count(&count).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
-	if count == 0 || (period != "daily" && period != "weekly" && period != "monthly") {
-		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_trending_source"})
+	if count == 0 || (period != consts.PeriodDaily && period != consts.PeriodWeekly && period != consts.PeriodMonthly) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidTrendingSource})
 		return
 	}
 	var marker storage.MaintenanceState
-	err := db.Take(&marker, "key = ?", collector.BatchKey(source, period)).Error
+	err := db.Take(&marker, storage.MaintenanceStateColumns.Key+" = ?", collector.BatchKey(source, period)).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusOK, gin.H{"sourceKey": source, "period": period, "batch": nil, "items": []any{}, "updatedAt": nil})
 		return
@@ -480,10 +482,10 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		BatchRank     int
 		PublicVisible bool
 	}
-	if err := db.Model(&storage.Repository{}).Select("repositories.*, t.rank AS batch_rank, ("+publicRepoCondition+") AS public_visible").
-		Joins("JOIN trending_observations t ON t.repo_id = repositories.repo_id").
-		Where("t.source_key=? AND t.window=? AND t.observed_slot=?", source, period, batch.ObservedSlot).
-		Order("t.rank, repositories.repo_id").Find(&members).Error; err != nil {
+	if err := db.Model(&storage.Repository{}).Select(storage.RepositoryTable+".*, t."+storage.TrendingObservationColumns.Rank+" AS batch_rank, ("+publicRepoCondition+") AS public_visible").
+		Joins("JOIN "+storage.TrendingObservationTable+" t ON t."+storage.TrendingObservationColumns.RepoID+" = "+storage.RepositoryTable+"."+storage.RepositoryColumns.RepoID).
+		Where("t."+storage.TrendingObservationColumns.SourceKey+"=? AND t."+storage.TrendingObservationColumns.Window+"=? AND t."+storage.TrendingObservationColumns.ObservedSlot+"=?", source, period, batch.ObservedSlot).
+		Order("t." + storage.TrendingObservationColumns.Rank + ", " + storage.RepositoryTable + "." + storage.RepositoryColumns.RepoID).Find(&members).Error; err != nil {
 		a.fail(c, err)
 		return
 	}

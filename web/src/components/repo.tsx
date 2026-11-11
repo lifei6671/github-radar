@@ -97,7 +97,7 @@ export function RepoLink({ repo }: { repo: Repo }) {
   </Link>
 }
 
-export function RepoCard({ repo, names, favorite = false }: { repo: Repo; names?: Map<string, string>; favorite?: boolean }) {
+export function RepoCard({ repo, names, favorite = false, recommend = false }: { repo: Repo; names?: Map<string, string>; favorite?: boolean; recommend?: boolean }) {
   const admin = useAdminArea()
   const trending = repo.trendingEntries.find((entry) => entry.sourceKey === 'all' && entry.period === 'daily') ?? repo.trendingEntries[0]
   const title = repo.titleZh || repo.description
@@ -117,6 +117,7 @@ export function RepoCard({ repo, names, favorite = false }: { repo: Repo; names?
     <h3 className="repo-identity"><RepoLink repo={repo} /><External href={repo.htmlUrl} iconOnly /></h3>
     {title && !repo.summaryPreview?.startsWith(title) && <p className="repo-title">{title}</p>}
     {repo.summaryPreview && <p className="repo-summary">{repo.summaryPreview}</p>}
+    {recommend && repo.recommendationReason && <p className="recommendation-reason"><strong>推荐理由</strong>{repo.recommendationReason}</p>}
     <div className="repo-tags context-tags">
       {repo.categories.map((slug) => <Link key={slug} to={'/categories/' + encodeURIComponent(slug)} className="context-chip">{names?.get(slug) ?? slug}</Link>)}
       {repo.summaryStatus !== 'ready' && (admin || repo.summaryPreview) && <span className="muted minor">{summaryLabel[repo.summaryStatus]}</span>}
