@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { RefreshCw, Sparkles } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router'
 import { api, ApiError, errorText } from '../api/client'
 import { refreshRepo } from '../api/queries'
 import type { Job, JobAccepted, RepoDetail, SummaryResponse } from '../api/types'
 import { jobLabel } from '../lib/format'
-import { Badge, Dialog, Notice, Spinner } from './ui'
+import { ActionButton, Badge, Dialog, Notice } from './ui'
 
 function requestID() {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('')
@@ -15,7 +16,7 @@ function ongoing(status: Job['status'] | undefined) {
   return status === 'pending' || status === 'running' || status === 'failed'
 }
 
-function useRepoTask(repoId: number, kind: 'refresh' | 'summary', existing: number | null = null, repoUpdatedAt?: number) {
+function useRepoTask(repoId: number, kind: 'refresh' | 'summary' | 'readme/translate', existing: number | null = null, repoUpdatedAt?: number) {
   const queryClient = useQueryClient()
   const [tracked, setTracked] = useState<number | null>(null)
   const [cached, setCached] = useState(false)
@@ -60,9 +61,10 @@ function useRepoTask(repoId: number, kind: 'refresh' | 'summary', existing: numb
     const event = jobId + ':' + (gone ? 'gone' : status)
     if (notified.current === event) return
     notified.current = event
-    void refreshRepo(queryClient, repoId)
+    if (kind === 'readme/translate') void queryClient.invalidateQueries({ queryKey: ['readme', repoId] })
+    else void refreshRepo(queryClient, repoId)
     void queryClient.invalidateQueries({ queryKey: ['jobs'] })
-  }, [gone, jobId, queryClient, repoId, status])
+  }, [gone, jobId, kind, queryClient, repoId, status])
 
   const submit = useMutation({
     mutationFn: (force: boolean) => {
@@ -121,11 +123,42 @@ function TaskStatus({ task }: { task: Task }) {
 export function RefreshAction({ repoId }: { repoId: number }) {
   const task = useRepoTask(repoId, 'refresh')
   return <div className="task-area">
-    <button className="button" disabled={task.busy} onClick={() => task.submit.mutate(false)}>
-      {task.submit.isPending ? <Spinner /> : <RefreshCw size={16} />}刷新采样
-    </button>
+    <ActionButton disabled={task.busy} pending={task.submit.isPending}
+      icon={<RefreshCw size={16} />} onClick={() => task.submit.mutate(false)}>刷新采样</ActionButton>
     {task.submit.error && <Notice error>{errorText(task.submit.error)}</Notice>}
     <TaskStatus task={task} />
+  </div>
+}
+
+export function TranslationAction({ repoId, available, existing }: { repoId: number; available: boolean; existing?: number }) {
+  const task = useRepoTask(repoId, 'readme/translate', existing)
+  const [confirm, setConfirm] = useState<number | null>(null)
+  const unknown = task.status === 'unknown'
+  const canRetry = available && unknown && !task.job.isFetching && !task.retry.isPending
+  const retryChanged = confirm !== null && (confirm !== task.jobId || !canRetry)
+  const error = task.retry.error ?? task.submit.error
+  if (!available && !task.jobId) return null
+  return <div className="task-area">
+    <div className="action-row">
+      <ActionButton pending={task.submit.isPending || task.retry.isPending}
+        disabled={unknown ? !canRetry : !available || task.busy} onClick={() => {
+          if (unknown) setConfirm(task.jobId)
+          else task.submit.mutate(false)
+        }}>{unknown ? '确认并继续翻译' : '生成中文译文'}</ActionButton>
+    </div>
+    {error && <Notice error>{errorText(error)}</Notice>}
+    <TaskStatus task={task} />
+    {confirm !== null && <Dialog title="确认再次调用" onClose={() => setConfirm(null)}>
+      <p>上一批译文的调用可能已计费。</p>
+      {retryChanged && <Notice>任务状态已变化，请关闭对话框后重新确认。</Notice>}
+      <div className="action-row">
+        <button className="button" data-autofocus onClick={() => setConfirm(null)}>取消</button>
+        <ActionButton className="button primary" disabled={retryChanged} onClick={() => {
+          task.retry.mutate()
+          setConfirm(null)
+        }}>接受可能再次计费</ActionButton>
+      </div>
+    </Dialog>}
   </div>
 }
 
@@ -134,20 +167,23 @@ export function SummaryActions({ repo, repoUpdatedAt }: { repo: RepoDetail; repo
   const [confirm, setConfirm] = useState<'force' | number | null>(null)
   const unknown = task.status === 'unknown' || (!task.status && !task.gone &&
     repo.summaryStatus === 'unknown' && repo.summaryJobId === task.jobId)
-  const canRetry = task.status === 'unknown' && !task.job.isFetching && !task.retry.isPending
+  const available = repo.summaryAvailable === true
+  const canRetry = available && task.status === 'unknown' && !task.job.isFetching && !task.retry.isPending
   const retryChanged = typeof confirm === 'number' && (confirm !== task.jobId || !canRetry)
   const unavailable = repo.state === 'unavailable' || repo.state === 'address_pending'
   const error = task.retry.error ?? task.submit.error
   return <div className="task-area summary-actions">
     <div className="action-row">
-      {unknown ? <button className="button" disabled={!canRetry} onClick={() => setConfirm(task.jobId)}>确认并重新调用</button> :
+      {unknown ? <ActionButton disabled={!canRetry} pending={task.retry.isPending} onClick={() => setConfirm(task.jobId)}>确认并重新调用</ActionButton> :
         <>
-          <button className="button primary" disabled={task.busy || unavailable} onClick={() => task.submit.mutate(false)}>
-            {task.submit.isPending ? <Spinner /> : <Sparkles size={16} />}生成总结
-          </button>
-          {repo.summaryZh && <button className="button" disabled={task.busy || unavailable} onClick={() => setConfirm('force')}>重新总结</button>}
+          <ActionButton className="button primary" disabled={!available || task.busy || unavailable}
+            pending={task.submit.isPending && !task.submit.variables} icon={<Sparkles size={16} />}
+            onClick={() => task.submit.mutate(false)}>生成总结</ActionButton>
+          {repo.summaryZh && <ActionButton disabled={!available || task.busy || unavailable}
+            pending={task.submit.isPending && task.submit.variables} onClick={() => setConfirm('force')}>重新总结</ActionButton>}
         </>}
     </div>
+    {!available && <p className="minor muted">手动摘要未启用。<Link className="detail-text-link" to="/admin/runs?tab=runtime&group=ai">查看 AI 摘要配置</Link></p>}
     {unknown && <Notice>上一次调用结果待确认，可能已经计费。</Notice>}
     {task.cached && <Badge tone="ok">已复用缓存</Badge>}
     {error && <Notice error>{errorText(error)}</Notice>}
@@ -157,11 +193,11 @@ export function SummaryActions({ repo, repoUpdatedAt }: { repo: RepoDetail; repo
       {retryChanged && <Notice>任务状态已变化，请关闭对话框后重新确认。</Notice>}
       <div className="action-row">
         <button data-autofocus className="button" onClick={() => setConfirm(null)}>取消</button>
-        <button className="button primary" disabled={retryChanged} onClick={() => {
+        <ActionButton className="button primary" disabled={!available || retryChanged} onClick={() => {
           if (typeof confirm === 'number') task.retry.mutate()
           else task.submit.mutate(true)
           setConfirm(null)
-        }}>{typeof confirm === 'number' ? '接受可能再次计费' : '确认重新生成'}</button>
+        }}>{typeof confirm === 'number' ? '接受可能再次计费' : '确认重新生成'}</ActionButton>
       </div>
     </Dialog>}
   </div>

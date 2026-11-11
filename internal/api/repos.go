@@ -26,13 +26,15 @@ var errInvalidCursor = errors.New("无效分页游标")
 
 // repoFilters 与游标内的过滤快照共用同一种表示。
 type repoFilters struct {
-	Q        string   `json:"q"`
-	Language string   `json:"language"`
-	State    string   `json:"state"`
-	Followed bool     `json:"followed"`
-	Category []string `json:"category"`
-	Grade    string   `json:"grade,omitempty"`
-	Tag      string   `json:"tag,omitempty"`
+	Q              string   `json:"q"`
+	Language       string   `json:"language"`
+	State          string   `json:"state"`
+	Followed       bool     `json:"followed"`
+	Category       []string `json:"category"`
+	Grade          string   `json:"grade,omitempty"`
+	Tag            string   `json:"tag,omitempty"`
+	Blocked        string   `json:"blocked,omitempty"`
+	IncludeBlocked bool     `json:"includeBlocked,omitempty"`
 }
 
 type repoCursor struct {
@@ -55,7 +57,7 @@ func (a *collectionAPI) repos(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_filter"})
 		return
 	}
-	if c.GetBool(publicReadKey) && filters.Followed {
+	if c.GetBool(publicReadKey) && (filters.Followed || filters.Blocked != "") {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_filter"})
 		return
 	}
@@ -90,8 +92,13 @@ func (a *collectionAPI) repoPage(c *gin.Context, tx *gorm.DB, filters repoFilter
 	if metricSort(sort) {
 		db = db.Joins("LEFT JOIN latest_metrics m ON m.repo_id=repositories.repo_id AND repositories.state='active'")
 	}
-	if filters.State != "" {
+	if filters.IncludeBlocked {
+		db = db.Where("(state = ? OR blocked=1)", filters.State)
+	} else if filters.State != "" {
 		db = db.Where("state = ?", filters.State)
+	}
+	if filters.Blocked != "" {
+		db = db.Where("blocked=?", filters.Blocked == "true")
 	}
 	if filters.Followed {
 		db = db.Where("starred_by_user = 1")
@@ -223,9 +230,15 @@ func (a *collectionAPI) filters(c *gin.Context) (repoFilters, string, error) {
 		return f, "", errors.New("followed 必须为布尔值")
 	}
 	f.Followed = followed == "true"
+	f.Blocked = c.Query("blocked")
+	if f.Blocked != "" && f.Blocked != "true" && f.Blocked != "false" {
+		return f, "", errors.New("无效屏蔽筛选")
+	}
 	f.State = c.Query("state")
-	if f.State == "" && !f.Followed {
+	if f.State == "" && !f.Followed && f.Blocked != "true" {
 		f.State = "active"
+		// 默认后台列表仍能找到已屏蔽仓库以便解除。
+		f.IncludeBlocked = !c.GetBool(publicReadKey) && f.Blocked == ""
 	}
 	if f.State != "" && !slices.Contains([]string{"candidate", "active", "paused", "unavailable", "address_pending"}, f.State) {
 		return f, "", errors.New("无效仓库状态")
@@ -273,7 +286,7 @@ func (a *collectionAPI) filterCategories(c *gin.Context, db *gorm.DB, selected [
 			}
 			continue
 		}
-		expression := "EXISTS (SELECT 1 FROM json_each(repositories.topics_json) topic WHERE lower(topic.value) IN ?)"
+		expression := "EXISTS (SELECT 1 FROM json_each(" + effectiveTopicsSQL + ") topic WHERE lower(topic.value) IN ?)"
 		if slug == "other" {
 			expression = "NOT " + expression
 		}

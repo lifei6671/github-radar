@@ -181,7 +181,7 @@ test('受理响应丢失后从服务端补回恢复，离开备份页也刷新�
     return route.fulfill({ json: completed ? { ...operation, status: 'completed', phase: 'done', databaseApplied: true } : operation })
   })
   await session(page)
-  await page.goto('/repos/1')
+  await page.goto('/repos/vercel/ai')
   await expect(page.getByRole('heading', { name: 'vercel/ai', exact: true })).toBeVisible()
   await page.getByRole('link', { name: '后台管理', exact: true }).click()
   await page.getByRole('link', { name: '备份与恢复' }).click()

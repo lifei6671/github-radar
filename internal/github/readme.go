@@ -82,16 +82,15 @@ func (c *Client) Readme(ctx context.Context, owner, name, etag string, limit int
 		if item.GetSize() > 0 {
 			body := &cappedBody{max: limit + 1}
 			_, err = c.getMedia(ctx, path+"/git/blobs/"+sha, "", p, body, "application/vnd.github.raw+json")
+			if err != nil {
+				return ReadmeResult{}, err
+			}
 			result.Body = body.Bytes()
 		}
 	default:
 		err = errBodyLimit
 	}
 	if err != nil {
-		var failure *Failure
-		if errors.As(err, &failure) {
-			return ReadmeResult{}, err
-		}
 		return ReadmeResult{}, &Failure{Code: "github_invalid_readme", Status: resp.StatusCode}
 	}
 	result.Truncated = len(result.Body) > limit || item.GetSize() > limit

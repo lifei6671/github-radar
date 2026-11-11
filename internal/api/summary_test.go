@@ -43,13 +43,20 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	}
 	snapshot.Settings.AI.BaseURL, snapshot.Settings.AI.Model = "http://127.0.0.1:9876/v1", "test-model"
 	cfg = cfg.WithRuntime(snapshot.Settings)
-	t.Setenv(cfg.AI.APIKeyEnv, "test-key")
+	t.Setenv(cfg.AI.APIKeyEnv, "")
 	t.Setenv(cfg.GitHub.TokenEnv, "test-token")
 	pool, err := db.DB()
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewRouter(db, pool, "admin", slog.New(slog.NewTextHandler(io.Discard, nil)), cfg)
+	router := NewRouter(db, pool, "admin", slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, nil)
+	detailWithoutKey := request(t, router, "GET", "/api/v1/repos/1", "", "admin", 200)
+	if detailWithoutKey["summaryAvailable"] != false || detailWithoutKey["description"] != desc ||
+		detailWithoutKey["summaryZh"] != nil || len(detailWithoutKey["aiTopics"].([]any)) != 0 {
+		t.Fatalf("缺少模型密钥时应返回原始简介并关闭摘要操作: %+v", detailWithoutKey)
+	}
+	request(t, router, "POST", path, `{"requestId":"missing-key","force":true}`, "admin", 503)
+	t.Setenv(cfg.AI.APIKeyEnv, "test-key")
 	request(t, router, "POST", path, `{"requestId":"no-auth"}`, "", 401)
 	one := request(t, router, "POST", path, `{"requestId":"one","force":true}`, "admin", 202)
 	two := request(t, router, "POST", path, `{"requestId":"one","force":true}`, "admin", 202)
@@ -86,9 +93,14 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	if err := db.Create(&check).Error; err != nil {
 		t.Fatal(err)
 	}
+	// 此处验证已补齐主题词的摘要仍能走缓存。
+	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: "[]", SourceFingerprint: row.SourceFingerprint + "|description:test",
+		ModelProvider: row.ModelProvider, ModelName: row.ModelName, PromptVersion: row.PromptVersion}).Error; err != nil {
+		t.Fatal(err)
+	}
 	request(t, router, "POST", path, `{"requestId":"cached"}`, "admin", 200)
 	detail := request(t, router, "GET", "/api/v1/repos/1", "", "admin", 200)
-	if detail["titleZh"] != "这个项目用于自动化" || detail["summaryZh"] != row.SummaryZh || detail["summaryModel"] != cfg.AI.Model {
+	if detail["titleZh"] != "这个项目用于自动化" || detail["summaryZh"] != row.SummaryZh || detail["summaryModel"] != cfg.AI.Model || detail["summaryAvailable"] != true {
 		t.Fatalf("摘要详情契约错误: %+v", detail)
 	}
 	page := request(t, router, "GET", "/api/v1/repos?grade=A&tag="+url.QueryEscape("自动化"), "", "admin", 200)

@@ -17,10 +17,11 @@ import (
 	"github.com/lifei6671/github-radar/internal/backup"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/summary"
 )
 
 // NewRouter 分别注册公开只读接口与需要管理员令牌的业务接口。
-func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger, cfg config.Config, backups ...*backup.Manager) *gin.Engine {
+func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger, cfg config.Config, readmes *summary.Engine, backups ...*backup.Manager) *gin.Engine {
 	var manager *backup.Manager
 	if len(backups) > 0 {
 		manager = backups[0]
@@ -86,7 +87,7 @@ func NewRouter(db *gorm.DB, pool *sql.DB, adminToken string, logger *slog.Logger
 		}
 		c.JSON(http.StatusOK, gin.H{"initialized": true})
 	})
-	collection := &collectionAPI{db: db, cfg: cfg, logger: logger}
+	collection := &collectionAPI{db: db, cfg: cfg, logger: logger, readmes: readmes}
 	requireBusiness := func(c *gin.Context) {
 		if manager != nil {
 			release, err := manager.Enter(settingsWrite(c))

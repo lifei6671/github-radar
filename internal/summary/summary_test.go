@@ -38,6 +38,7 @@ Script groups and clear status output make repeatable work easier to review. The
 
 type sourceFixture struct {
 	sha, body, description string
+	topics                 []string
 	missing, private       bool
 	etags                  []string
 	unsolicited304         bool
@@ -46,7 +47,7 @@ type sourceFixture struct {
 
 func (s *sourceFixture) RepositoryByID(_ context.Context, id int64, _ gh.Policy) (gh.RepositoryResult, error) {
 	return gh.RepositoryResult{Repository: &sdk.Repository{ID: &id, FullName: new("owner/project"),
-		Description: &s.description, Private: &s.private}}, nil
+		Description: &s.description, Private: &s.private, Topics: s.topics}}, nil
 }
 
 func (s *sourceFixture) Readme(_ context.Context, _, _, etag string, _ int, _ gh.Policy) (gh.ReadmeResult, error) {
@@ -93,9 +94,9 @@ func fixture(t *testing.T) (*Engine, *sourceFixture, *bytes.Buffer, string) {
 	}
 	for id := int64(1); id <= 3; id++ {
 		r := storage.Repository{RepoID: id, Owner: "owner", Name: fmt.Sprint(id), FullName: fmt.Sprintf("owner/%d", id),
-			TopicsJSON: "[]", State: "active", Grade: "C", NameIsCurrent: true}
+			TopicsJSON: `["workflow"]`, State: "active", Grade: "C", NameIsCurrent: true}
 		if id == 1 {
-			r.Grade = "A"
+			r.Grade, r.TopicsJSON = "A", "[]"
 		}
 		if err := db.Create(&r).Error; err != nil {
 			t.Fatal(err)
@@ -115,8 +116,11 @@ func modelAnswer(short bool) string {
 		value = "这个开源项目面向需要组织本地开发任务的团队，仓库简介只说明了基本用途，具体能力仍需查看文档确认。"
 		evidence = "仓库 Description"
 	}
-	raw, _ := json.Marshal(answer{Language: "en", Summary: value, Features: []string{"脚本分组", "状态输出", "脚本分组"},
-		Tags: []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{marker}})
+	raw, _ := json.Marshal(struct {
+		answer
+		Topics []string `json:"topics"`
+	}{answer{Language: "en", Summary: value, Features: []string{"脚本分组", "状态输出", "脚本分组"},
+		Tags: []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{marker}}, []string{"workflow", "dev-tools"}})
 	return string(raw)
 }
 
@@ -409,6 +413,10 @@ func TestBudgetAndInvalidOutputRepair(t *testing.T) {
 
 func TestChineseAndDescriptionFallback(t *testing.T) {
 	e, source, _, _ := fixture(t)
+	source.topics = []string{"workflow"}
+	if err := e.Queue.DB.Model(&storage.Repository{}).Where("repo_id=1").Update("topics_json", `["workflow"]`).Error; err != nil {
+		t.Fatal(err)
+	}
 	calls := 0
 	e.Provider = modelFixture(func(context.Context, string) ModelResult {
 		calls++
@@ -446,6 +454,136 @@ func TestChineseAndDescriptionFallback(t *testing.T) {
 	}
 }
 
+func TestAITopicsBackfillAndAboutRefresh(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	db := e.Queue.DB
+	calls := 0
+	e.Provider = modelFixture(func(_ context.Context, prompt string) ModelResult {
+		calls++
+		if !strings.Contains(prompt, source.description) || !strings.Contains(prompt, "Script groups") {
+			t.Fatal("主题词模型输入缺少简介或 README")
+		}
+		if calls == 1 {
+			if !strings.HasPrefix(prompt, "任务：摘要和主题词\n") {
+				t.Fatal("首次分析应合并摘要和主题词")
+			}
+			return ModelResult{Content: modelAnswer(false)}
+		}
+		if !strings.HasPrefix(prompt, "任务：主题词\n") {
+			t.Fatal("已有有效摘要时只需生成主题词")
+		}
+		return ModelResult{Content: `{"topics":[" MCP ","mcp","dev-tools","无效主题","not a slug"]}`}
+	})
+	schedule(t, e)
+	step(t, e)
+	original := row[storage.AISummary](t, db, "repo_id=1")
+	topics := row[storage.RepoAITopics](t, db, "repo_id=1")
+	if topics.TopicsJSON != `["workflow","dev-tools"]` || topics.ModelName != e.Queue.AI.Model {
+		t.Fatalf("首次主题词保存有误: %+v", topics)
+	}
+	// 模拟升级前只有摘要的仓库，已有摘要缓存仍能复用。
+	if err := db.Delete(&topics).Error; err != nil {
+		t.Fatal(err)
+	}
+	decision, err := e.Queue.Manual(t.Context(), 1, "ai-topics-backfill", false, true, time.Now())
+	if err != nil || decision.Cached || decision.Job.ID == 0 {
+		t.Fatalf("已有摘要缺少 AI Topics 时应入队: %+v %v", decision, err)
+	}
+	step(t, e)
+	topics = row[storage.RepoAITopics](t, db, "repo_id=1")
+	if topics.TopicsJSON != `["mcp","dev-tools"]` {
+		t.Fatalf("主题词标准化有误: %+v", topics)
+	}
+	source.description = "A tool for developers to build a workflow automation server."
+	if err := db.Model(&storage.SummaryCheck{}).Where("repo_id=1").Update("next_check_at", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, e)
+	step(t, e)
+	refreshed := row[storage.RepoAITopics](t, db, "repo_id=1")
+	if calls != 3 || refreshed.SourceFingerprint == topics.SourceFingerprint {
+		t.Fatalf("README 304 不能掩盖简介变更: %+v calls=%d", refreshed, calls)
+	}
+	summary := row[storage.AISummary](t, db, "repo_id=1")
+	repo := row[storage.Repository](t, db, "repo_id=1")
+	if summary.GeneratedAt != original.GeneratedAt || repo.TopicsJSON != "[]" {
+		t.Fatal("补跑主题词不应重写摘要或 GitHub Topics")
+	}
+	// 确认来源已被清空后，旧主题词不能继续参与分类。
+	source.missing, source.description = true, ""
+	if err := db.Model(&storage.SummaryCheck{}).Where("repo_id=1").Update("next_check_at", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, e)
+	step(t, e)
+	var remaining int64
+	if err := db.Model(&storage.RepoAITopics{}).Where("repo_id=1").Count(&remaining).Error; err != nil || remaining != 0 || calls != 3 {
+		t.Fatalf("来源清空后应移除旧主题词且不再调用模型: rows=%d calls=%d err=%v", remaining, calls, err)
+	}
+}
+
+func TestAITopicsForChineseRepository(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	db := e.Queue.DB
+	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Update("grade", "C").Error; err != nil {
+		t.Fatal(err)
+	}
+	source.body = strings.Repeat("这是用于管理本地开发工作流的开源工具。它可以组织脚本，显示执行状态，帮助开发团队检查操作结果。", 8)
+	calls := 0
+	e.Provider = modelFixture(func(_ context.Context, prompt string) ModelResult {
+		calls++
+		if !strings.HasPrefix(prompt, "任务：主题词\n") {
+			t.Fatal("中文仓库只应自动提取主题词")
+		}
+		if calls == 1 {
+			return ModelResult{Content: `{"topics":["自动化工具"]}`}
+		}
+		return ModelResult{Content: `{"topics":[]}`}
+	})
+	schedule(t, e)
+	step(t, e)
+	job := row[storage.Job](t, db, "repo_id=1 AND type=?", JobType)
+	if job.Status != "failed" || job.LastErrorCode == nil || *job.LastErrorCode != "invalid_output" {
+		t.Fatalf("全无效的模型主题词应进入格式重试: %+v", job)
+	}
+	if err := db.Model(&job).Update("available_at", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	step(t, e)
+	if topics := row[storage.RepoAITopics](t, db, "repo_id=1"); topics.TopicsJSON != "[]" {
+		t.Fatalf("模型返回空主题时也应标记为已分析: %+v", topics)
+	}
+	var summaries int64
+	if err := db.Model(&storage.AISummary{}).Where("repo_id=1").Count(&summaries).Error; err != nil || summaries != 0 {
+		t.Fatalf("主题词任务不应创建中文摘要: %d %v", summaries, err)
+	}
+	if err := db.Model(&storage.SummaryCheck{}).Where("repo_id=1").Update("next_check_at", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, e)
+	step(t, e)
+	if calls != 2 {
+		t.Fatal("空主题词结果也应复用缓存")
+	}
+}
+
+func TestAITopicsScheduleUsesSpareBudget(t *testing.T) {
+	e, _, _, _ := fixture(t)
+	db := e.Queue.DB
+	e.Queue.AI.Summary.AutoDailyCalls = 1
+	if err := db.Model(&storage.Repository{}).Where("repo_id=2").Update("topics_json", "[]").Error; err != nil {
+		t.Fatal(err)
+	}
+	e.Provider = modelFixture(func(context.Context, string) ModelResult { return ModelResult{Content: modelAnswer(false)} })
+	schedule(t, e)
+	step(t, e)
+	schedule(t, e)
+	var queued int64
+	if err := db.Model(&storage.Job{}).Where("repo_id=2 AND type=?", JobType).Count(&queued).Error; err != nil || queued != 0 {
+		t.Fatalf("自动预算由高优先级任务占用时，低优先级主题词不应排队: jobs=%d err=%v", queued, err)
+	}
+}
+
 func TestReadmeVisibilityChangesBeforeModel(t *testing.T) {
 	e, source, _, _ := fixture(t)
 	source.onRead = func() { source.private = true }
@@ -472,7 +610,7 @@ func TestReadmeVisibilityChangesBeforeModel(t *testing.T) {
 func TestModelInputBudgetAndCopiedSource(t *testing.T) {
 	s := source{fullName: strings.Repeat("a", 39) + "/" + strings.Repeat("b", 100), language: "en",
 		description: strings.Repeat("description ", 200), body: readmeText, quality: sufficient}
-	prompt, sent := s.prompt(config.DefaultSummary().InputTokens)
+	prompt, sent := s.prompt(config.DefaultSummary().InputTokens, true, false)
 	if sent.body == "" || sent.description == "" || !strings.Contains(prompt, sent.body) ||
 		len(prompt)+len(systemPrompt)+128 > config.DefaultSummary().InputTokens {
 		t.Fatal("提示词须在预算内携带真实证据")

@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { api, ApiError, errorText } from '../api/client'
 import { AdminPanel } from '../components/admin'
-import { Badge, Dialog, Empty, More, Notice, PageError, Skeleton, Spinner } from '../components/ui'
+import { ActionButton, Badge, Dialog, Empty, More, Notice, PageError, Skeleton } from '../components/ui'
 import { formatBytes, timestamp } from '../lib/format'
 
 type Connection = { endpoint: string; bucket: string; prefix: string; accessKeyId: string; secretAccessKey: string }
@@ -208,7 +208,7 @@ function OperationProgress({ id, published, setup = false, onDone }: {
   return <div className="backup-stack">
     <Notice error>{errorText(new ApiError(500, { code: op.errorCode }))}</Notice>
     {op.databaseApplied && op.errorCode === 'restore_reload_failed' &&
-      <button className="button" disabled={reload.isPending || query.isFetching} onClick={() => reload.mutate()}>重试加载</button>}
+      <ActionButton disabled={query.isFetching} pending={reload.isPending} onClick={() => reload.mutate()}>重试加载</ActionButton>}
     {reload.error && <Notice error>{errorText(reload.error)}</Notice>}
   </div>
 }
@@ -315,7 +315,7 @@ function RestoreDialog({ backup, saved, sessionId, close, accepted, begin, rejec
       {restore.error && <Notice error>{errorText(restore.error)}</Notice>}
       <div className="action-row">
         <button type="button" className="button" onClick={close} disabled={restore.isPending} data-autofocus>取消</button>
-        <button className="button primary" disabled={restore.isPending}>{restore.isPending && <Spinner />}确认恢复</button>
+        <ActionButton type="submit" className="button primary" pending={restore.isPending}>确认恢复</ActionButton>
       </div>
     </form>
   </Dialog>
@@ -366,12 +366,12 @@ function BackupEditor({ settings, disabled }: { settings: BackupSettings; disabl
       {!editing && <button type="button" className="button" onClick={() => setEditing(true)}>更新 R2 连接</button>}
       {editing && <ConnectionFields value={r2} onChange={(value) => { setR2(value); test.reset() }} />}
       <div className="action-row">
-        {editing && <button type="button" className="button" disabled={!r2.endpoint || !r2.bucket || !r2.accessKeyId || !r2.secretAccessKey}
-          onClick={() => test.mutate(r2)}>{test.isPending && <Spinner />}测试连接</button>}
+        {editing && <ActionButton pending={test.isPending} disabled={!r2.endpoint || !r2.bucket || !r2.accessKeyId || !r2.secretAccessKey}
+          onClick={() => test.mutate(r2)}>测试连接</ActionButton>}
         {editing && settings.r2.configured && <button type="button" className="button" onClick={() => {
           setEditing(false); setR2({ ...emptyConnection, endpoint: settings.r2.endpoint, bucket: settings.r2.bucket, prefix: settings.r2.prefix }); test.reset()
         }}>取消更新连接</button>}
-        <button className="button primary">{save.isPending && <Spinner />}保存配置</button>
+        <ActionButton type="submit" className="button primary" pending={save.isPending}>保存配置</ActionButton>
       </div>
     </fieldset>
     {test.isSuccess && <Notice>R2 连接测试通过。</Notice>}
@@ -396,7 +396,7 @@ function ResumeAI() {
         {resume.error && <Notice error>{errorText(resume.error)}</Notice>}
         <div className="action-row">
           <button className="button" disabled={resume.isPending} onClick={() => setConfirm(false)} data-autofocus>取消</button>
-          <button className="button primary" disabled={resume.isPending} onClick={() => resume.mutate()}>确认启用</button>
+          <ActionButton className="button primary" pending={resume.isPending} onClick={() => resume.mutate()}>确认启用</ActionButton>
         </div>
       </div>
     </Dialog>}
@@ -456,9 +456,8 @@ export function BackupPage() {
         </div>
       </AdminPanel>
     </div>
-    <AdminPanel title="云端备份" action={<button className="button" disabled={busy || run.isPending || !settings.data?.r2.configured} onClick={() => run.mutate()}>
-      {run.isPending ? <Spinner /> : <CloudUpload size={16} />}立即备份
-    </button>}>
+    <AdminPanel title="云端备份" action={<ActionButton disabled={busy || !settings.data?.r2.configured}
+      pending={run.isPending} icon={<CloudUpload size={16} />} onClick={() => run.mutate()}>立即备份</ActionButton>}>
       {run.error && !uncertain(run.error) && <Notice error>{errorText(run.error)}</Notice>}
       {settings.data?.r2.configured ? <BackupHistory disabled={busy || run.isPending} onRestore={setPicked} /> :
         <p className="admin-empty">{settings.isPending && !state.maintenance ? '正在读取备份配置' : state.maintenance ? '恢复期间暂停读取备份列表' : '配置 R2 后可查看备份'}</p>}
@@ -508,8 +507,9 @@ export function SetupBackup({ initialized, onDone, onRestoring }: {
         <fieldset className="backup-stack" disabled={submitting}>
           <ConnectionFields value={r2} onChange={(value) => { setR2(value); test.reset() }} />
           <div className="action-row">
-            <button type="button" className="button" disabled={!r2.endpoint || !r2.bucket || !r2.accessKeyId || !r2.secretAccessKey} onClick={() => test.mutate(r2)}>测试连接</button>
-            <button className="button primary">{connect.isPending && <Spinner />}连接并查看备份</button>
+            <ActionButton pending={test.isPending} disabled={!r2.endpoint || !r2.bucket || !r2.accessKeyId || !r2.secretAccessKey}
+              onClick={() => test.mutate(r2)}>测试连接</ActionButton>
+            <ActionButton type="submit" className="button primary" pending={connect.isPending}>连接并查看备份</ActionButton>
           </div>
         </fieldset>
         {test.isSuccess && <Notice>R2 连接测试通过。</Notice>}

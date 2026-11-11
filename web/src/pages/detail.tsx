@@ -2,23 +2,24 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { UseQueryResult } from '@tanstack/react-query'
 import { ArrowLeft, CalendarDays, Clock3, GitFork, Plus, Star } from 'lucide-react'
 import { lazy, Suspense, useEffect } from 'react'
-import { Link, useLocation, useNavigate, useParams } from 'react-router'
+import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router'
 import { api, ApiError, errorText, publicApi, useSession } from '../api/client'
-import { useAdminArea, useCategories } from '../api/queries'
+import { useAdminArea, useCategories, withdrawPublicRepo } from '../api/queries'
 import type { RepoDetail, Topic, Trend, TrendRange } from '../api/types'
-import { External, GrowthValue, MonitorButton } from '../components/repo'
+import { External, GrowthValue, MonitorButton, RepoBlockButton } from '../components/repo'
 import { RefreshAction, SummaryActions } from '../components/tasks'
-import { Badge, Empty, Notice, PageError, Skeleton, Spinner } from '../components/ui'
-import { decimal, number, qualityLabel, relativeTime, repoState, resolutionLabel, sourceLabel, summaryLabel, timestamp } from '../lib/format'
+import { RepoReading } from '../components/readme'
+import { ActionButton, Badge, Empty, Notice, PageError, Skeleton } from '../components/ui'
+import { decimal, encodedRepoName, number, qualityLabel, relativeTime, repoPath, repoState, resolutionLabel, sourceLabel, summaryLabel, timestamp } from '../lib/format'
 
 const TrendChart = lazy(() => import('../components/trend-chart'))
 const ranges: [TrendRange, string][] = [['24h', '24 小时'], ['7d', '7 天'], ['30d', '30 天'], ['180d', '180 天']]
-const sections = [['#summary', '仓库概览'], ['#star-trend', 'Star 趋势']] as const
+const sections = [['#summary', '仓库概览'], ['#readme', 'README'], ['#star-trend', 'Star 趋势']] as const
 const periodLabel = { daily: '日榜', weekly: '周榜', monthly: '月榜' }
 const repoNotFound = new ApiError(404, { code: 'not_found' })
 
 export function Detail() {
-  const { id } = useParams()
+  const { owner, name } = useParams()
   const admin = useAdminArea()
   const { token } = useSession()
   const location = useLocation()
@@ -27,33 +28,47 @@ export function Detail() {
   const read = admin ? api : publicApi
   const scope = admin ? 'admin' : 'public'
   const queryClient = useQueryClient()
-  const detailKey = ['repo', id, scope] as const
+  const params = new URLSearchParams(location.search)
+  // 收藏与管理入口携带仓库身份，名称复用后仍指向所选记录。
+  const identityParam = params.get('repoId')
+  const pinned: unknown = identityParam !== null ? Number(identityParam) : location.state?.repoId
+  const lookupId = typeof pinned === 'number' && Number.isSafeInteger(pinned) && pinned > 0 ? pinned : undefined
+  const invalidIdentity = identityParam !== null && lookupId === undefined
+  const fullName = owner && name ? owner + '/' + name : ''
+  const detailKey = ['repo', lookupId ?? fullName.toLowerCase(), scope] as const
   const detail = useQuery<RepoDetail | null>({
     queryKey: detailKey,
+    enabled: !invalidIdentity,
+    ...(!admin && lookupId !== undefined && { staleTime: 0 }),
     queryFn: async ({ signal }) => {
       try {
-        return await read<RepoDetail>('/repos/' + id, { signal })
+        const path = admin && lookupId !== undefined ? '/repos/' + lookupId : '/repos/by-name/' + encodedRepoName(fullName) +
+          (lookupId === undefined ? '' : '?repoId=' + lookupId)
+        return await read<RepoDetail>(path, { signal })
       } catch (error) {
         if (!admin && error instanceof ApiError && error.status === 404) return null
         throw error
       }
     },
   })
-  const requestedRange = new URLSearchParams(location.search).get('range')
+  const requestedRange = params.get('range')
   const range = ranges.find(([key]) => key === requestedRange)?.[0] ?? '7d'
   const withdrawn = detail.data === null
   const loadedRepoId = detail.data?.id
+  const resolvedPath = !admin && lookupId !== undefined && detail.data ? repoPath(detail.data.fullName) : null
+  const canonicalize = resolvedPath !== null && (resolvedPath !== location.pathname || identityParam !== null)
+  const resolvingBookmark = !admin && lookupId !== undefined && detail.isFetching
+  const wrongHistoricalName = admin && identityParam !== null && Boolean(detail.data && detail.data.fullName.toLowerCase() !== fullName.toLowerCase())
   const trend = useQuery({
-    queryKey: ['trend', id, range, scope],
-    enabled: loadedRepoId !== undefined && !withdrawn,
+    queryKey: ['trend', loadedRepoId, range, scope],
+    enabled: loadedRepoId !== undefined && !canonicalize && !resolvingBookmark && !wrongHistoricalName,
     queryFn: async ({ signal }) => {
       try {
         return await read<Trend>('/repos/' + loadedRepoId + '/trend?range=' + range, { signal })
       } catch (error) {
-        if (!admin && error instanceof ApiError && error.status === 404) {
+        if (!admin && loadedRepoId !== undefined && error instanceof ApiError && error.status === 404) {
           // 公开趋势确认撤回后，整个仓库的旧缓存都不能再用于返回或切换时段。
-          await queryClient.cancelQueries({ queryKey: detailKey, exact: true })
-          queryClient.setQueryData(detailKey, null)
+          await withdrawPublicRepo(queryClient, loadedRepoId)
         }
         throw error
       }
@@ -61,27 +76,35 @@ export function Detail() {
   })
   const categories = useCategories()
   const hash = location.hash
-  const activeAnchor = hash === '#star-trend' ? hash : '#summary'
+  const activeAnchor = sections.some(([anchor]) => anchor === hash) ? hash : '#summary'
   useEffect(() => {
     // 深链接打开时先加载仓库数据，章节挂载后再定位。
-    if (loadedRepoId !== undefined && sections.some(([anchor]) => anchor === hash)) {
+    if (loadedRepoId !== undefined && !canonicalize && !resolvingBookmark && sections.some(([anchor]) => anchor === hash)) {
       document.getElementById(hash.slice(1))?.scrollIntoView()
     }
-  }, [loadedRepoId, hash])
-  if (detail.isPending) return <Skeleton />
+  }, [loadedRepoId, hash, canonicalize, resolvingBookmark])
+  if (invalidIdentity || wrongHistoricalName) return <Empty title="仓库地址无效" />
+  if (detail.isPending || resolvingBookmark) return <Skeleton />
   if (withdrawn) return <PageError error={repoNotFound} retry={() => { void detail.refetch() }} />
   if (!detail.data) return <PageError error={detail.error} retry={() => { void detail.refetch() }} />
+  if (canonicalize && resolvedPath && !detail.error) {
+    params.delete('repoId')
+    return <Navigate replace to={{ pathname: resolvedPath, search: params.toString(), hash }} state={{ from, repoId: lookupId }} />
+  }
   const repo = detail.data
   const names = new Map(categories.data?.items.map((item) => [item.slug, item.name]))
+  const showSummaryStatus = Boolean(repo.summaryZh) || (admin && repo.summaryStatus !== 'missing')
   return <div className="repo-detail">
     <nav className="detail-breadcrumbs" aria-label="当前位置">
       <Link to={back}><ArrowLeft size={14} />返回列表</Link><span aria-current="page">仓库详情</span>
-      {!admin && token && <Link className="detail-text-link" to={'/admin/repos/' + repo.id + location.search + location.hash}>管理仓库</Link>}
+      {!admin && token && <Link className="detail-text-link" to={repoPath(repo.fullName, true) + location.search + location.hash}
+        state={{ repoId: repo.id }}>管理仓库</Link>}
     </nav>
     <header className="article-head">
       <div className="repo-tags">
         {repo.language && <span className="language"><span />{repo.language}</span>}<Badge>{repo.grade} 级</Badge>
         {repo.state !== 'active' && <Badge tone="warning">{repoState[repo.state]}</Badge>}
+        {repo.blocked && <Badge tone="warning">已屏蔽</Badge>}
       </div>
       <h1>{repo.fullName}</h1>
       <div className="detail-stats minor muted">
@@ -93,12 +116,16 @@ export function Detail() {
     </header>
     {detail.error && <Notice error>{errorText(detail.error)} 上次采样 {timestamp(repo.lastSuccessAt)}</Notice>}
     <nav className="reading-links" aria-label="仓库详情章节">
-      <div className="pills">{sections.map(([anchor, label]) => <Link key={anchor} to={{ search: location.search, hash: anchor }}
+      <div className="pills">{sections.filter(([anchor]) => !repo.blocked || anchor !== '#readme').map(([anchor, label]) => <Link key={anchor} to={{ search: location.search, hash: anchor }}
         state={location.state} preventScrollReset aria-current={activeAnchor === anchor ? 'location' : undefined}>{label}</Link>)}</div>
     </nav>
     <div className="detail-grid">
       <section id="summary" className="panel detail-panel summary-panel" aria-labelledby="repo-summary-title">
-        <header className="section-head"><h2 id="repo-summary-title">AI 中文摘要</h2><span className="minor muted">{summaryLabel[repo.summaryStatus]}</span></header>
+        <header className="section-head">
+          <h2 id="repo-summary-title">{repo.summaryZh ? 'AI 导读' : '项目简介'}</h2>
+          {showSummaryStatus ? <span className="minor muted">{summaryLabel[repo.summaryStatus]}</span> :
+            repo.description && <span className="minor muted">GitHub About</span>}
+        </header>
         <p className="summary-body">{repo.summaryZh || repo.description || '暂无项目简介'}</p>
         {repo.features.length > 0 && <div className="topic-links">
           {repo.features.map((tag) => <Badge key={tag}>{tag}</Badge>)}
@@ -109,7 +136,8 @@ export function Detail() {
           {repo.summaryModel && <span>{repo.summaryModel}</span>}
           <External href={repo.sourceReadmeUrl}>README 来源</External>
         </div>}
-        {admin && <footer className="summary-footer"><SummaryActions key={repo.id} repo={repo} repoUpdatedAt={detail.dataUpdatedAt} /></footer>}
+        {admin && !repo.blocked && <footer className="summary-footer"><SummaryActions key={repo.id} repo={repo} repoUpdatedAt={detail.dataUpdatedAt} /></footer>}
+        {!repo.blocked && <RepoReading key={repo.id + ':' + scope} repo={repo} admin={admin} />}
       </section>
       <DetailAside key={repo.id} repo={repo} names={names} admin={admin} />
       <TrendSection repo={repo} range={range} trend={trend} />
@@ -142,13 +170,22 @@ function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<stri
           </Link>
         </li>)}
       </ul>}
-      {admin && <div className="detail-side-actions"><MonitorButton repo={repo} full /><AddTopic repoId={repo.id} /></div>}
+      {admin && <div className="detail-side-actions">
+        {!repo.blocked && <><MonitorButton repo={repo} full /><AddTopic repoId={repo.id} /></>}
+        <RepoBlockButton repo={repo} />
+      </div>}
     </section>
     {(repo.categories.length > 0 || repo.valueTags.length > 0) && <section className="panel detail-side-card" aria-labelledby="repo-topics-title">
       <h2 id="repo-topics-title">相关主题</h2>
       <div className="topic-links">
         {repo.categories.map((slug) => <Link key={slug} className="context-chip" to={'/categories/' + encodeURIComponent(slug)}>{names.get(slug) ?? slug}</Link>)}
         {repo.valueTags.map((tag) => <Link key={'tag:' + tag} className="context-chip" to={'/repos?' + new URLSearchParams({ tag })}>{tag}</Link>)}
+      </div>
+    </section>}
+    {repo.aiTopics.length > 0 && <section className="panel detail-side-card" aria-labelledby="repo-ai-topics-title">
+      <h2 id="repo-ai-topics-title">AI Topics</h2>
+      <div className="topic-links">
+        {repo.aiTopics.map((topic) => <span key={topic} className="context-chip">{topic}</span>)}
       </div>
     </section>}
     <section className="panel detail-side-card" aria-labelledby="repo-record-title">
@@ -158,7 +195,7 @@ function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<stri
         <div><dt>最近采样</dt><dd>{repo.lastSuccessAt ? <time dateTime={repo.lastSuccessAt}>{timestamp(repo.lastSuccessAt)}</time> : '等待采样'}</dd></div>
         {repo.followedAt && <div><dt>加入重点监控时间</dt><dd><time dateTime={repo.followedAt}>{timestamp(repo.followedAt)}</time></dd></div>}
       </dl>
-      {admin && <RefreshAction repoId={repo.id} />}
+      {admin && !repo.blocked && <RefreshAction repoId={repo.id} />}
     </section>
   </aside>
 }
@@ -171,9 +208,7 @@ function AddTopic({ repoId }: { repoId: number }) {
   })
   return <div className="task-area">
     {add.data ? <Link to="/admin/topics" className="button">查看选题池</Link> :
-      <button className="button" onClick={() => add.mutate()} disabled={add.isPending}>
-        {add.isPending ? <Spinner /> : <Plus size={17} />}加入选题池
-      </button>}
+      <ActionButton onClick={() => add.mutate()} pending={add.isPending} icon={<Plus size={17} />}>加入选题池</ActionButton>}
     {add.error && <Notice error>{errorText(add.error)}</Notice>}
   </div>
 }

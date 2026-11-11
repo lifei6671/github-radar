@@ -1,8 +1,8 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import type { QueryClient } from '@tanstack/react-query'
+import type { Query, QueryClient, QueryFilters } from '@tanstack/react-query'
 import { useMatch } from 'react-router'
 import { api, publicApi } from './client'
-import type { Category, Items, Page, Repo, Topic } from './types'
+import type { Category, Items, Page, Repo, RepoDetail, Topic } from './types'
 
 export function useCategories() {
   return useQuery({
@@ -43,9 +43,23 @@ export function distinct<T extends { id: number }>(items: T[]): T[] {
   })
 }
 
+// 名称入口和收藏入口都按仓库身份匹配详情缓存。
+export function isRepoDetail(query: Query, id: number) {
+  return query.queryKey[1] === id || (query.state.data as RepoDetail | null | undefined)?.id === id
+}
+
+// 公开子资源确认仓库已撤回时，同步关闭所有公开详情入口的缓存。
+export async function withdrawPublicRepo(queryClient: QueryClient, id: number) {
+  const aliases: QueryFilters = { queryKey: ['repo'], predicate: (query) =>
+    query.queryKey[2] === 'public' && isRepoDetail(query, id) }
+  await queryClient.cancelQueries(aliases)
+  queryClient.setQueriesData(aliases, null)
+}
+
 export function refreshRepo(queryClient: QueryClient, id: number) {
   return Promise.all([
-    queryClient.invalidateQueries({ queryKey: ['repo', String(id)] }),
+    // 不可见详情的空缓存也需重查，采样可能使仓库重新可见。
+    queryClient.invalidateQueries({ queryKey: ['repo'], predicate: (query) => query.state.data === null || isRepoDetail(query, id) }),
     queryClient.invalidateQueries({ queryKey: ['repos'] }),
     queryClient.invalidateQueries({ queryKey: ['trending'] }),
   ])
@@ -60,5 +74,31 @@ export function useFollow(id: number) {
       method: 'POST', body: { follow },
     }),
     onSuccess: () => refreshRepo(queryClient, id),
+  })
+}
+
+export function useRepoBlock(id: number) {
+  const client = useQueryClient()
+  return useMutation({
+    mutationFn: (blocked: boolean) => api<{ blocked: boolean }>('/repos/' + id + '/block', { method: 'PATCH', body: { blocked } }),
+    onSuccess: async ({ blocked }) => {
+      if (blocked) {
+        await withdrawPublicRepo(client, id)
+        // 屏蔽后离开的页面也不能用旧的公开列表先绘制该仓库。
+        await Promise.all([
+          client.resetQueries({ queryKey: ['repos'], predicate: ({ queryKey }) => queryKey[2] === 'public' || queryKey[1] === 'discover-hot' }),
+          client.resetQueries({ queryKey: ['trending'], predicate: ({ queryKey }) => queryKey[1] !== 'sources' }),
+          client.resetQueries({ queryKey: ['categories'] }),
+        ])
+      }
+      await Promise.all([
+        refreshRepo(client, id),
+        client.invalidateQueries({ queryKey: ['categories'] }),
+        client.invalidateQueries({ queryKey: ['readme', id] }),
+        client.invalidateQueries({ queryKey: ['trend', id] }),
+        client.invalidateQueries({ queryKey: ['jobs'] }),
+        client.invalidateQueries({ queryKey: ['limits'] }),
+      ])
+    },
   })
 }

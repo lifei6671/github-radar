@@ -148,7 +148,7 @@ func cleanCandidates(db *gorm.DB, cutoff int64, limit int) error {
 		err := db.Transaction(func(tx *gorm.DB) error {
 			var ids []int64
 			// 有未终结任务、近期采样或仍在最新完整榜单里的候选继续保留。
-			if err := tx.Model(&storage.Repository{}).Where(`state='candidate' AND starred_by_user=0 AND last_discovered_at<?
+			if err := tx.Model(&storage.Repository{}).Where(`state='candidate' AND blocked=0 AND starred_by_user=0 AND last_discovered_at<?
 AND (last_success_at IS NULL OR last_success_at<?)
 AND NOT EXISTS(SELECT 1 FROM jobs j WHERE j.repo_id=repositories.repo_id AND j.status NOT IN ('succeeded','canceled','dead'))
 AND NOT EXISTS(SELECT 1 FROM ai_summaries s WHERE s.repo_id=repositories.repo_id)

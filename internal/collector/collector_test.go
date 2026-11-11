@@ -96,7 +96,10 @@ func source(id int64, name string, stars int) *sdk.Repository {
 
 func discover(t *testing.T, e *Engine, repo *sdk.Repository) {
 	t.Helper()
-	err := e.Queue.DB.Transaction(func(tx *gorm.DB) error { return e.Queue.discover(tx, repo, time.Now().UnixMilli()) })
+	err := e.Queue.DB.Transaction(func(tx *gorm.DB) error {
+		_, err := e.Queue.discover(tx, repo, time.Now().UnixMilli())
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

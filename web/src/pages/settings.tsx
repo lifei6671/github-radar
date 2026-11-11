@@ -1,13 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowLeft, ArrowUp, ChevronDown, Plus, X } from 'lucide-react'
-import { useState } from 'react'
+import { arrayMove } from '@dnd-kit/sortable'
+import { ArrowLeft, Pencil, Plus, Trash2, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError, errorText } from '../api/client'
 import type { CategorySetting, DiscoveryTab, DiscoveryTabSettings, ListSettings, RuleSetting, RuntimeSettings, SettingFields, SettingValue } from '../api/types'
 import { AdminMetrics, AdminPanel } from '../components/admin'
-import { SystemHeader } from '../components/system-navigation'
-import { Badge, Notice, PageError, Skeleton, Spinner } from '../components/ui'
+import { SortableSettings, SortableSettingsRow } from '../components/sortable-settings'
+import { ActionButton, Badge, Dialog, Notice, PageError, Skeleton, Spinner } from '../components/ui'
 import { number } from '../lib/format'
 
 type Snapshot = { revision: number }
@@ -18,14 +20,22 @@ function useConfig<T extends Snapshot>(path: ConfigPath) {
   return useQuery({ queryKey: ['settings', configScopes[path]], queryFn: ({ signal }) => api<T>(path, { signal }), staleTime: 0 })
 }
 
-function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields, apply, payload, status, onSaved }: {
+function refreshSettings(queryClient: ReturnType<typeof useQueryClient>) {
+  for (const key of ['settings', 'categories', 'discovery-tabs', 'repos', 'trending']) {
+    void queryClient.invalidateQueries({ queryKey: [key] })
+  }
+}
+
+function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields, apply, payload, status, navigation, panelTitle = '设置', onSaved }: {
   path: ConfigPath
   query: ReturnType<typeof useConfig<T>>
-  heading: (server?: T) => ReactNode
+  heading?: (server?: T) => ReactNode
   fields: (server: T, draft: Draft | undefined, edit: (value: Draft) => void) => ReactNode
   apply: (server: T, draft: Draft) => T | null
-  payload: (value: T) => unknown
+  payload: (value: T, draft?: Draft) => unknown
   status?: (server: T) => ReactNode
+  navigation?: ReactNode
+  panelTitle?: string
   onSaved?: () => void
 }) {
   const queryClient = useQueryClient()
@@ -33,23 +43,19 @@ function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields,
   const [saved, setSaved] = useState(false)
   const queryKey = ['settings', configScopes[path]]
   const save = useMutation({
-    mutationFn: (value: T) => api<T>(path, { method: 'PUT', body: payload(value) }),
+    mutationFn: ({ value, draft }: { value: T; draft: Draft }) => api<T>(path, { method: 'PUT', body: payload(value, draft) }),
     onSuccess: (value) => {
       queryClient.setQueryData(queryKey, value)
       setDraft(null)
       setSaved(true)
-      void queryClient.invalidateQueries({ queryKey: ['settings'] })
-      void queryClient.invalidateQueries({ queryKey: ['categories'] })
-      void queryClient.invalidateQueries({ queryKey: ['discovery-tabs'] })
-      void queryClient.invalidateQueries({ queryKey: ['repos'] })
-      void queryClient.invalidateQueries({ queryKey: ['trending'] })
+      refreshSettings(queryClient)
     },
     onError: (error) => {
       if (error instanceof ApiError && error.code === 'settings_conflict') void query.refetch()
     },
   })
   if (!query.data) return <div className="admin-stack">
-    <SystemHeader>{heading()}</SystemHeader>
+    {heading?.()}
     {query.isPending ? <Skeleton /> : <PageError error={query.error} retry={() => { void query.refetch() }} />}
   </div>
   const server = query.data
@@ -65,40 +71,38 @@ function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields,
   }
 
   const side = status?.(server)
+  const form = <form className={navigation ? 'config-form' : 'admin-panel-body config-form'} onSubmit={(event) => {
+    event.preventDefault()
+    if (proposed && draft && !outdated && !save.isPending) save.mutate({ value: proposed, draft: draft.value }, { onSuccess: onSaved })
+  }}>
+    <fieldset className="config-editable" disabled={save.isPending}>{fields(server, draft?.value, edit)}</fieldset>
+    {query.error && <Notice error>{errorText(query.error)}</Notice>}
+    {save.error && !outdated && <Notice error>{errorText(save.error)}</Notice>}
+    {outdated && <div className="panel config-conflict">
+      <Notice error>配置已被其他操作更新。当前表单修改已保留。</Notice>
+      <details>
+        <summary>核对当前配置</summary>
+        <pre>{JSON.stringify(payload(server), (key, value) => key === 'revision' ? undefined : value, 2)}</pre>
+      </details>
+      <div className="action-row">
+        <button className="button" type="button" disabled={save.isPending} onClick={reset}>载入当前配置</button>
+        <button className="button" type="button" disabled={save.isPending || !proposed} onClick={() => {
+          setDraft((previous) => previous && { ...previous, revision: server.revision })
+          save.reset()
+        }}>采用当前表单</button>
+      </div>
+    </div>}
+    <div className="config-footer">
+      {saved && <span role="status" className="tone-ok">已保存</span>}
+      <button type="button" className="button" disabled={!draft || save.isPending} onClick={reset}>还原</button>
+      <ActionButton type="submit" className="button primary" disabled={!proposed || outdated} pending={save.isPending}>保存配置</ActionButton>
+    </div>
+  </form>
   return <div className="admin-stack">
-    <SystemHeader>{heading(server)}</SystemHeader>
-    <div className={side ? 'admin-form-grid' : undefined}>
-      <AdminPanel title="设置" action={<span className="minor muted">修订 {server.revision}</span>}>
-        <form className="admin-panel-body config-form" onSubmit={(event) => {
-          event.preventDefault()
-          if (proposed && !outdated && !save.isPending) save.mutate(proposed, { onSuccess: onSaved })
-        }}>
-          <fieldset className="config-editable" disabled={save.isPending}>{fields(server, draft?.value, edit)}</fieldset>
-          {query.error && <Notice error>{errorText(query.error)}</Notice>}
-          {save.error && !outdated && <Notice error>{errorText(save.error)}</Notice>}
-          {outdated && <div className="panel config-conflict">
-            <Notice error>发现较新的配置版本。当前表单修改已保留。</Notice>
-            <details>
-              <summary>核对服务端配置（修订 {server.revision}）</summary>
-              <pre>{JSON.stringify(payload(server), null, 2)}</pre>
-            </details>
-            <div className="action-row">
-              <button className="button" type="button" disabled={save.isPending} onClick={reset}>载入最新版本</button>
-              <button className="button" type="button" disabled={save.isPending || !proposed} onClick={() => {
-                setDraft((previous) => previous && { ...previous, revision: server.revision })
-                save.reset()
-              }}>采用当前表单</button>
-            </div>
-          </div>}
-          <div className="config-footer">
-            {saved && <span role="status" className="tone-ok">已保存</span>}
-            <button type="button" className="button" disabled={!draft || save.isPending} onClick={reset}>还原</button>
-            <button className="button primary" disabled={!proposed || outdated || save.isPending}>
-              {save.isPending && <Spinner />}保存配置
-            </button>
-          </div>
-        </form>
-      </AdminPanel>
+    {heading?.(server)}
+    <div className={navigation ? 'runtime-layout' : side ? 'admin-form-grid' : 'config-panel'}>
+      {navigation}
+      {navigation ? <div className="runtime-content">{form}</div> : <AdminPanel title={panelTitle}>{form}</AdminPanel>}
       {side && <AdminPanel title="状态"><div className="admin-panel-body">{side}</div></AdminPanel>}
     </div>
   </div>
@@ -107,7 +111,7 @@ function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields,
 const settingsNames: Record<string, string> = {
   server: 'HTTP 服务', storage: 'SQLite', github: 'GitHub 采集', scheduler: '调度',
   ai: 'AI 中文摘要', metrics: '增长与热度', maintenance: '数据保留', recommendations: '每日选题',
-  summary: '模型调用与来源检查', baseUrl: '供应商 Base URL', model: '模型', apiKeyEnv: '密钥环境变量名',
+  summary: '模型调用与来源检查', baseUrl: 'OpenAI 兼容 API Base URL', model: '模型', apiKeyEnv: '密钥环境变量名',
   tokenEnv: '访问令牌环境变量名', enabled: '启用', timeoutSeconds: '超时（秒）',
   workerConcurrency: '采集并发', workers: '摘要并发', apiVersion: 'GitHub API 版本',
   tickMinutes: '扫描周期（分钟）', metricsIntervalMinutes: '指标计算周期（分钟）',
@@ -156,21 +160,85 @@ function Fields({ value, update }: { value: SettingFields; update: (value: Setti
 export function RuntimeEditor() {
   const path = '/system/settings'
   const query = useConfig<RuntimeSettings>(path)
+  const [params, setParams] = useSearchParams()
+  const group = params.get('group')
+  const settings = query.data?.settings
+  const keys = Object.keys(settings ?? {})
+  const [active, setActive] = useState<string>()
+  const nav = useRef<HTMLElement>(null)
+  const ready = Boolean(settings)
+  function scrollToGroup(key: string) {
+    const target = document.getElementById('runtime-' + key)
+    if (!target) return
+    setActive(key)
+    target.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' })
+  }
+  useEffect(() => {
+    if (ready && group) scrollToGroup(group)
+  }, [group, ready])
+  useEffect(() => {
+    if (!settings) return
+    const sections = Array.from(document.querySelectorAll<HTMLElement>('.runtime-section'))
+    let frame = 0
+    // 以正文上沿为基准同步锚点，滚动时不改写配置地址。
+    function sync() {
+      if (frame) return
+      frame = requestAnimationFrame(() => {
+        frame = 0
+        const threshold = Number.parseFloat(getComputedStyle(sections[0]).scrollMarginTop) + 8
+        const last = window.scrollY > 0 && window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2
+        const visible = last ? sections.at(-1) : sections.filter((section) => section.getBoundingClientRect().top <= threshold).at(-1) ?? sections[0]
+        setActive(visible?.dataset.group)
+      })
+    }
+    if (sections.length === 0) return
+    window.addEventListener('scroll', sync, { passive: true })
+    window.addEventListener('resize', sync)
+    return () => {
+      window.removeEventListener('scroll', sync)
+      window.removeEventListener('resize', sync)
+      cancelAnimationFrame(frame)
+    }
+  }, [settings])
+  useEffect(() => {
+    const list = nav.current
+    const current = list?.querySelector('a[aria-current="location"]')
+    if (!list || !current || list.scrollWidth <= list.clientWidth) return
+    const viewport = list.getBoundingClientRect()
+    const item = current.getBoundingClientRect()
+    list.scrollLeft += item.left < viewport.left ? item.left - viewport.left : Math.max(0, item.right - viewport.right)
+  }, [active, ready])
   return <ConfigEditor<RuntimeSettings, SettingFields> path={path} query={query}
-    heading={() => <h1>运行配置</h1>}
     apply={(server, settings) => ({ ...server, settings })}
     payload={({ revision, settings }) => ({ revision, settings })}
-    status={(snapshot) => snapshot.restartRequired ? <Notice>已保存的运行配置将在重启服务后生效。</Notice> : <Badge tone="ok">配置已生效</Badge>}
+    navigation={<nav ref={nav} className="panel runtime-nav" aria-label="配置分组">{keys.map((key) => {
+      const next = new URLSearchParams(params)
+      next.set('group', key)
+      return <a href={'?' + next.toString()} key={key} aria-current={key === (active ?? keys[0]) ? 'location' : undefined} onClick={(event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+        event.preventDefault()
+        if (group === key) { scrollToGroup(key); return }
+        setParams(next, { replace: true, preventScrollReset: true })
+      }}>{settingName(key)}</a>
+    })}</nav>}
     fields={(server, draft, update) => {
-      const settings = draft ?? server.settings
-      return <div className="config-groups">
-        {Object.entries(settings).map(([key, value]) => <details className="panel config-group" key={key}>
-          <summary><h3>{settingName(key)}</h3><ChevronDown size={17} /></summary>
-          {value !== null && typeof value === 'object' && !Array.isArray(value)
-            ? <Fields value={value} update={(next) => update({ ...settings, [key]: next })} />
-            : <Setting name={key} value={value} update={(next) => update({ ...settings, [key]: next })} />}
-        </details>)}
-      </div>
+      const values = draft ?? server.settings
+      return <>
+        {server.restartRequired && <Notice>已保存的运行配置将在重启服务后生效。</Notice>}
+        {keys.map((key) => {
+          const value = values[key]
+          const fields = value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null
+          const setValue = (next: SettingValue) => update({ ...values, [key]: next })
+          return <section key={key} className="runtime-section" id={'runtime-' + key} data-group={key} aria-labelledby={'runtime-title-' + key}>
+            <div className="panel runtime-section-card">
+              <h2 id={'runtime-title-' + key}>{settingName(key)}</h2>
+              {key === 'github' && <p className="minor muted">将令牌设置到服务进程的 <code>{String(fields?.tokenEnv || 'GITHUB_TOKEN')}</code> 环境变量，重启服务后启用采集。</p>}
+              {key === 'ai' && <p className="minor muted">仅支持 OpenAI 兼容供应商，需支持 Chat Completions 的 JSON 模式和 <code>max_completion_tokens</code>。API Key 通过服务进程的 <code>{String(fields?.apiKeyEnv || 'AI_API_KEY')}</code> 环境变量提供。</p>}
+              {fields ? <Fields value={fields} update={setValue} /> : <Setting name={key} value={value} update={setValue} />}
+            </div>
+          </section>
+        })}
+      </>
     }} />
 }
 
@@ -197,6 +265,19 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
   const [params, setParams] = useSearchParams()
   const navigate = useNavigate()
   const query = useConfig<ListSettings<T>>(directory.path)
+  const queryClient = useQueryClient()
+  const [deleting, setDeleting] = useState<T | null>(null)
+  const saveList = useMutation({
+    mutationFn: (body: ListSettings<T>) => api<ListSettings<T>>(directory.path, { method: 'PUT', body }),
+    onSuccess: (value) => {
+      queryClient.setQueryData(['settings', configScopes[directory.path]], value)
+      setDeleting(null)
+      refreshSettings(queryClient)
+    },
+    onError: (error) => {
+      if (error instanceof ApiError && error.code === 'settings_conflict') void query.refetch()
+    },
+  })
   const id = params.get('entry')
   const creating = params.get('new') === '1'
   const search = params.get('q') ?? ''
@@ -225,7 +306,7 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
         const item = server && original(server)
         return <div className="page-heading">
           <Link to={listUrl} className="admin-link"><ArrowLeft size={15} />{directory.title}</Link>
-          <h1>{creating ? '添加' + directory.noun : item ? directory.name(item) : server ? directory.noun + '不存在' : directory.title}</h1>
+          <h2>{creating ? '添加' + directory.noun : item ? directory.name(item) : server ? directory.noun + '不存在' : directory.title}</h2>
           {!creating && item && directory.caption(item) !== directory.name(item) && <p className="minor muted"><code>{directory.caption(item)}</code></p>}
         </div>
       }}
@@ -259,27 +340,37 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
   }
 
   if (!query.data) return <div className="admin-stack">
-    <SystemHeader><h1>{directory.title}</h1></SystemHeader>
     {query.isPending ? <Skeleton /> : <PageError error={query.error} retry={() => { void query.refetch() }} />}
   </div>
-  const items = query.data.items
+  const { revision, items: stored } = query.data
+  const items = saveList.isPending && deleting === null ? saveList.variables.items : stored
   const keyword = search.trim().toLowerCase()
   const visible = items.filter((item) => directory.search(item).toLowerCase().includes(keyword) &&
     (!filter || !directory.filter || directory.filter.match(item, filter)) &&
     (!enabled || !directory.enabled || directory.enabled(item) === (enabled === 'yes')))
+  const entries = visible.map((item) => ({ id: directory.identity(item), label: directory.name(item) }))
+  function reorder(from: string, to: string) {
+    const fromIndex = entries.findIndex(({ id }) => id === from)
+    const toIndex = entries.findIndex(({ id }) => id === to)
+    if (saveList.isPending || fromIndex < 0 || toIndex < 0) return
+    const ids = new Set(entries.map(({ id }) => id))
+    const ordered = arrayMove(visible, fromIndex, toIndex)
+    let position = 0
+    // 筛选时仅调整可见条目占用的位置，隐藏条目的位置不变。
+    saveList.mutate({ revision, items: stored.map((item) => ids.has(directory.identity(item)) ? ordered[position++] : item) })
+  }
   return <div className="admin-stack">
-    <SystemHeader>
-      <h1>{directory.title}</h1>
-      <Link className="button primary" to={entryUrl(null)}><Plus size={16} />添加{directory.noun}</Link>
-    </SystemHeader>
+    <div className="action-row"><Link className="button primary" to={entryUrl(null)}><Plus size={16} />添加{directory.noun}</Link></div>
     <AdminMetrics label={directory.title + '统计'} items={directory.metrics(items)} />
     {query.error && <Notice error>{errorText(query.error)}</Notice>}
+    {saveList.error && deleting === null && <Notice error>{errorText(saveList.error)}</Notice>}
     <section className="panel admin-panel" aria-label={directory.title + '列表'}>
       <div className="admin-table-toolbar">
         <label className="field"><span className="sr-only">搜索{directory.noun}</span>
           <input type="search" placeholder={'搜索' + directory.noun} value={search} onChange={(event) => setFilter('q', event.target.value)} />
         </label>
         <div className="admin-filters">
+          {saveList.isPending && deleting === null && <span className="settings-sort-status minor muted" role="status"><Spinner />正在保存顺序</span>}
           {directory.enabled && <div className="admin-filter-buttons" role="group" aria-label="规则状态">
             {[['', '全部'], ['yes', '启用'], ['no', '停用']].map(([value, label]) => <button type="button" key={value}
               aria-pressed={enabled === value} onClick={() => setFilter('enabled', value)}>{label}</button>)}
@@ -291,15 +382,37 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
           </label>}
         </div>
       </div>
-      {visible.length ? <div className="admin-table-scroll"><table className="admin-table admin-directory-table">
-        <thead><tr><th scope="col">{directory.noun}</th>{directory.columns.map((column) => <th scope="col" key={column}>{column}</th>)}</tr></thead>
-        <tbody>{visible.map((item) => <tr key={directory.identity(item)}>
-          <td><Link className="admin-entry-link" to={entryUrl(directory.identity(item))}>{directory.name(item)}</Link>
-            {directory.caption(item) !== directory.name(item) && <code className="minor muted">{directory.caption(item)}</code>}</td>
-          {directory.cells(item).map((cell, index) => <td key={index}>{cell}</td>)}
-        </tr>)}</tbody>
-      </table></div> : <p className="admin-empty">{items.length ? '没有符合条件的' + directory.noun : '暂无' + directory.noun}</p>}
+      {visible.length ? <SortableSettings entries={entries} onMove={reorder}>
+        <div className="admin-table-scroll"><table className="admin-table admin-directory-table">
+          <thead><tr><th scope="col" className="settings-grip-cell"><span className="sr-only">排序</span></th>
+            <th scope="col">{directory.noun}</th>{directory.columns.map((column) => <th scope="col" key={column}>{column}</th>)}<th scope="col" className="settings-action-cell">操作</th></tr></thead>
+          <tbody>{visible.map((item, index) => {
+            const { id, label } = entries[index]
+            return <SortableSettingsRow key={id} as="tr" id={id} label={label} disabled={visible.length < 2 || saveList.isPending}>{(handle) => <>
+              <td className="settings-grip-cell">{handle}</td>
+              <td className="admin-entry-cell"><Link className="admin-entry-link" to={entryUrl(id)}>{label}</Link>
+                {directory.caption(item) !== label && <code className="minor muted">{directory.caption(item)}</code>}</td>
+              {directory.cells(item).map((cell, index) => <td key={index}>{cell}</td>)}
+              <td className="settings-action-cell"><div className="settings-row-actions">
+                <Link className="icon-button" to={entryUrl(id)} aria-label={'编辑 ' + label} title="编辑"><Pencil size={15} aria-hidden /></Link>
+                <button type="button" className="icon-button" aria-label={'删除 ' + label} title="删除" disabled={saveList.isPending}
+                  onClick={() => { saveList.reset(); setDeleting(item) }}><Trash2 size={15} aria-hidden /></button>
+              </div></td>
+            </>}</SortableSettingsRow>
+          })}</tbody>
+        </table></div>
+      </SortableSettings> : <p className="admin-empty">{items.length ? '没有符合条件的' + directory.noun : '暂无' + directory.noun}</p>}
     </section>
+    {deleting && <Dialog title={'删除' + directory.noun} onClose={() => { if (!saveList.isPending) setDeleting(null) }}>
+      <p>确定删除「{directory.name(deleting)}」？</p>
+      {saveList.error && <Notice error>{errorText(saveList.error)}</Notice>}
+      <div className="action-row">
+        <button type="button" className="button" data-autofocus disabled={saveList.isPending} onClick={() => setDeleting(null)}>取消</button>
+        <ActionButton className="button tone-hot" pending={saveList.isPending} onClick={() => {
+          saveList.mutate({ revision, items: stored.filter((item) => directory.identity(item) !== directory.identity(deleting)) })
+        }}>确认删除</ActionButton>
+      </div>
+    </Dialog>}
   </div>
 }
 
@@ -321,7 +434,7 @@ const categories: Directory<CategorySetting> = {
   fields: (item, edit) => <>
     <label className="field">分类名称<input required value={item.name} onChange={(e) => edit({ ...item, name: e.target.value })} /></label>
     <label className="field">分类标识<input required value={item.slug} onChange={(e) => edit({ ...item, slug: e.target.value })} /></label>
-    <label className="field admin-field-wide">匹配 Topics<input placeholder="用逗号分隔" value={item.anyTopics.join(',')}
+    <label className="field admin-field-wide">匹配 Topics<input required placeholder="用逗号分隔" value={item.anyTopics.join(',')}
       onChange={(e) => edit({ ...item, anyTopics: e.target.value.split(/[,，]/) })} /></label>
   </>,
   status: (item) => <dl className="definition-list">
@@ -378,51 +491,103 @@ export function CategoryEditor() {
 export function DiscoveryTabEditor() {
   const path = '/system/discovery-tabs'
   const query = useConfig<DiscoveryTabSettings>(path)
-  return <ConfigEditor<DiscoveryTabSettings, DiscoveryTab[]> path={path} query={query} heading={() => <h1>发现页标签</h1>}
-    apply={(server, items) => ({ ...server, items })}
-    payload={({ revision, items }) => ({ revision, items })}
-    fields={(server, draft, edit) => <DiscoveryTabFields options={server.options} items={draft ?? server.items} edit={edit} />} />
+  return <ConfigEditor<DiscoveryTabSettings, DiscoveryTabDraft> path={path} query={query}
+    apply={(server, draft) => ({ ...server, items: draft.items })}
+    payload={({ revision, items }, draft) => ({ revision, items, newCategories: draft?.newCategories })}
+    fields={(server, draft, edit) => <DiscoveryTabFields options={server.options}
+      draft={draft ?? { items: server.items, newCategories: [] }} edit={edit} />} />
 }
 
-function DiscoveryTabFields({ items, options, edit }: Pick<DiscoveryTabSettings, 'items' | 'options'> & { edit: (items: DiscoveryTab[]) => void }) {
-  const available = options.filter((option) => !items.some(({ slug }) => slug === option.slug))
-  const names = new Map(options.map(({ slug, name }) => [slug, name]))
+type DiscoveryTabDraft = { items: DiscoveryTab[]; newCategories: CategorySetting[] }
+type DiscoveryTabOptions = DiscoveryTabSettings['options']
 
-  function move(index: number, offset: number) {
-    const next = items.slice()
-    const [item] = next.splice(index, 1)
-    next.splice(index + offset, 0, item)
-    edit(next)
-  }
+function DiscoveryTabFields({ draft, options, edit }: { draft: DiscoveryTabDraft; options: DiscoveryTabOptions; edit: (value: DiscoveryTabDraft) => void }) {
+  const [adding, setAdding] = useState(false)
+  const { items, newCategories } = draft
+  const allOptions = [...options, ...newCategories]
+  const available = options.filter((option) => !items.some(({ slug }) => slug === option.slug))
+  const names = new Map(allOptions.map(({ slug, name }) => [slug, name]))
+  const entries = items.map(({ slug, label }) => ({ id: slug, label: label || names.get(slug) || slug }))
 
   // 「全部」是默认入口，只有分类标签可以调整。
   return <>
-    <p className="minor muted">「全部」始终显示在第一位。</p>
-    {items.length > 0 && <ol className="discovery-tab-settings">
+    <div className="discovery-tab-toolbar">
+      <p className="minor muted">「全部」始终显示在第一位。</p>
+      <button type="button" className="button" onClick={() => setAdding(true)}><Plus size={16} aria-hidden />添加标签</button>
+    </div>
+    {items.length > 0 && <SortableSettings entries={entries} onMove={(from, to) => {
+      const fromIndex = items.findIndex(({ slug }) => slug === from)
+      const toIndex = items.findIndex(({ slug }) => slug === to)
+      if (fromIndex >= 0 && toIndex >= 0) edit({ ...draft, items: arrayMove(items, fromIndex, toIndex) })
+    }}><ol className="discovery-tab-settings">
       {items.map((item, index) => {
         const name = names.get(item.slug) ?? item.slug
-        return <li key={item.slug}>
-          <label className="field">{name}
-            <input aria-label={name + '的标签名称'} placeholder={name} value={item.label} maxLength={24}
-              onChange={(event) => edit(items.map((tab) => tab.slug === item.slug ? { ...tab, label: event.target.value } : tab))} />
-          </label>
-          <div className="action-row">
-            <button type="button" className="icon-button" aria-label={'上移 ' + name} title="上移" disabled={index === 0} onClick={() => move(index, -1)}><ArrowUp size={16} aria-hidden /></button>
-            <button type="button" className="icon-button" aria-label={'下移 ' + name} title="下移" disabled={index === items.length - 1} onClick={() => move(index, 1)}><ArrowDown size={16} aria-hidden /></button>
-            <button type="button" className="icon-button" aria-label={'移除 ' + name} title="移除" onClick={() => edit(items.filter(({ slug }) => slug !== item.slug))}><X size={16} aria-hidden /></button>
-          </div>
-        </li>
+        return <SortableSettingsRow key={item.slug} as="li" id={item.slug} label={entries[index].label} disabled={items.length < 2}>{(handle) => <>
+          {handle}
+          <InlineDiscoveryLabel name={name} label={item.label} onChange={(label) => edit({ ...draft,
+            items: items.map((tab) => tab.slug === item.slug ? { ...tab, label } : tab) })} />
+          <ActionButton className="icon-button" aria-label={'移除 ' + entries[index].label} title="移除" icon={<X size={16} />}
+            onClick={() => edit({
+              items: items.filter(({ slug }) => slug !== item.slug), newCategories: newCategories.filter(({ slug }) => slug !== item.slug),
+            })} />
+        </>}</SortableSettingsRow>
       })}
-    </ol>}
-    <label className="field discovery-tab-add">添加标签
-      <select value="" disabled={available.length === 0} onChange={(event) => {
-        if (event.target.value) edit([...items, { slug: event.target.value, label: '' }])
-      }}>
-        <option value="">{available.length ? '选择分类' : '已添加全部分类'}</option>
-        {available.map(({ slug, name }) => <option key={slug} value={slug}>{name}</option>)}
-      </select>
-    </label>
+    </ol></SortableSettings>}
+    {adding && createPortal(<AddDiscoveryTab available={available} options={allOptions} onClose={() => setAdding(false)}
+      onAdd={(slug, category) => {
+        edit({ items: [...items, { slug, label: '' }], newCategories: category ? [...newCategories, category] : newCategories })
+        setAdding(false)
+      }} />, document.body)}
   </>
+}
+
+function InlineDiscoveryLabel({ name, label, onChange }: { name: string; label: string; onChange: (value: string) => void }) {
+  const [value, setValue] = useState<string | null>(null)
+  // 编辑状态随输入焦点切换，移动鼠标时可继续输入。
+  return <div className="field discovery-label-field">
+    {value === null ? <button type="button" className="discovery-label" aria-label={'编辑标签 ' + (label || name)}
+      onClick={() => setValue(label)}>{label || name}</button> :
+      <input autoFocus aria-label={name + '的标签名称'} placeholder={name} maxLength={24} value={value}
+      onChange={(event) => setValue(event.target.value)} onBlur={() => {
+        if (value.trim() !== label) onChange(value.trim())
+        setValue(null)
+      }} onKeyDown={(event) => {
+        if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() }
+        if (event.key === 'Escape') { event.preventDefault(); setValue(null) }
+      }} />}
+  </div>
+}
+
+function AddDiscoveryTab({ available, options, onAdd, onClose }: {
+  available: DiscoveryTabOptions; options: DiscoveryTabOptions; onAdd: (slug: string, category?: CategorySetting) => void; onClose: () => void
+}) {
+  const [creating, setCreating] = useState(available.length === 0)
+  const [slug, setSlug] = useState(available[0]?.slug ?? '')
+  const [category, setCategory] = useState(categories.initial)
+  const [error, setError] = useState('')
+  return <Dialog title="添加标签" onClose={onClose}>
+    {available.length > 0 && <div className="pills" role="group" aria-label="添加方式">
+      <button type="button" aria-pressed={!creating} onClick={() => { setCreating(false); setError('') }}>选择现有分类</button>
+      <button type="button" aria-pressed={creating} onClick={() => { setCreating(true); setError('') }}>新建分类</button>
+    </div>}
+    <form className="config-form" onSubmit={(event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      if (!creating) return onAdd(slug)
+      const next = categories.normalize?.(category) ?? category
+      if (!next.name || !next.slug || !next.anyTopics.length) return setError('请填写分类名称、标识和匹配 Topics。')
+      if (options.some((item) => item.slug === next.slug)) return setError('分类标识已存在。')
+      onAdd(next.slug, next)
+    }}>
+      {creating ? <div className="admin-fields">{categories.fields(category, setCategory)}</div> :
+        <label className="field">选择分类<select value={slug} onChange={(event) => setSlug(event.target.value)}>
+          {available.map(({ slug, name }) => <option key={slug} value={slug}>{name}</option>)}
+        </select></label>}
+      {error && <Notice error>{error}</Notice>}
+      <div className="action-row"><button type="button" className="button" onClick={onClose}>取消</button>
+        <ActionButton type="submit" className="button primary">添加</ActionButton></div>
+    </form>
+  </Dialog>
 }
 
 export function RulesEditor() {

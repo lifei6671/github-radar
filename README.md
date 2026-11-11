@@ -30,7 +30,7 @@ go run ./cmd/radar
 | --- | --- |
 | `GET /healthz` | 公开存活检查 |
 | `GET /readyz` | 公开数据库就绪检查，连接失败时返回 503 |
-| `GET /api/v1/public/repos`、`/repos/:id`、`/repos/:id/trend` | 公开项目列表、详情与 Star 趋势，路径共用 `/api/v1/public` 前缀 |
+| `GET /api/v1/public/repos`、`/repos/by-name/:owner/:name`、`/repos/:id/trend` | 公开项目列表、详情与 Star 趋势，路径共用 `/api/v1/public` 前缀 |
 | `GET /api/v1/public/categories`、`/trending`、`/trending/sources` | 公开分类、官方榜单和榜单来源标识，路径共用 `/api/v1/public` 前缀 |
 | `GET /api/v1/setup/status` | 需要 `Authorization: Bearer <ADMIN_TOKEN>`，新库返回 `{"initialized":false}` |
 | `POST /api/v1/setup/initialize` | 使用同一令牌初始化空库，重复初始化返回 409 |
@@ -39,7 +39,7 @@ go run ./cmd/radar
 
 ## 启用采集
 
-启动前设置 `GITHUB_TOKEN`，使用可读取公共仓库的 GitHub 令牌。启动后在另一个终端使用同一个管理员令牌初始化空库。
+使用可读取公共仓库的 GitHub 令牌，在启动服务的终端设置 `GITHUB_TOKEN`。后台「运行状态 → 运行配置 → GitHub 采集」可查看或修改环境变量名。设置后重启服务。新部署可在后台初始化空库，或在另一个终端使用同一个管理员令牌调用初始化接口。
 
 ```powershell
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/setup/initialize -Headers @{Authorization = "Bearer $env:ADMIN_TOKEN"}
@@ -59,7 +59,7 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/api/v1/setup/initializ
 
 ## 管理配置
 
-初始化后使用同一管理员 Bearer 令牌调用以下接口。每次写入先 GET，再提交返回的 `revision` 和修改后的完整配置。修订号已变化时返回 `409 settings_conflict`，重新读取后再提交。
+初始化后使用同一管理员 Bearer 令牌调用以下接口。数据库保存一份当前配置。`revision` 用于防止并发编辑互相覆盖。每次写入先 GET，再提交返回的 `revision` 和修改后的完整配置。计数已变化时返回 `409 settings_conflict`，重新读取后再提交。
 
 | GET / PUT 路径 | PUT 请求体 | 生效方式 |
 | --- | --- | --- |
@@ -78,6 +78,7 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 | 接口 | 用途 |
 | --- | --- |
 | `GET /api/v1/repos`、`GET /api/v1/repos/:id` | 候选与仓库元数据，支持状态、分类、语言、关注、字面搜索及游标分页 |
+| `PATCH /api/v1/repos/:id/block` | 管理员提交 `{"blocked":true}` 屏蔽仓库，提交 false 解除 |
 | `GET /api/v1/repos/:id/trend?range=7d` | 24h 和 7d 返回原始观测，30d 返回小时点，180d 返回日点 |
 | `GET /api/v1/categories` | 当前数据库分类及 active 仓库数量 |
 | `GET /api/v1/trending?period=daily&sourceKey=all` | 单来源最新完整榜单 |
@@ -88,7 +89,7 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 | `GET /api/v1/system/storage` | SQLite 和 WAL 大小、快照与聚合行数、维护水位 |
 | `POST /api/v1/system/maintenance/run` | 返回 202 并持久化维护请求，下次扫描执行 |
 
-`/repos` 默认只返回 active，查询候选使用 `?state=candidate`。排序支持 discovered、stars、followed、hotness、growth24h、growth7d，followed 排序要求 `followed=true`。增长榜使用精确窗口，热度排名基于全部 active 仓库。增长窗口会返回质量及实际采样时间，缺失增量为 `null`。卡片展示最近 24 个已完成 UTC 小时的累计 Star，缺测小时保留空点。
+公开项目列表默认返回 active，后台默认同时返回已屏蔽仓库，便于解除。可用 `?blocked=true` 在后台筛选屏蔽仓库，查询候选使用 `?state=candidate`。屏蔽后暂停发现更新、Star 采样、README 读取和 AI 处理，已有记录仍可在后台查看。解除后按监控容量恢复采样。排序支持 discovered、stars、followed、hotness、growth24h、growth7d，followed 排序要求 `followed=true`。增长榜使用精确窗口，热度排名基于全部 active 仓库。增长窗口会返回质量及实际采样时间，缺失增量为 `null`。卡片展示最近 24 个已完成 UTC 小时的累计 Star，缺测小时保留空点。
 
 需要独立处理一批任务时运行 `go run ./cmd/radar collect-once`，支持 `-config` 选项，需要已初始化数据库和 GitHub 令牌。该命令最多处理一百个当前可领取任务，未到期或受限流影响的任务保留在数据库。按设计使用单实例，同一数据库的服务运行期间应由 HTTP 刷新接口安排任务。
 
@@ -100,7 +101,11 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 
 ## 中文摘要和选题
 
-在 `/api/v1/system/settings` 设置 `ai.baseUrl`、`ai.model` 和 `ai.summary` 后重启。Base URL 需指向支持 Chat Completions JSON 模式与 `max_completion_tokens` 的 API 根路径，例如供应商提供的 `/v1` 路径。密钥通过 `AI_API_KEY` 提供，README 检查使用 `GITHUB_TOKEN`。每个 UTC 自然日默认允许 50 次自动调用和 20 次手动调用，失败后的新调用也占预算。
+在后台「运行状态 → 运行配置 → AI 中文摘要」启用摘要、填写 Base URL 和模型后保存。仅支持 OpenAI 兼容供应商，Base URL 需指向支持 Chat Completions JSON 模式与 `max_completion_tokens` 的 API 根路径，例如供应商提供的 `/v1` 路径。密钥通过服务进程的 `AI_API_KEY` 环境变量提供，README 检查使用 `GITHUB_TOKEN`，配置完成后重启服务。未生成摘要的仓库展示 GitHub About 中的 Description。每个 UTC 自然日默认允许 50 次自动调用和 20 次手动调用，失败后的新调用也占预算。
+
+GitHub Topics 为空的活跃仓库会在同一模型预算内按调度补充主题词。系统从 GitHub About 和公开 README 提取至多五个主题词，详情页标为「AI Topics」，后台分类映射自动使用这些词。GitHub 后续补上 Topics 时，分类和详情随采集数据切换到原生主题。模型未配置时继续展示 GitHub 简介。
+
+仓库详情在 AI 导读下展示 GitHub README。中文 README 直接显示正文，英文 README 可在译文生成后切换「中文」和「原文」。系统使用剩余自动额度为已有摘要的活跃仓库准备译文，管理员也可在详情手动生成。译文按 README 版本分批保存，访客读取不会调用模型。
 
 | 接口 | 用途 |
 | --- | --- |

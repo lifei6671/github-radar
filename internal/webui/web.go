@@ -5,7 +5,7 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
-	"strconv"
+	"regexp"
 	"strings"
 	"time"
 
@@ -70,14 +70,14 @@ func pageRoute(name string) bool {
 		return true
 	}
 	prefix, value, found := strings.Cut(name, "/")
-	if !found || value == "" || strings.Contains(value, "/") {
+	if !found || value == "" {
 		return false
 	}
 	if prefix == "categories" {
-		return !strings.Contains(value, ".")
+		return !strings.ContainsAny(value, "/.")
 	}
 	if prefix == "repos" {
-		return repoID(value)
+		return repoPath(value)
 	}
 	return false
 }
@@ -90,10 +90,13 @@ func adminPage(name string) bool {
 		return true
 	}
 	id, found := strings.CutPrefix(name, "admin/repos/")
-	return found && repoID(id)
+	return found && repoPath(id)
 }
 
-func repoID(value string) bool {
-	id, err := strconv.ParseInt(value, 10, 64)
-	return err == nil && id > 0
+var repoNamePath = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9_.-]+$`)
+
+// repoPath 仅接受 owner/name 两段，其他路径交给普通 404 处理。
+func repoPath(value string) bool {
+	_, name, found := strings.Cut(value, "/")
+	return found && name != "." && name != ".." && repoNamePath.MatchString(value)
 }

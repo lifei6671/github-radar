@@ -33,6 +33,7 @@ export interface SparkPoint { at: string; stars: number | null; observedAt: stri
 export interface Repo {
   id: number
   fullName: string
+  nameIsCurrent?: boolean
   htmlUrl: string
   description: string | null
   titleZh: string | null
@@ -57,6 +58,7 @@ export interface Repo {
   summarySourceQuality: SourceQuality | null
   summaryJobId?: number | null
   followed?: boolean
+  blocked?: boolean
   followedAt?: string | null
   discoveredAt: string
   lastSuccessAt: string | null
@@ -69,10 +71,22 @@ export interface RepoDetail extends Repo {
   summaryZh: string | null
   summaryGeneratedAt: string | null
   summaryModel?: string | null
+  summaryAvailable?: boolean
   sourceReadmeUrl: string | null
   features: string[]
   audience: string[]
   valueTags: string[]
+  aiTopics: string[]
+}
+
+export interface RepoReadme {
+  state: 'ready' | 'missing' | 'unavailable'
+  sourceUrl?: string
+  originalHtml?: string
+  chineseHtml?: string
+  complete: boolean
+  truncated: boolean
+  translationJobId?: number
 }
 
 export interface TrendPoint {
@@ -103,6 +117,8 @@ export interface Job {
   maxAttempts: number
   errorCode: string | null
   repoId: number | null
+  repoFullName?: string | null
+  repoNameIsCurrent?: boolean | null
   createdAt: string
   updatedAt: string
 }
@@ -113,6 +129,7 @@ export interface Topic {
   id: number
   repoId: number
   fullName: string
+  nameIsCurrent?: boolean
   titleZh: string
   readerValue: string
   sourceUrl: string

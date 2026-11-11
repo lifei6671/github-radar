@@ -45,7 +45,7 @@ func TestHealthAndSetupStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := NewRouter(db, pool, "test-token", logger, cfg, manager)
+	router := NewRouter(db, pool, "test-token", logger, cfg, nil, manager)
 
 	// 健康检查公开，安装状态对未认证请求统一返回 401。
 	cases := []struct {

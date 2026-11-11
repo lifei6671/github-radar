@@ -1,5 +1,12 @@
 package storage
 
+import (
+	"encoding/json"
+	"errors"
+)
+
+var ErrRepositoryBlocked = errors.New("仓库已屏蔽")
+
 // Repository 保存仓库身份、当前元数据及采样调度状态。
 // 可空字段对应 SQL NULL，所有时间值使用 UTC Unix 毫秒。
 type Repository struct {
@@ -18,6 +25,7 @@ type Repository struct {
 	Forks            int     `gorm:"column:forks"`
 	Archived         bool    `gorm:"column:archived"`
 	Disabled         bool    `gorm:"column:disabled"`
+	Blocked          bool    `gorm:"column:blocked"`
 	Grade            string  `gorm:"column:grade"`
 	BelowGradeSince  *int64  `gorm:"column:below_grade_since"`
 	StarredByUser    bool    `gorm:"column:starred_by_user"`
@@ -36,6 +44,13 @@ type Repository struct {
 }
 
 func (Repository) TableName() string { return "repositories" }
+
+// GitHubTopics 返回 GitHub 元数据中的原生主题词。
+func (r Repository) GitHubTopics() []string {
+	var topics []string
+	_ = json.Unmarshal([]byte(r.TopicsJSON), &topics)
+	return topics
+}
 
 // RepoSnapshot 的复合主键保证同仓库同槽只保留第一条成功观测。
 type RepoSnapshot struct {
@@ -79,6 +94,7 @@ type DiscoveryRule struct {
 	IntervalMinutes int    `gorm:"column:interval_minutes"`
 	NextRunAt       int64  `gorm:"column:next_run_at"`
 	Priority        int    `gorm:"column:priority"`
+	DisplayPosition int    `gorm:"column:display_position"`
 }
 
 func (DiscoveryRule) TableName() string { return "discovery_rules" }

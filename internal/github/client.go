@@ -15,6 +15,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/storage"
 )
 
 // Failure 为队列提供可持久化错误码和上游恢复时刻。
@@ -146,6 +147,9 @@ func (c *Client) getMedia(ctx context.Context, path, etag string, p Policy, targ
 		return nil, err
 	}
 	response, requestErr := c.sdk.Do(req, target)
+	if errors.Is(requestErr, storage.ErrRepositoryBlocked) {
+		return nil, storage.ErrRepositoryBlocked
+	}
 	var deferred *Failure
 	if errors.As(requestErr, &deferred) {
 		// 重定向回调也会经过预算闸门，保留它给出的持久化恢复时间。

@@ -2,6 +2,7 @@ package settings
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -71,7 +72,7 @@ func initialRules(seed config.Config, now time.Time) ([]storage.DiscoveryRule, e
 
 func rulesFromDB(tx *gorm.DB) ([]storage.DiscoveryRule, error) {
 	var rows []storage.DiscoveryRule
-	err := tx.Order("source_type, id").Find(&rows).Error
+	err := tx.Order("display_position, source_type, id").Find(&rows).Error
 	return rows, err
 }
 
@@ -100,7 +101,7 @@ func (s Store) DiscoveryRules(ctx context.Context) (int64, []Rule, error) {
 			items = append(items, ruleView(row))
 		}
 		return nil
-	})
+	}, &sql.TxOptions{ReadOnly: true})
 	return revision, items, err
 }
 
@@ -152,14 +153,14 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 			existing[ruleKey{row.SourceType, row.SourceKey}] = row
 		}
 		now := time.Now().UnixMilli()
-		for _, item := range rules {
+		for position, item := range rules {
 			key := ruleKey{item.SourceType, item.SourceKey}
 			row, found := existing[key]
 			delete(existing, key)
 			if !found {
 				row = storage.DiscoveryRule{
 					SourceType: item.SourceType, SourceKey: item.SourceKey, Query: item.Query,
-					Enabled: item.Enabled, IntervalMinutes: item.IntervalMinutes, Priority: item.Priority, NextRunAt: now,
+					Enabled: item.Enabled, IntervalMinutes: item.IntervalMinutes, Priority: item.Priority, NextRunAt: now, DisplayPosition: position,
 				}
 				if err := tx.Create(&row).Error; err != nil {
 					return err
@@ -167,11 +168,17 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 				continue
 			}
 			if ruleView(row) == item {
+				// 只换展示顺序时保留任务计划、规则 ID 和现有租约。
+				if row.DisplayPosition != position {
+					if err := tx.Model(&row).Update("display_position", position).Error; err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			if err := tx.Model(&row).Updates(map[string]any{
 				"query": item.Query, "enabled": item.Enabled, "interval_minutes": item.IntervalMinutes,
-				"priority": item.Priority, "next_run_at": now,
+				"priority": item.Priority, "next_run_at": now, "display_position": position,
 			}).Error; err != nil {
 				return err
 			}

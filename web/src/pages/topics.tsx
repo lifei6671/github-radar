@@ -6,8 +6,8 @@ import { api, errorText } from '../api/client'
 import { distinct, useTopics } from '../api/queries'
 import type { Items, Topic, TopicDay, TopicStatus } from '../api/types'
 import { External } from '../components/repo'
-import { Badge, Empty, More, Notice, PageError, Skeleton, Spinner } from '../components/ui'
-import { decimal, githubLink, number, timestamp, topicLabel } from '../lib/format'
+import { ActionButton, Badge, Empty, More, Notice, PageError, Skeleton } from '../components/ui'
+import { decimal, githubLink, number, repoPath, timestamp, topicLabel } from '../lib/format'
 
 const statusList = Object.keys(topicLabel) as TopicStatus[]
 const editionDate = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'full', timeZone: 'UTC' })
@@ -89,11 +89,7 @@ function TopicMasthead({ day }: { day?: string }) {
   const date = day ? dateOf(day) : null
   const shown = date && !Number.isNaN(date.getTime()) ? date : null
   return <header className="topic-masthead">
-    <div>
-      {shown && <time className="minor muted" dateTime={day}>{editionDate.format(shown)}</time>}
-      <h1>选题池</h1>
-      <p className="minor muted">GitHub 项目选题</p>
-    </div>
+    <h1>选题池</h1>
     {shown && <time className="topic-date-tile" dateTime={day}>
       <strong className="numeric">{shown.getUTCDate()}</strong>
       <span>{editionMonth.format(shown)}</span><span>{editionWeekday.format(shown)}</span>
@@ -164,10 +160,10 @@ function TopicCard({ topic, lead = false }: { topic: Topic; lead?: boolean }) {
   })
   return <article id={'topic-item-' + topic.id} className={'topic-card' + (lead ? ' panel topic-lead-card' : '')}>
     <header className="section-head">
-      <div className="topic-repo"><Link to={'/admin/repos/' + topic.repoId} state={{ from }}>{topic.fullName}</Link><External href={topic.sourceUrl} iconOnly /></div>
+      <div className="topic-repo"><Link to={repoPath(topic.fullName, true, topic.nameIsCurrent === false ? topic.repoId : undefined)} state={{ from, repoId: topic.repoId }}>{topic.fullName}</Link><External href={topic.sourceUrl} iconOnly /></div>
       <Badge tone={topic.status === 'accepted' || topic.status === 'published' ? 'ok' : 'neutral'}>{topicLabel[topic.status]}</Badge>
     </header>
-    <h3 className="topic-title"><Link to={'/admin/repos/' + topic.repoId} state={{ from }}>{topic.titleZh}</Link></h3>
+    <h3 className="topic-title"><Link to={repoPath(topic.fullName, true, topic.nameIsCurrent === false ? topic.repoId : undefined)} state={{ from, repoId: topic.repoId }}>{topic.titleZh}</Link></h3>
     {(topic.summaryZh || topic.readerValue) && <p className="topic-summary">{topic.summaryZh || topic.readerValue}</p>}
     {topic.summaryZh && topic.readerValue && topic.summaryZh !== topic.readerValue && <p className="minor muted">选题价值 {topic.readerValue}</p>}
     <div className="context-tags repo-tags">{topic.valueTags.map((tag) => <Link className="context-chip" key={tag} to={'/admin/repos?' + new URLSearchParams({ tag })}>{tag}</Link>)}</div>
@@ -186,7 +182,7 @@ function TopicCard({ topic, lead = false }: { topic: Topic; lead?: boolean }) {
         onChange={(event) => setDraft({ ...draft, feedback: event.target.value })} /></label>
       <div className="action-row">
         <button type="button" className="button" disabled={save.isPending} onClick={() => setEditing(false)}>取消</button>
-        <button className="button primary" disabled={save.isPending}>{save.isPending && <Spinner />}保存反馈</button>
+        <ActionButton type="submit" className="button primary" pending={save.isPending}>保存反馈</ActionButton>
       </div>
       {save.error && <Notice error>{errorText(save.error)}</Notice>}
     </form> : <footer className="topic-footer">

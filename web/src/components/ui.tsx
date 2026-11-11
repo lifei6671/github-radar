@@ -1,6 +1,6 @@
 import { AlertCircle, ArrowUp, CircleHelp, LoaderCircle, Search, X } from 'lucide-react'
 import { useEffect, useId, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ComponentPropsWithoutRef, ReactNode } from 'react'
 import { errorText } from '../api/client'
 
 export function Badge({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'neutral' | 'ok' | 'hot' | 'warning' | 'accent' }) {
@@ -33,6 +33,22 @@ export function Skeleton({ rows = 3 }: { rows?: number }) {
 }
 
 export function Spinner() { return <LoaderCircle size={15} className="spinner" aria-hidden /> }
+
+type ActionButtonProps = ComponentPropsWithoutRef<'button'> & { pending?: boolean; icon?: ReactNode }
+
+// 提交期间保留按钮原有尺寸和读屏名称，居中显示进度图标。
+export function ActionButton({
+  pending, icon, children, disabled, type = 'button', className = 'button', ...props
+}: ActionButtonProps) {
+  return <button {...props} type={type} className={className + ' action-button'}
+    disabled={disabled || pending} aria-busy={pending || undefined}>
+    <span className="action-button-content">
+      {icon && <span className="action-button-icon" aria-hidden>{icon}</span>}
+      {children}
+    </span>
+    {pending && <span className="action-button-progress" aria-hidden><Spinner /></span>}
+  </button>
+}
 
 export function InlineSearch({ value, onSearch }: { value: string; onSearch: (value: string) => void }) {
   const [input, setInput] = useState(value)

@@ -33,15 +33,15 @@
 - 自动计算 24 小时、7 天等窗口的增长数据，并显示数据覆盖质量。
 - 使用 Star 动量、加速度、上榜情况、持续性等信号发现热点；项目适用性与热度分别评分。
 - 非中文仓库按条件触发大模型摘要，产出**中文 200～500 字的自然语言项目介绍**及少量结构化标签。
-- **README 仅在分析任务执行期间保存在进程内存；分析完成后释放，不写入 SQLite、不生成长期文件或历史版本。**
+- **README 原文仅在分析任务和详情读取时保存在进程内存；SQLite 只缓存当前版本的译文片段。**
 - 数据库只保留仓库元信息、短期 Star 快照、聚合趋势、榜单观测、中文摘要、选题元数据和任务状态。
 - 原始 Star 快照到期删除；趋势聚合有限期保留；每天自动备份 SQLite 到 R2，并保留最近 5 个自然日的每日备份，超期自动清理；后台可编辑备份配置及一键恢复。
 - 支持人工收藏、忽略、触发重新总结以及手动采集。
 
 ### 1.3 非目标
 
-- 不做完整 README 翻译库、代码克隆与源码全文分析。
-- 不保存完整 README 正文、逐段翻译和大模型完整请求/响应原文。
+- 不做多版本 README 翻译档案、代码克隆与源码全文分析。
+- 不保存完整 README 原文和大模型完整请求或响应。
 - 不追踪 Star 用户列表，也不将 GitHub 搜索的累计 Star 排名冒充“最近新增 Star”榜单。
 - 不采集全量 GitHub 活动事件，不使用 Kafka、Redis、分布式调度与微服务。
 - 不自动发布公众号文章，也不声称 AI 总结等同于代码实测。
@@ -253,6 +253,8 @@ GitHub 2026-03-10 API 版本提供 GET /repos/{owner}/{repo}/stargazers/history�
 容量与准入：
 - `max_monitored_repos` 默认 5,000，只统计 `state=active`；S/A/B 分别最多 200/800/2,000，剩余活跃项目进入 C，容量数字与预算一起配置校验。等级不足时依次降频，关注不意味着永远占用 A 级。
 - 新候选先按 repo_id 建档为 candidate；有容量时转 active，按 A 级观察，A 已满则按可用等级采样。总容量满时保持 candidate，不创建周期刷新或 README 检查任务。
+- 管理员屏蔽按 GitHub 数字 ID 保存在 `repositories.blocked`，与 GitHub 原生 `disabled` 分开。屏蔽仓库从公开读路径撤下，不再写入搜索、Trending 或 Star 观测，暂停仓库详情采样、README 读取及 AI 任务。屏蔽事务撤销在途写入的租约，可能已经计费的模型调用留待确认。历史记录按原保留期处理，候选清理保留屏蔽记录。解除后按监控容量恢复。
+- Trending 能提供数字 ID 时按 ID 匹配。条目只有名称且本地该名称已屏蔽时，先跳过单仓库补查，直到发现源给出可区分的新 ID。
 - 每日准入评估按人工关注、有效热度、新上榜、发现时间排序（并以 repo_id 稳定打破平局），用更高优先级候选替换未关注的低优先级活跃项目。退监控只改为 `paused`，取消未运行的周期任务，保留历史和人工状态。
 - 人工关注优先保留跟踪；容量全被关注项目占满时，新关注请求返回 `409 monitoring_capacity_full`，保持原状态，用户需先取消一项关注或调整容量及预算。普通发现不突破上限。
 - candidate 且未关注、没有人工处理选题的仓库，last_discovered_at 超过 30 天可按外键依赖顺序清理；重新发现可重新建档。暂停项目重新激活时不补跑错过的采样槽。
@@ -627,8 +629,8 @@ H = 0.35 * Velocity24
 
 ### 7.1 唯一持久化内容
 
-- **只保存 200～500 字的中文总结**（必要时因资料不足产生更短的合格摘要）、精简的功能/受众/用途标签、README SHA、源链接、模型/提示词版本、生成时间和处理状态。
-- repo 的 description 可作为主表元数据保留；不保存 README 正文或其完整翻译。
+- 摘要保存 200～500 字的中文总结（资料不足时可更短）、精简的功能/受众/用途标签、README SHA、源链接、模型/提示词版本、生成时间和处理状态。AI Topics 另存于 `repo_ai_topics`。
+- repo 的 description 可作为主表元数据保留。译文片段按 README SHA 与模型提示词标识保存，当前仓库只保留一版。
 - README 内容只作为临时内存数据：读取 → 清洗 → 模型调用 → 验证 → 保存总结 → 释放引用。
 - 任何临时文本不得写入 SQLite jobs.payload_json、数据库日志、结构化日志、磁盘缓存、失败追踪、任务审计详情或崩溃转储附件。
 - Go 运行时无法保证敏感内存被瞬时物理擦除；这里定义的是“应用不主动持久化”，而不是强行承诺物理级擦除。
@@ -649,8 +651,18 @@ README 更新检查频率：
 - B 项目：每 72 小时。
 - C 项目：每 7 天。
 - 新进入 AI 总结队列的仓库立即获取 README。
-- 有 ETag 时可条件检查 README；304 只表示来源未变。只有 source_fingerprint、provider、model、prompt_version 全部匹配、摘要有效且请求未 force 时才复用。摘要缺失、模型/提示词升级或强制重新生成时，必须发起不带 If-None-Match 的请求重新取得正文，不能从 304 构造正文。
+- 有 ETag 时可条件检查 README。304 表示 README 未变，AI Topics 仍需核对 About。需要生成的结果须有匹配的源指纹、供应商、模型和提示词版本才能复用。缺少所需结果或强制重新生成时，重新获取 README 正文。
 - 无 README 的仓库可依据仓库 description 生成简短介绍，但要标明来源不足，且不能虚构功能。
+
+启用模型后，自动队列也处理缺少 GitHub Topics 的活跃仓库。需要同时生成摘要和主题词时合并一次调用，中文仓库或已有有效摘要的仓库可单独提取主题词。主题词和摘要共用检查间隔和 AI 调用额度，已有仓库按检查计划补齐。低优先级的主题词补齐使用剩余自动额度。
+
+AI Topics 从公开 About 和 README 提取，使用至多五个小写主题词，并保存源指纹、模型、提示词版本和生成时间。检查确认来源已变更时，撤下旧主题词。分类匹配、筛选与计数统一优先使用 `repositories.topics_json`，该数组为空时使用 `repo_ai_topics.topics_json`。详情接口通过 `aiTopics` 返回当前生效的 AI 主题词，页面单独标明来源。模型未配置时，未生成摘要的仓库展示 GitHub About。
+
+### 7.2.1 README 阅读与翻译
+
+- 详情页把 AI 摘要作为导读。中文 README 直接展示正文。英文 README 展示原文，有译文时默认显示中文并提供原文标签。站内读取遇到长度限制或译文还在生成时显示状态，并保留 GitHub 入口。
+- GET README 时重新核对仓库 ID、公开性及地址。原文与译文均经 Goldmark 安全渲染。GitHub README 读取与 AI 任务分别计量，公开访问不触发模型调用。
+- 已有有效摘要的活跃仓库用剩余自动额度准备译文。待补齐主题词的低优先级仓库较多时，调度会为译文留出部分额度。管理员也可在仓库详情手动生成。参考 AIHOT 的译文提示词，以 JSON 分批翻译 Markdown 文本，保留代码、链接地址和媒体结构。每批结算用量并保存进度，后续按 SHA 和读取范围续译。模型未配置时仍可读取原文。备份恢复取消原未决任务，管理员可从已保存进度手动续译。
 
 ### 7.3 处理步骤
 
@@ -671,7 +683,7 @@ GET /repos/{owner}/{repo}/readme
     ↓
 解析校验 + 事实限制 + 字数检查
     ↓
-事务内更新 ai_summaries 与 summary_checks
+事务内保存本次生成的摘要、AI Topics 和检查状态
     ↓
 释放 README 临时对象；只留下摘要和元数据
 ~~~
@@ -701,7 +713,7 @@ GET /repos/{owner}/{repo}/readme
 }
 ~~~
 
-以上 evidence 与 uncertainty 是模型输出的瞬时校验字段；数据库仅保留短摘要及精简标签、source_readme_url、模型版本。不保存原始 README 片段。
+以上 evidence 与 uncertainty 是模型输出的瞬时校验字段。摘要记录保存短摘要、精简标签、来源链接及模型版本，译文使用独立记录。原始 README 片段留在内存。
 
 卡片 titleZh 由后端从已保存的 summary_zh 派生，不新增模型字段或数据库列：trim 后取第一个句末符号（。！？!? 或换行）之前的文本，最多 40 个 Unicode 字符（Go rune），超长截断并追加“…”；没有非空摘要或所得文本为空则返回 null。新摘要任务失败时仍从上次成功摘要派生；前端 null 时回退 description，再无内容则省略该行，不额外调用模型生成标题。
 
@@ -746,7 +758,8 @@ GET /repos/{owner}/{repo}/readme
 | jobs 已完成/取消/终止的普通失败记录 | 14 天 | 不删除仍待重试或 unknown 任务，关联 ai_calls 先清理 |
 | jobs dead 记录 | 30 天 | 保留错误类别便于排查 |
 | ai_summaries | 只保留每个仓库最新成功摘要 | 项目被彻底移除时清理 |
-| README 正文 | 仅在任务内存中 | 不进入持久存储 |
+| README 原文 | 请求或任务内存 | 不进入持久存储 |
+| README 译文 | 仓库当前版本 | 按 README SHA 匹配，随仓库删除 |
 | topic_candidates | 有人工处理状态的长期保留；普通候选 90 天 | 删除过期未采用候选 |
 | rate_limits / 系统配置 | 当前状态 | 覆盖更新 |
 | slog 运行日志 | 14 天 | stdout，由 Docker/systemd 或部署日志工具保留/轮转；不新建日志表，jobs/ai_calls 独立保留 |
@@ -812,6 +825,7 @@ WHERE (repo_id, sample_slot) IN (
 | GET /api/v1/repos | 按增长、热度、语言、AI 标签、等级、收藏状态筛选排序 |
 | GET /api/v1/categories | 数据库分类、active 仓库数量与最新仓库预览 |
 | GET /api/v1/repos/:id | 仓库详情、中文摘要、采集状态 |
+| GET /api/v1/public/repos/by-name/:owner/:name | 按当前完整仓库名读取公开详情 |
 | GET /api/v1/repos/:id/trend?range=24h/7d/30d/180d | 自适应返回原始/小时/日级点位和质量 |
 | POST /api/v1/repos/:id/refresh | 手动调度采集，遵守配额 |
 | POST /api/v1/repos/:id/summary | 手动安排/复用 AI 总结 |
@@ -822,6 +836,9 @@ WHERE (repo_id, sample_slot) IN (
 | GET /api/v1/topics/days | 按入池日期返回版面索引 |
 | PATCH /api/v1/topics/:id | 修改 shortlisted/accepted/ignored/published |
 | GET /api/v1/system/jobs | 任务状态、排队、失败详情（不含 README） |
+| PATCH /api/v1/repos/:id/block | 管理员设置 `{blocked:boolean}`，后台列表支持 `blocked` 筛选 |
+| GET /api/v1/public/repos/:id/readme | 当前公开 README 的安全 HTML 与匹配的译文 |
+| POST /api/v1/repos/:id/readme/translate | 管理员提交译文任务，使用现有手动额度与任务查询 |
 | GET /api/v1/jobs/:id | 管理鉴权的单任务查询，供手动采集/摘要轮询 |
 | POST /api/v1/jobs/:id/retry | 管理员确认 unknown 摘要可能已计费后重新创建手动任务 |
 | POST /api/v1/system/ai/resume | 恢复后确认计量不完整，重新启用自动 AI |
@@ -847,7 +864,9 @@ WHERE (repo_id, sample_slot) IN (
 
 四个配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending；Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。分类和发现规则接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
 
-发现页标签 PUT 传 `{revision,items:[{slug,label}]}`，标签选自现有分类，按数组顺序展示，空 `label` 沿用分类名称。保存后立即生效，首次保存前跟随分类映射。前台固定显示「全部」，保存空数组只保留「全部」。
+发现页标签 PUT 传 `{revision,items:[{slug,label}]}`，按数组顺序展示，空 `label` 沿用分类名称。可选 `newCategories` 使用分类接口的条目格式，将新分类与标签在同一事务保存。分类映射新增条目后出现在可选列表，管理员可单独加入发现页。已有库首次修改分类映射时保留原有标签顺序。前台固定显示「全部」，保存空数组只保留「全部」。
+
+分类映射和发现规则按提交数组持久化后台列表顺序。发现规则的 `display_position` 仅用于后台列表排序，规则的采集优先级、下次计划时间与任务租约按既有调度机制维护。
 
 阶段 2 的计算周期、窗口容差、采样分级门槛、评分参数及清理计划由 `settings.scheduler.metricsIntervalMinutes`、`settings.metrics` 和 `settings.maintenance` 管理，保存后重启生效。评分权重按 24h 增长、7d 增长、加速度、持续性和 Trending 排列。维护接口返回 202，持久化请求由后台下次扫描领取。已初始化的库也可以用 `maintenance-once` 离线执行维护。
 
@@ -884,13 +903,13 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 | / | 精选首页 / 时间线 | 最近发现的增长项目、精选候选与热度领跑 |
 | /trending | 热点榜 | 24h/7d Star 净增、排名、上榜与走势 |
 | /repos | 全部动态 | 仓库筛选、技术语言、主题、等级和浏览器收藏 |
-| /repos/:id | 新闻详情 | Star 曲线、200～500 字中文摘要、来源和选题 |
+| /repos/:owner/:name | 新闻详情 | 独立公开页面，展示 Star 曲线、中文摘要和来源 |
 | /categories、/categories/:slug | 主题页 | AI 智能体、AI 编程、MCP、AI 多媒体、开发工具及其他 |
 | /admin/topics | 日报与精选 | 候选选题、读者收益、审核状态、导出 |
 | /starred | 收藏 | 当前浏览器收藏的仓库 |
 | /admin/watchlist | 重点监控 | 管理员指定优先跟踪的仓库 |
 | /admin/runs | 管理后台 | GitHub 限流、调度任务、SQLite 清理与备份恢复状态 |
-| /admin/repos、/admin/repos/:id | 后台仓库管理 | 加入或移出重点监控、刷新采样、摘要任务与加入选题池 |
+| /admin/repos、/admin/repos/:owner/:name | 后台仓库管理 | 加入或移出重点监控、刷新采样、摘要任务与加入选题池 |
 | /admin/login、/admin/setup | 后台登录与首次安装 | 验证管理员令牌、初始化空库或从 R2 恢复 |
 
 ### 10.2 视觉系统与可复用组件
@@ -908,7 +927,7 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 - RepositoryCard 展示仓库、中文摘要预览、24h/7d 净增、轻量曲线、数据质量和收藏；完整 200～500 字摘要放详情页。
 - 筛选、分页、排序写入 URL 查询参数，刷新与浏览器前进后退应保留状态。
 - 手动刷新、AI 总结、候选审核均是异步/持久化操作；API 接受后展示排队/运行/成功/失败状态，不提前宣布成功。
-- 前端不请求、缓存或展示 README 完整正文；只读取后端保存的 AI 中文摘要和来源链接。
+- 详情页按需请求安全渲染后的 README，公开接口校验源可见性。正文响应不写入浏览器持久缓存。
 - 响应式和可用性至少覆盖 390×844、768×1024、1440×900 和 1920×1080，亮暗主题和键盘导航均须验收。
 - 系统后台增加可编辑的“备份与恢复”页，支持 R2 设置、每天备份时间、实际保留期（默认五天）的备份列表与一键恢复；新 VPS 的 /admin/setup 使用同一恢复引擎。
 
@@ -1030,10 +1049,10 @@ storage:
 22. **数据库连接**：启用 WAL 与多个读取连接情况下没有长期 SQLITE_BUSY/异常增长 WAL。
 23. **人工控制**：收藏仓库保持跟踪，忽略选题不会立即重复推荐。
 24. **无 AI 密钥**：采集、趋势、榜单功能正常，AI 功能显示待配置。
-25. **导航与深链接**：移动端底部导航、桌面侧栏与浏览器路由正常，Gin 对 /repos/:id 等深链接返回 SPA 页面而不截获 /api/*。
+25. **导航与深链接**：移动端底部导航、桌面侧栏与浏览器路由正常，Gin 对 /repos/:owner/:name 等深链接返回 SPA 页面，API 使用自身路由。
 26. **指标字段契约**：前后端对累计 Star、24h/7d 净增、Trending 原始排名、热度排名和 null 数据质量解释一致。
 27. **响应式回归**：390/768/1440/1920 宽度和亮暗主题下，卡片、筛选和图表没有横向溢出、导航失效或对比度问题。
-28. **AI 摘要交互**：摘要排队/运行/完成/失败、命中缓存时展示正确；前端不接收或持久化完整 README。
+28. **AI 阅读交互**：验证摘要任务和缓存状态，中文 README 直接显示正文，英文 README 在有译文时支持切换原文和中文。
 29. **第三方代码与品牌**：可追溯复用组件的 MIT 声明齐全，站名/Logo 为自有品牌，字体和素材授权经过核对。
 30. **单实例构建**：Vite 构建产物与 Gin API 可由一个 Go 进程对外提供，生产运行无需 Node SSR。
 31. **五天备份**：每天一份，连续六天备份后仅保留最近五个自然日；同日手动备份不增加对象数量。

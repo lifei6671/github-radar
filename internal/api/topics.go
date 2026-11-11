@@ -137,10 +137,11 @@ func (a *collectionAPI) topics(c *gin.Context) {
 	var rows []struct {
 		storage.TopicCandidate
 		FullName      string
+		NameIsCurrent bool `gorm:"column:name_is_current"`
 		SummaryZh     *string
 		ValueTagsJSON *string
 	}
-	if err := db.Select("t.*,r.full_name,s.summary_zh,s.value_tags_json").
+	if err := db.Select("t.*,r.full_name,r.name_is_current,s.summary_zh,s.value_tags_json").
 		Joins("JOIN repositories r ON r.repo_id=t.repo_id LEFT JOIN ai_summaries s ON s.repo_id=t.repo_id").
 		Order(orderColumn + " DESC,t.id DESC").Limit(limit + 1).Scan(&rows).Error; err != nil {
 		a.fail(c, err)
@@ -162,6 +163,7 @@ func (a *collectionAPI) topics(c *gin.Context) {
 	for _, row := range rows {
 		view := topicView(row.TopicCandidate)
 		view["fullName"], view["summaryZh"] = row.FullName, row.SummaryZh
+		view["nameIsCurrent"] = row.NameIsCurrent
 		tags := []string{}
 		if row.ValueTagsJSON != nil {
 			_ = json.Unmarshal([]byte(*row.ValueTagsJSON), &tags)

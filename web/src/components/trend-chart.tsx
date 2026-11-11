@@ -52,11 +52,12 @@ export default function TrendChart({ data }: { data: Trend }) {
         series: [{
           type: 'line',
           data: data.points.map((point) => [Date.parse(point.at), point.stars]),
+          smooth: 0.35,
+          smoothMonotone: 'x',
           connectNulls: false,
           showSymbol: true,
           // 长窗口的孤立观测没有相邻线段，仍需显示点位。
           symbolSize: (_value: unknown, { dataIndex }: { dataIndex: number }) => {
-            if (data.points.length < 100) return 5
             return data.points[dataIndex - 1]?.stars == null && data.points[dataIndex + 1]?.stars == null ? 5 : 0
           },
           lineStyle: { color: color('--chart-accent'), width: 2 },

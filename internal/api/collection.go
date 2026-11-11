@@ -17,19 +17,25 @@ import (
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/summary"
 )
 
 type collectionAPI struct {
-	db     *gorm.DB
-	cfg    config.Config
-	logger *slog.Logger
+	db      *gorm.DB
+	cfg     config.Config
+	logger  *slog.Logger
+	readmes *summary.Engine
 }
 
 func (a *collectionAPI) register(v1 *gin.RouterGroup) {
 	v1.GET("/repos", a.loadCategories, a.repos)
+	v1.GET("/repos/by-name/:owner/:name", a.loadCategories, a.repo)
 	v1.GET("/repos/:id", a.loadCategories, a.repo)
 	v1.GET("/repos/:id/trend", a.trend)
+	v1.GET("/repos/:id/readme", a.readme)
+	v1.POST("/repos/:id/readme/translate", a.requestTranslation)
 	v1.POST("/repos/:id/refresh", a.refresh)
+	v1.PATCH("/repos/:id/block", a.block)
 	v1.POST("/repos/:id/summary", a.requestSummary)
 	v1.POST("/repos/:id/follow", a.follow)
 	v1.POST("/repos/:id/topic", a.addTopic)
@@ -74,10 +80,16 @@ func optionalISO(ms *int64) *string {
 	return &value
 }
 
+// 分类优先使用 GitHub Topics。仅当原生主题为空时才读取 AI Topics。
+const effectiveTopicsSQL = `CASE WHEN json_array_length(repositories.topics_json)>0 THEN repositories.topics_json
+ELSE COALESCE((SELECT topics_json FROM repo_ai_topics t WHERE t.repo_id=repositories.repo_id), '[]') END`
+
 // card 组合仓库元数据及本轮成功发布的增长和热度。
 func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries map[int64][]gin.H, view metricView, summary summaryView) gin.H {
-	var topics []string
-	_ = json.Unmarshal([]byte(repo.TopicsJSON), &topics)
+	topics := repo.GitHubTopics()
+	if len(topics) == 0 {
+		topics = summary.aiTopics
+	}
 	trending := entries[repo.RepoID]
 	if trending == nil {
 		trending = []gin.H{}
@@ -109,11 +121,18 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 		delete(body, "followed")
 		delete(body, "followedAt")
 		delete(body, "summaryJobId")
+	} else {
+		body["nameIsCurrent"] = repo.NameIsCurrent
+		body["blocked"] = repo.Blocked
 	}
 	return body
 }
 
 func (a *collectionAPI) fail(c *gin.Context, err error) {
+	if errors.Is(err, storage.ErrRepositoryBlocked) {
+		c.JSON(http.StatusConflict, gin.H{"code": "repo_blocked"})
+		return
+	}
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"code": "not_found"})
 		return
@@ -132,13 +151,31 @@ func parseID(c *gin.Context) (int64, bool) {
 }
 
 func (a *collectionAPI) repo(c *gin.Context) {
-	id, ok := parseID(c)
-	if !ok {
-		return
-	}
 	var repo storage.Repository
 	db := a.db.WithContext(c.Request.Context())
-	if err := publicRepos(c, db).Take(&repo, "repo_id = ?", id).Error; err != nil {
+	lookup := publicRepos(c, db)
+	if owner := c.Param("owner"); owner != "" {
+		// 名称可被复用，名称路由只匹配当前映射并使用 SQLite 的现有唯一索引。
+		lookup = lookup.Where("name_is_current = 1")
+		if expected := c.Query("repoId"); c.GetBool(publicReadKey) && expected != "" {
+			// 收藏以仓库身份定位，打开后由前端使用返回的当前名称。
+			id, err := strconv.ParseInt(expected, 10, 64)
+			if err != nil || id <= 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_id"})
+				return
+			}
+			lookup = lookup.Where("repo_id = ?", id)
+		} else {
+			lookup = lookup.Where("full_name COLLATE NOCASE = ?", owner+"/"+c.Param("name"))
+		}
+	} else {
+		id, ok := parseID(c)
+		if !ok {
+			return
+		}
+		lookup = lookup.Where("repo_id = ?", id)
+	}
+	if err := lookup.Take(&repo).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
@@ -152,13 +189,13 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		a.fail(c, err)
 		return
 	}
-	view := views[id]
+	view := views[repo.RepoID]
 	summaries, err := summaryViews(db, []storage.Repository{repo}, !c.GetBool(publicReadKey))
 	if err != nil {
 		a.fail(c, err)
 		return
 	}
-	summary := summaries[id]
+	summary := summaries[repo.RepoID]
 	body := a.card(c, repo, entries, view, summary)
 	body["license"] = nil
 	if repo.LicenseSPDXID != nil || repo.LicenseName != nil {
@@ -170,8 +207,15 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		body["summaryGeneratedAt"] = iso(summary.row.GeneratedAt)
 	}
 	body["summarySourceLanguage"] = textPtr(summary.row.SourceLanguage)
+	body["aiTopics"] = []string{}
+	if len(repo.GitHubTopics()) == 0 && len(summary.aiTopics) > 0 {
+		body["aiTopics"] = summary.aiTopics
+	}
 	if c.GetBool(publicReadKey) {
 		delete(body, "summaryModel")
+	} else {
+		// 管理端沿用发起手动任务的门槛，只返回可用状态。
+		body["summaryAvailable"] = !repo.Blocked && a.summaryAvailable()
 	}
 	for name, raw := range map[string]string{"features": summary.row.FeaturesJSON, "audience": summary.row.AudienceJSON, "valueTags": summary.row.ValueTagsJSON} {
 		tags := []string{}
@@ -207,6 +251,26 @@ func (a *collectionAPI) refresh(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusAccepted, gin.H{"jobId": job.ID, "statusUrl": "/api/v1/jobs/" + strconv.FormatInt(job.ID, 10)})
+}
+
+func (a *collectionAPI) block(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input struct {
+		Blocked *bool `json:"blocked"`
+	}
+	if c.ShouldBindJSON(&input) != nil || input.Blocked == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_block"})
+		return
+	}
+	queue := collector.Queue{DB: a.db, Cfg: a.cfg.Scheduler}
+	if err := queue.SetBlocked(c.Request.Context(), id, *input.Blocked, time.Now()); err != nil {
+		a.fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"blocked": *input.Blocked})
 }
 
 func (a *collectionAPI) follow(c *gin.Context) {
@@ -268,14 +332,25 @@ func (a *collectionAPI) jobs(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var jobs []storage.Job
-	if err := a.db.WithContext(c.Request.Context()).Order("id DESC").Limit(limit).Find(&jobs).Error; err != nil {
+	var jobs []struct {
+		storage.Job
+		RepoFullName      *string `gorm:"column:repo_full_name"`
+		RepoNameIsCurrent *bool   `gorm:"column:repo_name_is_current"`
+	}
+	// 任务入口使用仓库名地址，关联名称和任务列表一次读取。
+	if err := a.db.WithContext(c.Request.Context()).Model(&storage.Job{}).
+		Select("jobs.*, repositories.full_name AS repo_full_name, repositories.name_is_current AS repo_name_is_current").
+		Joins("LEFT JOIN repositories ON repositories.repo_id = jobs.repo_id").
+		Order("jobs.id DESC").Limit(limit).Find(&jobs).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
 	items := make([]gin.H, 0, len(jobs))
 	for _, job := range jobs {
-		items = append(items, jobView(job))
+		item := jobView(job.Job)
+		item["repoFullName"] = job.RepoFullName
+		item["repoNameIsCurrent"] = job.RepoNameIsCurrent
+		items = append(items, item)
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
 }
@@ -314,7 +389,7 @@ func (a *collectionAPI) categoryList(c *gin.Context) {
 	categories := categoriesFor(c)
 	var repos []storage.Repository
 	if err := publicRepos(c, a.db.WithContext(c.Request.Context())).Model(&storage.Repository{}).
-		Select("repo_id", "full_name", "description", "discovered_at", "topics_json").
+		Select("repo_id, full_name, description, discovered_at, " + effectiveTopicsSQL + " AS topics_json").
 		Where("state='active'").Order("discovered_at DESC, repo_id ASC").Find(&repos).Error; err != nil {
 		a.fail(c, err)
 		return

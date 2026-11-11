@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -83,6 +84,76 @@ func TestPublicDiscoveryTabsReadDuringWrite(t *testing.T) {
 	result := request(t, router, http.MethodGet, "/api/v1/public/discovery-tabs", "", "", 200)
 	if body := jsonBody(t, result); !strings.Contains(body, `"name":"MCP","slug":"mcp"`) || strings.Contains(body, "未提交名称") {
 		t.Fatalf("公开标签应从已提交的快照读取: %s", body)
+	}
+}
+
+func TestDiscoveryTabCreatesCategoryAtomically(t *testing.T) {
+	router, db := collectionRouter(t)
+	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
+	const path = "/api/v1/system/discovery-tabs"
+	const category = `{"slug":"cli","name":"终端工具","anyTopics":[" CLI "]}`
+	request(t, router, http.MethodPut, path, `{"revision":1,"items":[{"slug":"missing"}],"newCategories":[`+category+`]}`, "admin", 400)
+	var count int64
+	if err := db.Model(&storage.CategorySetting{}).Where("slug = ?", "cli").Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("标签校验失败时不应写入分类: %d, %v", count, err)
+	}
+	request(t, router, http.MethodPut, path, `{"revision":1,"items":[{"slug":"cli"}],"newCategories":[`+category+`]}`, "admin", 200)
+	result := request(t, router, http.MethodGet, "/api/v1/public/discovery-tabs", "", "", 200)
+	if got := jsonBody(t, result); got != `{"items":[{"name":"终端工具","slug":"cli"}]}` {
+		t.Fatalf("公开标签应立即使用新分类: %s", got)
+	}
+}
+
+func TestCategoryMappingChangesKeepDiscoverySelectionIndependent(t *testing.T) {
+	router, _ := collectionRouter(t)
+	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
+	const categoryPath = "/api/v1/system/categories"
+	const tabsPath = "/api/v1/public/discovery-tabs"
+	before := request(t, router, http.MethodGet, tabsPath, "", "", 200)
+	categories := request(t, router, http.MethodGet, categoryPath, "", "admin", 200)
+	categories["items"] = append(categories["items"].([]any), map[string]any{
+		"slug": "cli", "name": "终端工具", "anyTopics": []string{"cli"},
+	})
+	request(t, router, http.MethodPut, categoryPath, jsonBody(t, categories), "admin", 200)
+	after := request(t, router, http.MethodGet, tabsPath, "", "", 200)
+	if jsonBody(t, after) != jsonBody(t, before) {
+		t.Fatalf("新增分类不能自动加入发现页: %+v", after)
+	}
+	admin := request(t, router, http.MethodGet, "/api/v1/system/discovery-tabs", "", "admin", 200)
+	if !strings.Contains(jsonBody(t, admin["options"]), `"slug":"cli"`) {
+		t.Fatalf("新分类应出现在可选列表: %+v", admin)
+	}
+}
+
+func TestDiscoveryRuleReorderKeepsScheduleAndLease(t *testing.T) {
+	router, db := collectionRouter(t)
+	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
+	const path = "/api/v1/system/discovery-rules"
+	response := request(t, router, http.MethodGet, path, "", "admin", 200)
+	items := response["items"].([]any)
+	first := items[0].(map[string]any)
+	var rule storage.DiscoveryRule
+	if err := db.Take(&rule, "source_type = ? AND source_key = ?", first["sourceType"], first["sourceKey"]).Error; err != nil {
+		t.Fatal(err)
+	}
+	leaseToken := "rule-lease"
+	job := storage.Job{Type: "discover_search", DedupKey: "order-test", Status: "running", LeaseToken: &leaseToken,
+		PayloadJSON: fmt.Sprintf(`{"ruleId":%d}`, rule.ID)}
+	if err := db.Create(&job).Error; err != nil {
+		t.Fatal(err)
+	}
+	items[0], items[1] = items[1], items[0]
+	request(t, router, http.MethodPut, path, jsonBody(t, response), "admin", 200)
+	got := request(t, router, http.MethodGet, path, "", "admin", 200)
+	if jsonBody(t, got["items"]) != jsonBody(t, items) {
+		t.Fatalf("重新读取时应保留提交的展示顺序: %+v", got)
+	}
+	var persisted storage.DiscoveryRule
+	if err := db.Take(&persisted, rule.ID).Error; err != nil || persisted.NextRunAt != rule.NextRunAt || persisted.Priority != rule.Priority {
+		t.Fatalf("排序不应改变任务计划与优先级: %+v, %v", persisted, err)
+	}
+	if err := db.Take(&job, job.ID).Error; err != nil || job.Status != "running" || job.LeaseToken == nil || *job.LeaseToken != leaseToken {
+		t.Fatalf("排序不应撤销运行中的任务租约: %+v, %v", job, err)
 	}
 }
 

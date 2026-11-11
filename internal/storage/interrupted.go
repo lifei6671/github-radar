@@ -16,7 +16,7 @@ func InterruptJob(ctx context.Context, db *gorm.DB, job Job) error {
 		now := time.Now()
 		at := now.UnixMilli()
 		var call AICall
-		if job.Type == "refresh_readme_summary" {
+		if job.Type == "refresh_readme_summary" || job.Type == "translate_readme" {
 			if err := tx.Find(&call, "job_id=? AND status IN ('reserved','sending','unknown')", job.ID).Error; err != nil {
 				return err
 			}

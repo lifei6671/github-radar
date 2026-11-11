@@ -5,6 +5,7 @@ import { join } from 'node:path'
 const modules = [
   'react', 'react-dom', 'react-router', 'scheduler',
   '@tanstack/react-query', '@tanstack/query-core',
+  '@dnd-kit/accessibility', '@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities',
   '@radix-ui/colors', 'lucide-react', 'echarts', 'zrender', 'tslib', 'tailwindcss',
   '@fontsource-variable/dm-sans', '@fontsource/ibm-plex-mono',
 ]

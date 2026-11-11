@@ -23,7 +23,7 @@ export function RepoCollectionRow({ title, metadata, date, dateLabel, action, ex
   </li>
 }
 
-export function RepoCollectionEmpty({ icon, message, action }: { icon: ReactNode; message: string; action: ReactNode }) {
+export function RepoCollectionEmpty({ icon, message, action }: { icon: ReactNode; message: string; action?: ReactNode }) {
   return <div className="repo-collection-empty">
     {icon}<p>{message}</p>{action}
   </div>

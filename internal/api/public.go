@@ -13,7 +13,7 @@ import (
 const publicReadKey = "publicRead"
 
 // 只发布仍有公开地址的仓库，首次无法确认可访问性时也暂停展示。
-const publicRepoCondition = "repositories.name_is_current = 1 AND repositories.disabled = 0 AND repositories.first_not_found_at IS NULL AND repositories.state IN ('active','candidate','paused')"
+const publicRepoCondition = "repositories.name_is_current = 1 AND repositories.blocked=0 AND repositories.disabled = 0 AND repositories.first_not_found_at IS NULL AND repositories.state IN ('active','candidate','paused')"
 
 func markPublicRead(c *gin.Context) {
 	c.Set(publicReadKey, true)
@@ -30,8 +30,9 @@ func publicRepos(c *gin.Context, db *gorm.DB) *gorm.DB {
 
 func (a *collectionAPI) registerPublic(public *gin.RouterGroup) {
 	public.GET("/repos", a.loadCategories, a.repos)
-	public.GET("/repos/:id", a.loadCategories, a.repo)
+	public.GET("/repos/by-name/:owner/:name", a.loadCategories, a.repo)
 	public.GET("/repos/:id/trend", a.trend)
+	public.GET("/repos/:id/readme", a.readme)
 	public.GET("/categories", a.loadCategories, a.categoryList)
 	public.GET("/discovery-tabs", a.publicDiscoveryTabs)
 	public.GET("/trending", a.loadCategories, a.trending)

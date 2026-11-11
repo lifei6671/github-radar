@@ -22,12 +22,27 @@ func (e *Engine) normalize(ctx context.Context, source *sdk.Repository) (*sdk.Re
 	if source == nil {
 		return nil, errors.New("发现源缺少仓库数据")
 	}
+	db := e.Queue.DB.WithContext(ctx)
+	blocked := db.Model(&storage.Repository{}).Where("blocked=1")
+	if source.GetID() > 0 {
+		blocked = blocked.Where("repo_id=?", source.GetID())
+	} else {
+		// Trending 只有名称时，先跳过当前已屏蔽地址，避免额外请求仓库详情。
+		blocked = blocked.Where("full_name=? COLLATE NOCASE AND name_is_current=1", source.GetFullName())
+	}
+	var count int64
+	if err := blocked.Count(&count).Error; err != nil || count > 0 {
+		return nil, err
+	}
 	if source.GetID() <= 0 {
 		result, err := e.GitHub.Repository(ctx, source.GetOwner().GetLogin(), source.GetName(), "", gh.Policy{Resource: gh.Core})
+		if err == nil && result.Repository == nil {
+			return nil, errors.New("发现源缺少仓库数据")
+		}
 		return result.Repository, err
 	}
 	var known storage.Repository
-	err := e.Queue.DB.WithContext(ctx).Take(&known,
+	err := db.Take(&known,
 		"repo_id = ? OR (full_name = ? COLLATE NOCASE AND name_is_current=1)", source.GetID(), source.GetFullName()).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return source, nil
@@ -37,7 +52,13 @@ func (e *Engine) normalize(ctx context.Context, source *sdk.Repository) (*sdk.Re
 	}
 	if known.RepoID != source.GetID() || !strings.EqualFold(known.FullName, source.GetFullName()) ||
 		known.State == "unavailable" || known.State == "address_pending" {
-		result, err := e.GitHub.RepositoryByID(ctx, source.GetID(), gh.Policy{Resource: gh.Core})
+		result, err := e.GitHub.RepositoryByID(ctx, source.GetID(), gh.Policy{Resource: gh.Core, RepositoryID: source.GetID()})
+		if errors.Is(err, storage.ErrRepositoryBlocked) {
+			return nil, nil
+		}
+		if err == nil && result.Repository == nil {
+			return nil, errors.New("发现源缺少仓库数据")
+		}
 		return result.Repository, err
 	}
 	return source, nil
@@ -76,6 +97,9 @@ func (e *Engine) discoverTrending(ctx context.Context, p Payload) (func(*gorm.DB
 		if err != nil {
 			return nil, err
 		}
+		if entries[i].Repository == nil {
+			continue
+		}
 		id := entries[i].Repository.GetID()
 		if id <= 0 || ids[id] {
 			return nil, errors.New("Trending 批次身份无效或重复")
@@ -99,8 +123,15 @@ func (e *Engine) discoverTrending(ctx context.Context, p Payload) (func(*gorm.DB
 			return err
 		}
 		for _, entry := range entries {
-			if err := e.Queue.discover(tx, entry.Repository, observed); err != nil {
+			if entry.Repository == nil {
+				continue
+			}
+			applied, err := e.Queue.discover(tx, entry.Repository, observed)
+			if err != nil {
 				return err
+			}
+			if !applied {
+				continue
 			}
 			observation := storage.TrendingObservation{
 				RepoID: entry.Repository.GetID(), SourceKey: p.SourceKey, Window: p.Period,
@@ -167,8 +198,15 @@ func (e *Engine) search(ctx context.Context, job storage.Job, p Payload) (func(*
 	observed := time.Now().UnixMilli()
 	return func(tx *gorm.DB) error {
 		for _, repo := range page.Repositories {
-			if err := e.Queue.discover(tx, repo, observed); err != nil {
+			if repo == nil {
+				continue
+			}
+			applied, err := e.Queue.discover(tx, repo, observed)
+			if err != nil {
 				return err
+			}
+			if !applied {
+				continue
 			}
 			observation := storage.SearchObservation{RepoID: repo.GetID(), SourceKey: p.SourceKey, ObservedSlot: Slot(p.PlannedAt), ObservedAt: observed}
 			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&observation).Error; err != nil {

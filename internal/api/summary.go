@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -32,6 +33,14 @@ func validRequestID(id string) bool {
 func jobStatusURL(id int64) string { return "/api/v1/jobs/" + strconv.FormatInt(id, 10) }
 
 func (a *collectionAPI) requestSummary(c *gin.Context) {
+	a.requestAI(c, false)
+}
+
+func (a *collectionAPI) requestTranslation(c *gin.Context) {
+	a.requestAI(c, true)
+}
+
+func (a *collectionAPI) requestAI(c *gin.Context, translate bool) {
 	id, ok := parseID(c)
 	if !ok {
 		return
@@ -44,7 +53,14 @@ func (a *collectionAPI) requestSummary(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_request_id"})
 		return
 	}
-	decision, err := a.summaryQueue().Manual(c.Request.Context(), id, input.RequestID, input.Force, a.summaryAvailable(), time.Now())
+	queue, now := a.summaryQueue(), time.Now()
+	var decision summary.Decision
+	var err error
+	if translate {
+		decision, err = queue.ManualTranslation(c.Request.Context(), id, input.RequestID, a.summaryAvailable(), now)
+	} else {
+		decision, err = queue.Manual(c.Request.Context(), id, input.RequestID, input.Force, a.summaryAvailable(), now)
+	}
 	if err != nil {
 		a.summaryError(c, err)
 		return
@@ -98,9 +114,10 @@ func (a *collectionAPI) summaryError(c *gin.Context, err error) {
 }
 
 type summaryView struct {
-	row    storage.AISummary
-	jobID  *int64
-	status string
+	row      storage.AISummary
+	aiTopics []string
+	jobID    *int64
+	status   string
 }
 
 func (v summaryView) state() string {
@@ -133,15 +150,19 @@ func textPtr(s string) *string {
 
 func (v summaryView) title() *string { return textPtr(summary.Title(v.row.SummaryZh)) }
 
-// summaryViews 批量读取最近成功摘要及当前任务状态，避免列表逐仓库查询。
+// summaryViews 批量读取摘要、AI Topics 和当前任务，避免列表逐仓库查询。
 func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (map[int64]summaryView, error) {
 	views := make(map[int64]summaryView, len(repos))
 	if len(repos) == 0 {
 		return views, nil
 	}
 	ids := make([]int64, 0, len(repos))
+	var missingTopics []int64
 	for _, r := range repos {
 		ids = append(ids, r.RepoID)
+		if len(r.GitHubTopics()) == 0 {
+			missingTopics = append(missingTopics, r.RepoID)
+		}
 	}
 	var rows []storage.AISummary
 	if err := db.Where("repo_id IN ?", ids).Find(&rows).Error; err != nil {
@@ -149,6 +170,19 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 	}
 	for _, row := range rows {
 		views[row.RepoID] = summaryView{row: row}
+	}
+	if len(missingTopics) > 0 {
+		var rows []storage.RepoAITopics
+		if err := db.Where("repo_id IN ?", missingTopics).Find(&rows).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			v := views[row.RepoID]
+			if err := json.Unmarshal([]byte(row.TopicsJSON), &v.aiTopics); err != nil {
+				return nil, err
+			}
+			views[row.RepoID] = v
+		}
 	}
 	if !includeJobs {
 		return views, nil

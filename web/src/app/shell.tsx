@@ -1,20 +1,20 @@
 import { QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, ArrowDownRight, ArrowRight, Bookmark, ChartNoAxesCombined, Crosshair, Ellipsis, FolderOpen, Github, LayoutDashboard,
+  Activity, ArrowDownRight, ArrowRight, Bookmark, ChartNoAxesCombined, Crosshair, Ellipsis, Github, Grid2X2, LayoutDashboard,
   Layers3, ListFilter, LogOut, Monitor, Moon, Radar, Search, Sun, Workflow,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useNavigate, useOutletContext, useSearchParams } from 'react-router'
 import { api, ApiError, errorText, setToken, useSession } from '../api/client'
-import { BackToTop, Dialog, Notice, PageError, Skeleton, Spinner } from '../components/ui'
+import { ActionButton, BackToTop, Dialog, Notice, PageError, Skeleton } from '../components/ui'
 import { SetupBackup, useBackupStatus, useRestoredData } from '../pages/backup'
 
 const publicNav = [
   { path: '/', label: '发现', icon: Radar },
   { path: '/repos', label: '全部项目', icon: Layers3 },
   { path: '/trending', label: '热点榜', icon: ChartNoAxesCombined },
-  { path: '/categories', label: '技术主题', icon: FolderOpen },
+  { path: '/categories', label: '主题', icon: Grid2X2 },
   { path: '/starred', label: '收藏', icon: Bookmark },
 ]
 const adminNav = [
@@ -114,9 +114,8 @@ export function AdminLogin() {
             value={input} onChange={(event) => setInput(event.target.value)} required autoFocus />
         </label>
         {auth.error && <Notice error>{errorText(auth.error)}</Notice>}
-        <button className="button primary" disabled={auth.isPending || !input.trim()}>
-          {auth.isPending ? <Spinner /> : <ArrowRight size={17} />}登录
-        </button>
+        <ActionButton type="submit" className="button primary" disabled={!input.trim()}
+          pending={auth.isPending} icon={<ArrowRight size={17} />}>登录</ActionButton>
         <Link to="/" className="admin-link">返回前台</Link>
       </form>
     </div>
@@ -145,9 +144,11 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
   const [more, setMore] = useState(false)
   const theme = useTheme()
   const location = useLocation()
-  const system = location.pathname.replace(/\/+$/, '') === '/admin/runs'
+  const pathname = location.pathname.replace(/\/+$/, '')
+  const system = pathname === '/admin/runs'
+  const repoDetail = pathname.startsWith(admin ? '/admin/repos/' : '/repos/')
   const navigation = admin ? adminNav : publicNav
-  const page = navigation.find(({ path }) => path !== '/' && (location.pathname === path || location.pathname.startsWith(path + '/')))?.label
+  const page = repoDetail ? '仓库详情' : navigation.find(({ path }) => path !== '/' && (location.pathname === path || location.pathname.startsWith(path + '/')))?.label
   const showMaintenance = maintenance && (!system || new URLSearchParams(location.search).get('tab') !== 'backup')
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
@@ -165,7 +166,7 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
       <Link to={admin ? '/admin/runs' : '/'} className="brand-link" aria-label={admin ? 'GitHub 雷达后台首页' : 'GitHub 雷达首页'}><Brand admin={admin} /></Link>
       <nav aria-label="主导航" className="side-nav">
         <div className="side-nav-group">
-          {navigation.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'} title={label}>
+          {navigation.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/' || path.endsWith('/repos')} title={label}>
             <Icon size={17} strokeWidth={1.7} /><span>{label}</span>
           </NavLink>)}
         </div>
@@ -194,7 +195,7 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
       </section> : <Outlet />}
     </div></main>
     <nav aria-label="手机导航" className="mobile-nav">
-      {(admin ? adminNav : publicMobile).map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/'}>
+      {(admin ? adminNav : publicMobile).map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/' || path.endsWith('/repos')}>
         <Icon size={20} strokeWidth={1.7} /><span>{label}</span>
       </NavLink>)}
       {!admin && <button className={publicMore.some(({ path }) => location.pathname.startsWith(path)) ? 'active' : undefined}
@@ -284,9 +285,8 @@ export function Setup() {
       <h1>{state?.initialized ? '系统已初始化' : '初始化雷达'}</h1>
       {state?.initialized ? <Link to="/" className="button primary">进入发现<ArrowRight size={16} /></Link> : <>
         {setup.error && <Notice error>{errorText(setup.error)}</Notice>}
-        <button className="button primary" disabled={setup.isPending || restoring} onClick={() => setup.mutate()}>
-          {setup.isPending ? <Spinner /> : <ArrowDownRight size={17} />}初始化空库
-        </button>
+        <ActionButton className="button primary" disabled={restoring} pending={setup.isPending}
+          icon={<ArrowDownRight size={17} />} onClick={() => setup.mutate()}>初始化空库</ActionButton>
       </>}
     </section>
     <SetupBackup initialized={Boolean(state?.initialized)} onRestoring={setRestoring}

@@ -155,8 +155,9 @@ func (a *collectionAPI) getDiscoveryTabSettings(c *gin.Context) {
 
 func (a *collectionAPI) putDiscoveryTabSettings(c *gin.Context) {
 	var input struct {
-		Revision int64                   `json:"revision"`
-		Items    []settings.DiscoveryTab `json:"items"`
+		Revision      int64                   `json:"revision"`
+		Items         []settings.DiscoveryTab `json:"items"`
+		NewCategories []config.Category       `json:"newCategories"`
 	}
 	if !decodeSettings(c, &input) {
 		return
@@ -165,7 +166,7 @@ func (a *collectionAPI) putDiscoveryTabSettings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "invalid_settings"})
 		return
 	}
-	result, err := (settings.Store{DB: a.db}).SaveDiscoveryTabs(c.Request.Context(), input.Revision, input.Items)
+	result, err := (settings.Store{DB: a.db}).SaveDiscoveryTabs(c.Request.Context(), input.Revision, input.Items, input.NewCategories)
 	if err != nil {
 		a.settingsFailure(c, err)
 		return

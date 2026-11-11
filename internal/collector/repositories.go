@@ -55,33 +55,36 @@ func detachName(tx *gorm.DB, id int64, at int64) error {
 }
 
 // discover 合并已确认的数字身份；发现元数据不会被当成 Star 成功采样。
-func (q Queue) discover(tx *gorm.DB, source *sdk.Repository, at int64) error {
+func (q Queue) discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, error) {
 	if source.GetID() <= 0 || source.GetPrivate() {
-		return errors.New("发现源返回无效仓库身份")
+		return false, errors.New("发现源返回无效仓库身份")
+	}
+	var repo storage.Repository
+	lookupErr := tx.Take(&repo, "repo_id = ?", source.GetID()).Error
+	if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+		return false, lookupErr
+	}
+	if repo.Blocked {
+		return false, nil
 	}
 	var occupied storage.Repository
 	err := tx.Take(&occupied, "full_name = ? COLLATE NOCASE AND name_is_current = 1 AND repo_id <> ?", source.GetFullName(), source.GetID()).Error
 	if err == nil {
 		if err := detachName(tx, occupied.RepoID, at); err != nil {
-			return err
+			return false, err
 		}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
+		return false, err
 	}
-
-	var repo storage.Repository
-	err = tx.Take(&repo, "repo_id = ?", source.GetID()).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	if errors.Is(lookupErr, gorm.ErrRecordNotFound) {
 		repo = storage.Repository{
 			RepoID: source.GetID(), Owner: source.GetOwner().GetLogin(), Name: source.GetName(), FullName: source.GetFullName(),
 			NameIsCurrent: true, HTMLURL: source.GetHTMLURL(), TopicsJSON: "[]", Grade: "A", State: "candidate",
 			DiscoveredAt: at, LastDiscoveredAt: at, NextFetchAt: at, UpdatedAt: at,
 		}
 		if err := tx.Create(&repo).Error; err != nil {
-			return err
+			return false, err
 		}
-	} else if err != nil {
-		return err
 	}
 	values := map[string]any{"last_discovered_at": max(at, repo.LastDiscoveredAt), "updated_at": at}
 	// 已有采样基线时，搜索索引中的旧计数不覆盖最新仓库详情。
@@ -98,16 +101,16 @@ func (q Queue) discover(tx *gorm.DB, source *sdk.Repository, at int64) error {
 		values["state"] = "unavailable"
 	}
 	if err := tx.Model(&repo).Updates(values).Error; err != nil {
-		return err
+		return false, err
 	}
 	if err := tx.Take(&repo, "repo_id = ?", repo.RepoID).Error; err != nil {
-		return err
+		return false, err
 	}
-	return q.admit(tx, &repo, at)
+	return true, q.admit(tx, &repo, at)
 }
 
 func (q Queue) admit(tx *gorm.DB, repo *storage.Repository, at int64) error {
-	if repo.State == "active" || repo.Disabled || !repo.NameIsCurrent || (repo.State != "candidate" && repo.State != "paused") {
+	if repo.State == "active" || repo.Blocked || repo.Disabled || !repo.NameIsCurrent || (repo.State != "candidate" && repo.State != "paused") {
 		return nil
 	}
 	var total int64
@@ -195,11 +198,11 @@ func (q Queue) Rebalance(ctx context.Context, now time.Time) error {
 			SQL:  "starred_by_user DESC, (SELECT hotness_score FROM latest_metrics m WHERE m.repo_id=repositories.repo_id AND repositories.state='active') DESC, EXISTS (SELECT 1 FROM trending_observations t WHERE t.repo_id = repositories.repo_id AND t.observed_slot >= ?) DESC, last_discovered_at DESC, repo_id",
 			Vars: []any{now.Add(-24 * time.Hour).UnixMilli()},
 		}}
-		candidates := tx.Where("state IN ('active','candidate','paused') AND disabled = 0 AND name_is_current = 1")
+		candidates := tx.Where("state IN ('active','candidate','paused') AND blocked=0 AND disabled = 0 AND name_is_current = 1")
 		// 先挑出可以恢复的关注项目，避免暂停落选仓库后又无法填补空位。
 		if remaining := limit - followedActive; remaining > 0 {
 			resumable := tx.Model(&storage.Repository{}).Select("repo_id").
-				Where("state IN ('candidate','paused') AND starred_by_user=1 AND disabled=0 AND name_is_current=1").
+				Where("state IN ('candidate','paused') AND blocked=0 AND starred_by_user=1 AND disabled=0 AND name_is_current=1").
 				Clauses(order).Limit(int(remaining))
 			candidates = candidates.Where("state='active' OR starred_by_user=0 OR repo_id IN (?)", resumable)
 		} else {
@@ -262,6 +265,9 @@ func (q Queue) Refresh(ctx context.Context, repoID int64, requestID string, now 
 		if err := tx.Take(&repo, "repo_id = ?", repoID).Error; err != nil {
 			return err
 		}
+		if repo.Blocked {
+			return storage.ErrRepositoryBlocked
+		}
 		var err error
 		job, err = q.enqueue(tx, "refresh_repo", &repoID,
 			fmtManualKey(repoID, requestID), Payload{PlannedAt: now.UnixMilli(), Manual: true}, 200, now.UnixMilli())
@@ -280,6 +286,9 @@ func (q Queue) Follow(ctx context.Context, repoID int64, followed bool, now time
 		var repo storage.Repository
 		if err := tx.Take(&repo, "repo_id = ?", repoID).Error; err != nil {
 			return err
+		}
+		if repo.Blocked && followed {
+			return storage.ErrRepositoryBlocked
 		}
 		wasFollowed := repo.StarredByUser
 		canBecomeActive := (repo.State == "candidate" || repo.State == "paused") && !repo.Disabled && repo.NameIsCurrent

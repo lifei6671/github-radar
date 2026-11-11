@@ -22,7 +22,7 @@ func TestUpgradeFromPhaseZeroPreservesSettings(t *testing.T) {
 	}
 	defer pool.Close()
 	// 先用原有版本建立阶段 0 数据库，再通过正常入口升级。
-	phaseZero, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{2, 3, 4, 5}))
+	phaseZero, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{2, 3, 4, 5, 6, 7, 8, 9}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,8 +32,8 @@ func TestUpgradeFromPhaseZeroPreservesSettings(t *testing.T) {
 	if _, err := pool.ExecContext(t.Context(), "INSERT INTO system_settings(key,value_json,updated_at) VALUES ('existing.setting','true',1234)"); err != nil {
 		t.Fatal(err)
 	}
-	if count, err := Up(t.Context(), pool); err != nil || count != 4 {
-		t.Fatalf("阶段 0 应追加四个迁移版本: count=%d err=%v", count, err)
+	if count, err := Up(t.Context(), pool); err != nil || count != 8 {
+		t.Fatalf("阶段 0 应追加八个迁移版本: count=%d err=%v", count, err)
 	}
 	if count, err := Up(t.Context(), pool); err != nil || count != 0 {
 		t.Fatalf("重复升级应无新迁移: count=%d err=%v", count, err)
@@ -53,7 +53,7 @@ func TestUpgradeBackfillsPhaseOneAnchors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Close()
-	old, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{4, 5}))
+	old, err := goose.NewProvider(goose.DialectSQLite3, pool, files, goose.WithExcludeVersions([]int64{4, 5, 6, 7, 8, 9}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,12 +64,13 @@ func TestUpgradeBackfillsPhaseOneAnchors(t *testing.T) {
 		"INSERT INTO repositories(repo_id,owner,name,full_name,html_url,discovered_at,last_discovered_at,next_fetch_at,updated_at) VALUES (42,'a','b','a/b','',0,0,0,0)",
 		"INSERT INTO repo_snapshots(repo_id,sample_slot,observed_at,stars,forks) VALUES (42,0,5400000,80,0),(42,300000,3900000,100,0)",
 		`INSERT INTO maintenance_state(key,value,updated_at) VALUES ('trending:language:go:weekly','{"observedSlot":300000,"observedAt":345678,"size":0}',345678)`,
+		"INSERT INTO discovery_rules(source_type,source_key,query,enabled,interval_minutes,next_run_at,priority) VALUES ('trending','all:daily','',1,60,1234,30),('search','mcp','topic:mcp',1,30,2345,20)",
 	} {
 		if _, err := pool.ExecContext(t.Context(), sql); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if count, err := Up(t.Context(), pool); err != nil || count != 2 {
+	if count, err := Up(t.Context(), pool); err != nil || count != 6 {
 		t.Fatalf("旧库应只应用新增版本: count=%d err=%v", count, err)
 	}
 	db, err := storage.OpenGORM(pool)
@@ -87,5 +88,10 @@ func TestUpgradeBackfillsPhaseOneAnchors(t *testing.T) {
 	var batch storage.TrendingBatchRecord
 	if err := db.Take(&batch).Error; err != nil || batch.SourceKey != "language:go" || batch.Window != "weekly" || batch.ObservedAt != 345678 {
 		t.Fatalf("旧库成功空榜应保留真实时间: %+v %v", batch, err)
+	}
+	var rules []storage.DiscoveryRule
+	if err := db.Order("display_position").Find(&rules).Error; err != nil || len(rules) != 2 ||
+		rules[0].SourceKey != "mcp" || rules[0].NextRunAt != 2345 || rules[1].SourceKey != "all:daily" || rules[1].DisplayPosition != 1 {
+		t.Fatalf("升级应保留旧规则展示顺序及计划时间: %+v %v", rules, err)
 	}
 }

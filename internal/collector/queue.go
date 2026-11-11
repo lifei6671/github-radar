@@ -100,7 +100,7 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 			}
 		}
 		var repos []storage.Repository
-		if err := tx.Where("state = 'active' AND next_fetch_at <= ?", ms).
+		if err := tx.Where("state = 'active' AND blocked=0 AND next_fetch_at <= ?", ms).
 			Where("NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.repo_id = repositories.repo_id AND jobs.type = 'refresh_repo' AND jobs.status IN ('pending','running','failed'))").
 			Order("CASE grade WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 ELSE 3 END, next_fetch_at, repo_id").
 			Limit(500).Find(&repos).Error; err != nil {
@@ -156,8 +156,9 @@ func (q Queue) Claim(ctx context.Context, now time.Time) (*storage.Job, error) {
 UPDATE jobs SET status='running', attempts=attempts+1, lease_token=?, lease_until=?, updated_at=?
 WHERE id=(SELECT id FROM jobs
   WHERE type IN ('refresh_repo','discover_trending','discover_search')
-    AND (type='refresh_repo' OR EXISTS (
-      SELECT 1 FROM discovery_rules r WHERE r.id=CAST(json_extract(jobs.payload_json,'$.ruleId') AS INTEGER) AND r.enabled=1))
+    AND ((type='refresh_repo' AND EXISTS (SELECT 1 FROM repositories r WHERE r.repo_id=jobs.repo_id AND r.blocked=0))
+      OR (type<>'refresh_repo' AND EXISTS (
+        SELECT 1 FROM discovery_rules r WHERE r.id=CAST(json_extract(jobs.payload_json,'$.ruleId') AS INTEGER) AND r.enabled=1)))
     AND attempts < max_attempts AND available_at <= ?
     AND (status IN ('pending','failed') OR (status='running' AND lease_until <= ?))
   ORDER BY priority DESC, available_at, id LIMIT 1)

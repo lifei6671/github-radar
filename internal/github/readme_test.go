@@ -3,10 +3,13 @@ package github
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/lifei6671/github-radar/internal/storage"
 )
 
 func TestReadmeBoundedBlobAndConditionalRequest(t *testing.T) {
@@ -64,5 +67,33 @@ func TestReadmeBoundedBlobAndConditionalRequest(t *testing.T) {
 	}
 	if _, err := client.Readme(t.Context(), "owner", "repo", `"test"`, limit, Policy{Sample: true}); err != nil {
 		t.Fatalf("摘要子预算不应耗尽采样子预算: %v", err)
+	}
+}
+
+func TestReadmeSkipsBlobWhenRepositoryBlockedDuringMetadataRequest(t *testing.T) {
+	var block func() error
+	var blobRequests atomic.Int32
+	sha := strings.Repeat("a", 40)
+	client, db, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/git/blobs/") {
+			blobRequests.Add(1)
+			_, _ = w.Write([]byte("不应取得这段正文"))
+			return
+		}
+		if err := block(); err != nil {
+			t.Error(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "file", "sha": sha, "size": 2000, "encoding": "none"})
+	})
+	repo := storage.Repository{RepoID: 1, Owner: "owner", Name: "repo", FullName: "owner/repo",
+		TopicsJSON: "[]", State: "active", Grade: "A", NameIsCurrent: true}
+	if err := db.Create(&repo).Error; err != nil {
+		t.Fatal(err)
+	}
+	block = func() error { return db.Model(&repo).Update("blocked", true).Error }
+	result, err := client.Readme(t.Context(), "owner", "repo", "", 1200, Policy{RepositoryID: repo.RepoID})
+	if !errors.Is(err, storage.ErrRepositoryBlocked) || len(result.Body) != 0 || blobRequests.Load() != 0 {
+		t.Fatalf("屏蔽后不能再请求 README blob: reads=%d bytes=%d err=%v", blobRequests.Load(), len(result.Body), err)
 	}
 }

@@ -5,8 +5,8 @@ import { api, errorText } from '../api/client'
 import type { Items, Job, Limits, StorageStatus } from '../api/types'
 import { AdminMetrics, AdminPanel } from '../components/admin'
 import { SystemHeader, systemPage } from '../components/system-navigation'
-import { Badge, Notice, PageError, Skeleton, Spinner } from '../components/ui'
-import { formatBytes, jobLabel, number, timestamp } from '../lib/format'
+import { ActionButton, Badge, Notice, PageError, Skeleton } from '../components/ui'
+import { formatBytes, jobLabel, number, repoPath, timestamp } from '../lib/format'
 import { CategoryEditor, DiscoveryTabEditor, RulesEditor, RuntimeEditor } from './settings'
 import { BackupPage } from './backup'
 
@@ -14,13 +14,14 @@ export function System() {
   const [params] = useSearchParams()
   const tab = systemPage(params.get('tab'))
   return <div className="system-page">
+    <SystemHeader tab={tab} />
     {tab === 'overview' && <Overview />}
     {tab === 'jobs' && <Jobs />}
     {tab === 'runtime' && <RuntimeEditor />}
     {tab === 'categories' && <CategoryEditor />}
     {tab === 'discovery-tabs' && <DiscoveryTabEditor />}
     {tab === 'rules' && <RulesEditor />}
-    {tab === 'backup' && <div className="admin-stack"><SystemHeader><h1>备份与恢复</h1></SystemHeader><BackupPage /></div>}
+    {tab === 'backup' && <BackupPage />}
   </div>
 }
 
@@ -78,11 +79,6 @@ function Overview() {
     if (!latest.has(job.type)) latest.set(job.type, job)
   }
   return <div className="admin-stack">
-    <SystemHeader>
-      <h1>运行状态</h1>
-      <p className="minor muted">{limits.dataUpdatedAt ? <>最近检查 <ObservedTime value={new Date(limits.dataUpdatedAt).toISOString()} /></> :
-        limits.isPending ? '正在读取运行状态' : '采集状态暂不可用'}</p>
-    </SystemHeader>
     <AdminMetrics label="运行指标" items={[
       { label: 'GitHub 采集', value: collection, note: collectionNote, tone: rate ? configured && !blocked ? 'ok' : 'warning' : undefined },
       { label: '待处理任务', value: number(rate?.waitingTaskCount), note: '排队、运行与等待重试' },
@@ -98,7 +94,8 @@ function Overview() {
       <AdminPanel title="各类任务最近状态">
         <JobFeed query={jobs} items={[...latest.values()]} empty="暂无任务记录" />
       </AdminPanel>
-      <AdminPanel title="采集与模型额度">
+      <AdminPanel title="采集与模型额度" action={limits.dataUpdatedAt > 0 &&
+        <span className="minor muted">最近检查 <ObservedTime value={new Date(limits.dataUpdatedAt).toISOString()} /></span>}>
         <div className="admin-panel-body">
           {limits.isPending ? <Skeleton rows={1} /> : rate ? <>
             {limits.error && <Notice error>{errorText(limits.error)}</Notice>}
@@ -117,9 +114,8 @@ function Overview() {
           </> : <PageError error={limits.error} retry={() => { void limits.refetch() }} />}
         </div>
       </AdminPanel>
-      <AdminPanel title="存储与维护" action={<button className="button" disabled={maintain.isPending || !disk} onClick={() => maintain.mutate()}>
-        {maintain.isPending ? <Spinner /> : <Wrench size={16} />}运行维护
-      </button>}>
+      <AdminPanel title="存储与维护" action={<ActionButton disabled={!disk} pending={maintain.isPending}
+        icon={<Wrench size={16} />} onClick={() => maintain.mutate()}>运行维护</ActionButton>}>
         <div className="admin-panel-body">
           {storage.isPending ? <Skeleton rows={1} /> : disk ? <>
             {storage.error && <Notice error>{errorText(storage.error)}</Notice>}
@@ -155,6 +151,7 @@ function ObservedTime({ value }: { value?: string | null }) {
 const jobTypes: Record<string, string> = {
   refresh_repo: '仓库采样', discover_trending: 'Trending 发现', discover_search: 'Search 发现',
   refresh_readme_summary: '中文摘要',
+  translate_readme: 'README 翻译',
 }
 
 function useSystemJobs() {
@@ -173,7 +170,6 @@ function JobBadge({ status }: { status: Job['status'] }) {
 function Jobs() {
   const query = useSystemJobs()
   return <div className="admin-stack">
-    <SystemHeader><h1>任务</h1></SystemHeader>
     <AdminPanel title="最近任务" action={<button className="button" onClick={() => { void query.refetch() }} disabled={query.isFetching}>刷新</button>}>
       {query.error && query.data && <Notice error>{errorText(query.error)}</Notice>}
       <JobFeed query={query} items={query.data?.items ?? []} empty="暂无任务记录" />
@@ -190,7 +186,8 @@ function JobFeed({ query, items, empty }: { query: ReturnType<typeof useSystemJo
     <tbody>{items.map((job) => <tr key={job.id}>
       <td><div className="admin-task-name">
         <strong>{jobTypes[job.type] ?? job.type}</strong><span className="minor muted numeric">#{job.id}</span>
-        {job.repoId !== null && <Link className="admin-link" to={'/admin/repos/' + job.repoId} title="查看关联仓库" aria-label={'查看任务 ' + job.id + ' 的仓库'}><ArrowUpRight size={14} /></Link>}
+        {job.repoId !== null && job.repoFullName && <Link className="admin-link" to={repoPath(job.repoFullName, true, job.repoNameIsCurrent === false ? job.repoId : undefined)}
+          state={{ repoId: job.repoId }} title="查看关联仓库" aria-label={'查看任务 ' + job.id + ' 的仓库'}><ArrowUpRight size={14} /></Link>}
       </div>{job.errorCode && <code className="minor tone-hot">{job.errorCode}</code>}</td>
       <td><JobBadge status={job.status} /></td>
       <td className="numeric">{job.attempts} / {job.maxAttempts}</td>

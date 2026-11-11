@@ -15,20 +15,23 @@ import (
 )
 
 const (
-	Core        = "core"
-	Search      = "search"
-	repoLimit   = "repo_refresh"
-	readmeLimit = "readme_check"
-	secondary   = "github_secondary"
+	Core            = "core"
+	Search          = "search"
+	repoLimit       = "repo_refresh"
+	readmeLimit     = "readme_check"
+	readmeViewLimit = "readme_view"
+	secondary       = "github_secondary"
 )
 
 // Policy 区分独立的 Search 预算、仓库详情子预算和优先请求。
 type Policy struct {
 	Resource     string
+	RepositoryID int64
 	Grade        string
 	Sample       bool
 	Priority     bool
 	ReadmeBudget int
+	ReadmeView   bool
 }
 
 type limiter struct {
@@ -53,6 +56,16 @@ func saveRate(tx *gorm.DB, r *storage.RateLimit) error {
 func (l limiter) reserve(ctx context.Context, p Policy, now time.Time) error {
 	ms := now.UnixMilli()
 	return l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if p.RepositoryID > 0 {
+			// 每次实际 HTTP 请求都检查屏蔽，覆盖重定向和 README 的后续 blob 请求。
+			var blocked int64
+			if err := tx.Model(&storage.Repository{}).Where("repo_id=? AND blocked=1", p.RepositoryID).Count(&blocked).Error; err != nil {
+				return err
+			}
+			if blocked > 0 {
+				return storage.ErrRepositoryBlocked
+			}
+		}
 		global, err := rateState(tx, secondary)
 		if err != nil {
 			return err
@@ -98,7 +111,11 @@ func (l limiter) reserve(ctx context.Context, p Policy, now time.Time) error {
 		}
 		if p.ReadmeBudget > 0 {
 			// README 与公开性复核共享独立的本地预算，防止批量摘要占满采样窗口。
-			readme, err := rateState(tx, readmeLimit)
+			resource := readmeLimit
+			if p.ReadmeView {
+				resource = readmeViewLimit
+			}
+			readme, err := rateState(tx, resource)
 			if err != nil {
 				return err
 			}

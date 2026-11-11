@@ -32,13 +32,17 @@ func readCategories(tx *gorm.DB) ([]config.Category, error) {
 }
 
 func insertCategories(tx *gorm.DB, items []config.Category) error {
+	return insertCategoriesAt(tx, items, 0)
+}
+
+func insertCategoriesAt(tx *gorm.DB, items []config.Category, start int) error {
 	rows := make([]storage.CategorySetting, 0, len(items))
 	for position, item := range items {
 		data, err := json.Marshal(item.AnyTopics)
 		if err != nil {
 			return err
 		}
-		rows = append(rows, storage.CategorySetting{Slug: item.Slug, Name: item.Name, TopicsJSON: string(data), Position: position})
+		rows = append(rows, storage.CategorySetting{Slug: item.Slug, Name: item.Name, TopicsJSON: string(data), Position: start + position})
 	}
 	if len(rows) == 0 {
 		return nil
@@ -68,20 +72,26 @@ func (s Store) SaveCategories(ctx context.Context, revision int64, items []confi
 		return 0, nil, &Invalid{Err: err}
 	}
 	snapshot, err := s.update(ctx, revision, func(tx *gorm.DB, snapshot *Snapshot) error {
+		// 旧库尚未保存展示范围时，先保留修改前已经在发现页显示的标签。
+		if snapshot.DiscoveryTabs == nil {
+			previous, err := readCategories(tx)
+			if err != nil {
+				return err
+			}
+			snapshot.DiscoveryTabs = discoveryTabSettings(*snapshot, previous).Items
+		}
 		if err := tx.Where("1 = 1").Delete(&storage.CategorySetting{}).Error; err != nil {
 			return err
 		}
-		if snapshot.DiscoveryTabs != nil {
-			// 删除分类时同步移除标签，未来同名分类不继承旧的展示设置。
-			options := discoveryCategoryNames(normalized)
-			tabs := snapshot.DiscoveryTabs[:0]
-			for _, tab := range snapshot.DiscoveryTabs {
-				if _, ok := options[tab.Slug]; ok {
-					tabs = append(tabs, tab)
-				}
+		// 删除分类时同步移除标签，新增分类由管理员自行选入。
+		options := discoveryCategoryNames(normalized)
+		tabs := snapshot.DiscoveryTabs[:0]
+		for _, tab := range snapshot.DiscoveryTabs {
+			if _, ok := options[tab.Slug]; ok {
+				tabs = append(tabs, tab)
 			}
-			snapshot.DiscoveryTabs = tabs
 		}
+		snapshot.DiscoveryTabs = tabs
 		return insertCategories(tx, normalized)
 	})
 	return snapshot.Revision, normalized, err

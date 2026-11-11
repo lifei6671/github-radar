@@ -129,13 +129,15 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		return engine.CollectOnce(ctx)
 	}
 	var provider summary.Provider
+	var translate func(context.Context, string) summary.ModelResult
 	if missing := cfg.MissingAISettings(); len(missing) != 0 {
 		logger.Warn("AI 摘要待配置", "missing", missing)
 	} else if cfg.AI.Enabled && readmes != nil {
-		provider = summary.NewChatProvider(cfg.AI, strings.TrimSpace(os.Getenv(cfg.AI.APIKeyEnv)))
+		chat := summary.NewChatProvider(cfg.AI, strings.TrimSpace(os.Getenv(cfg.AI.APIKeyEnv)))
+		provider, translate = chat, chat.Translate
 	}
 	summarizer := summary.Engine{Queue: summary.Queue{DB: db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds},
-		GitHub: readmes, Provider: provider, Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute}
+		GitHub: readmes, Provider: provider, Translate: translate, Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute}
 
 	group, serviceCtx := errgroup.WithContext(ctx)
 	workers := lifecycle.NewWorkers(serviceCtx, func(ctx context.Context) error {
@@ -156,7 +158,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		workers.Resume()
 	}
 	gin.SetMode(gin.ReleaseMode)
-	router := api.NewRouter(db, pool, adminToken, logger, cfg, manager)
+	router := api.NewRouter(db, pool, adminToken, logger, cfg, &summarizer, manager)
 	webui.Register(router, os.DirFS("web/dist"))
 	server := &http.Server{
 		Addr:         cfg.Server.Listen,

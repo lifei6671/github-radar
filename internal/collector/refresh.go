@@ -21,10 +21,10 @@ func (e *Engine) refresh(ctx context.Context, job storage.Job, p Payload) (func(
 	if err := e.Queue.DB.WithContext(ctx).Take(&baseline, "repo_id = ?", *job.RepoID).Error; err != nil {
 		return nil, err
 	}
-	if !p.Manual && baseline.State != "active" {
+	if baseline.Blocked || (!p.Manual && baseline.State != "active") {
 		return func(*gorm.DB) error { return nil }, nil
 	}
-	policy := gh.Policy{Resource: gh.Core, Sample: true, Grade: baseline.Grade, Priority: p.Manual || baseline.Grade == "S"}
+	policy := gh.Policy{Resource: gh.Core, RepositoryID: baseline.RepoID, Sample: true, Grade: baseline.Grade, Priority: p.Manual || baseline.Grade == "S"}
 	var result gh.RepositoryResult
 	var requestErr error
 	started := time.Now()
@@ -102,7 +102,8 @@ func (e *Engine) refresh(ctx context.Context, job storage.Job, p Payload) (func(
 				if err := detachName(tx, baseline.RepoID, at); err != nil {
 					return err
 				}
-				return e.Queue.discover(tx, source, at)
+				_, err := e.Queue.discover(tx, source, at)
+				return err
 			}
 			for key, value := range metadata(source) {
 				values[key] = value

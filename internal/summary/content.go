@@ -24,6 +24,7 @@ const incomplete = "incomplete_source"
 type source struct {
 	fullName                                                          string
 	sha, etag, url, fingerprint, language, quality, body, description string
+	hasGitHubTopics                                                   bool
 }
 
 var bareURL = regexp.MustCompile(`https?://[^\s<>]+`)
@@ -76,6 +77,11 @@ func descriptionKey(s string) string {
 	return fmt.Sprintf("description:%x", sha256.Sum256([]byte(strings.Join(strings.Fields(s), " "))))
 }
 
+// 主题词同时依赖简介和 README，单独更新简介也应触发刷新。
+func topicsFingerprint(fingerprint, description string) string {
+	return fingerprint + "|" + descriptionKey(description)
+}
+
 func limitText(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -118,9 +124,15 @@ func excerpts(s string, limit int) string {
 	return limitText(b.String(), limit)
 }
 
-func (s source) prompt(budget int) (string, source) {
+func (s source) prompt(budget int, summary, topics bool) (string, source) {
 	// 字节作为保守上界，给系统消息、角色和 JSON 留出固定开销。
-	prefix := "公开仓库：" + limitText(s.fullName, 160) + "\n检测语言：" + s.language + "\n"
+	task := "摘要"
+	if topics && summary {
+		task = "摘要和主题词"
+	} else if topics {
+		task = "主题词"
+	}
+	prefix := "任务：" + task + "\n公开仓库：" + limitText(s.fullName, 160) + "\n检测语言：" + s.language + "\n"
 	const descriptionLabel, readmeLabel = "仓库 Description：\n", "仓库 README：\n"
 	available := max(0, budget-len(systemPrompt)-len(prefix)-128)
 	descriptionLimit := min(512, available-len(descriptionLabel)-1)
@@ -151,6 +163,36 @@ type answer struct {
 	Tags        []string `json:"value_tags"`
 	Evidence    []string `json:"evidence"`
 	Uncertainty []string `json:"uncertainty"`
+}
+
+var topicSlug = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// AI Topics 采用 GitHub 的主题词格式，去重后直接匹配后台的 anyTopics。
+func resultTopics(raw string) (string, bool) {
+	var a struct {
+		Topics []string `json:"topics"`
+	}
+	if json.Unmarshal([]byte(raw), &a) != nil || a.Topics == nil {
+		return "", false
+	}
+	topics := make([]string, 0, 5)
+	seen := make(map[string]bool)
+	for _, value := range a.Topics {
+		topic := strings.ToLower(strings.TrimSpace(value))
+		if len(topic) > 50 || !topicSlug.MatchString(topic) || seen[topic] {
+			continue
+		}
+		topics = append(topics, topic)
+		seen[topic] = true
+		if len(topics) == 5 {
+			break
+		}
+	}
+	if len(a.Topics) > 0 && len(topics) == 0 {
+		return "", false
+	}
+	data, _ := json.Marshal(topics)
+	return string(data), true
 }
 
 // resultSummary 校验中文、长度和引用类别，只返回允许持久化的短文本和标签。

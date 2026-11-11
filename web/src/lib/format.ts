@@ -14,6 +14,13 @@ export function number(value: number | null | undefined) { return value == null 
 export function decimal(value: number | null | undefined) { return value == null ? '—' : value.toFixed(1) }
 export function signed(value: number) { return (value > 0 ? '+' : value < 0 ? '−' : '') + digits.format(Math.abs(value)) }
 export function timestamp(value: string | null | undefined) { return value ? shortDate.format(new Date(value)) : '—' }
+export function encodedRepoName(fullName: string) { return fullName.split('/').map(encodeURIComponent).join('/') }
+
+export function repoPath(fullName: string, admin = false, historicalId?: number) {
+  // 后台同名历史记录携带独立身份，复制链接和新标签页打开也指向原记录。
+  return (admin ? '/admin/repos/' : '/repos/') + encodedRepoName(fullName) +
+    (admin && historicalId !== undefined ? '?repoId=' + historicalId : '')
+}
 export function dateGroup(value: string) { return day.format(new Date(value)) }
 export function dateHeading(value: string) { return monthDay.format(new Date(value)) }
 export function dayOfWeek(value: string) { return weekday.format(new Date(value)) }

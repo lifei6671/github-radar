@@ -72,13 +72,24 @@ func (s Store) DiscoveryTabSettings(ctx context.Context) (DiscoveryTabSettings, 
 }
 
 // SaveDiscoveryTabs 与分类修改共用修订号，避免保存已被移除的分类。
-func (s Store) SaveDiscoveryTabs(ctx context.Context, revision int64, items []DiscoveryTab) (DiscoveryTabSettings, error) {
+func (s Store) SaveDiscoveryTabs(ctx context.Context, revision int64, items []DiscoveryTab, newCategories []config.Category) (DiscoveryTabSettings, error) {
 	var categories []config.Category
 	snapshot, err := s.update(ctx, revision, func(tx *gorm.DB, snapshot *Snapshot) error {
 		var err error
 		categories, err = readCategories(tx)
 		if err != nil {
 			return err
+		}
+		// 从标签页新建的分类和标签共用一次保存，任一校验失败都不会留下半份配置。
+		if len(newCategories) > 0 {
+			count := len(categories)
+			categories, err = config.NormalizeCategories(append(categories, newCategories...))
+			if err != nil {
+				return &Invalid{Err: err}
+			}
+			if err := insertCategoriesAt(tx, categories[count:], count); err != nil {
+				return err
+			}
 		}
 		names := discoveryCategoryNames(categories)
 		seen := make(map[string]bool, len(items))

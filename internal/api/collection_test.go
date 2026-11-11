@@ -47,7 +47,7 @@ func collectionRouter(t *testing.T) (*gin.Engine, *gorm.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRouter(db, pool, "admin", slog.New(slog.NewTextHandler(io.Discard, nil)), cfg.WithRuntime(snapshot.Settings)), db
+	return NewRouter(db, pool, "admin", slog.New(slog.NewTextHandler(io.Discard, nil)), cfg.WithRuntime(snapshot.Settings), nil), db
 }
 
 func request(t *testing.T, router http.Handler, method, path, body, token string, want int) map[string]any {
@@ -163,6 +163,80 @@ func TestRepositoryCursorAndClassification(t *testing.T) {
 	var followed storage.Repository
 	if err := db.Take(&followed, "repo_id=1").Error; err != nil || !followed.StarredByUser {
 		t.Fatalf("设计契约的 follow 字段应能完成关注: %v", err)
+	}
+}
+
+func TestRepositoryBlockAdminAndPublicContracts(t *testing.T) {
+	router, db := collectionRouter(t)
+	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	repo := storage.Repository{RepoID: 21, Owner: "owner", Name: "blocked", FullName: "owner/blocked",
+		NameIsCurrent: true, HTMLURL: "https://github.com/owner/blocked", TopicsJSON: "[]", Grade: "A", State: "active"}
+	if err := db.Create(&repo).Error; err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/repos/21/block"
+	request(t, router, "PATCH", path, `{"blocked":true}`, "", 401)
+	request(t, router, "PATCH", path, `{}`, "admin", 400)
+	request(t, router, "PATCH", path, `{"blocked":true}`, "admin", 200)
+	request(t, router, "PATCH", path, `{"blocked":true}`, "admin", 200)
+	request(t, router, "GET", "/api/v1/public/repos/by-name/owner/blocked", "", "", 404)
+	request(t, router, "GET", "/api/v1/public/repos/21/readme", "", "", 404)
+	request(t, router, "GET", "/api/v1/public/repos?blocked=true", "", "", 400)
+	for _, list := range []string{"/api/v1/repos", "/api/v1/repos?blocked=true"} {
+		items := request(t, router, "GET", list, "", "admin", 200)["items"].([]any)
+		if len(items) != 1 || items[0].(map[string]any)["blocked"] != true {
+			t.Fatalf("后台应能筛选和解除屏蔽: %+v", items)
+		}
+	}
+	request(t, router, "POST", "/api/v1/repos/21/summary", `{"requestId":"blocked"}`, "admin", 409)
+	request(t, router, "PATCH", path, `{"blocked":false}`, "admin", 200)
+	item := request(t, router, "GET", "/api/v1/public/repos/by-name/owner/blocked", "", "", 200)
+	if _, leaked := item["blocked"]; leaked {
+		t.Fatal("公开详情不返回管理字段")
+	}
+}
+
+func TestAITopicsClassificationAndGitHubPrecedence(t *testing.T) {
+	router, db := collectionRouter(t)
+	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
+		t.Fatal(err)
+	}
+	repo := storage.Repository{RepoID: 1, Owner: "owner", Name: "repo", FullName: "owner/repo", NameIsCurrent: true,
+		HTMLURL: "https://github.com/owner/repo", TopicsJSON: "[]", Grade: "A", State: "active"}
+	if err := db.Create(&repo).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: `["mcp"]`}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		topics, category string
+		inferred         bool
+	}{{"[]", "mcp", true}, {`["unmapped"]`, "other", false}} {
+		if err := db.Model(&repo).Update("topics_json", tc.topics).Error; err != nil {
+			t.Fatal(err)
+		}
+		detail := request(t, router, "GET", "/api/v1/public/repos/by-name/owner/repo", "", "", 200)
+		tags := detail["aiTopics"].([]any)
+		if detail["categories"].([]any)[0] != tc.category || (len(tags) > 0) != tc.inferred ||
+			(tc.inferred && tags[0] != "mcp") {
+			t.Fatalf("详情分类或 AI Topics 来源不符: %+v", detail)
+		}
+		for _, category := range []string{"mcp", "other"} {
+			items := request(t, router, "GET", "/api/v1/repos?category="+category, "", "admin", 200)["items"].([]any)
+			if (len(items) == 1) != (category == tc.category) {
+				t.Fatalf("分类 %s 的筛选结果不符: %+v", category, items)
+			}
+		}
+		items := request(t, router, "GET", "/api/v1/public/categories", "", "", 200)["items"].([]any)
+		for _, raw := range items {
+			item := raw.(map[string]any)
+			if (item["count"] == float64(1)) != (item["slug"] == tc.category) {
+				t.Fatalf("分类计数与详情不一致: %+v", item)
+			}
+		}
 	}
 }
 

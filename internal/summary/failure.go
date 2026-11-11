@@ -67,14 +67,14 @@ func (e *Engine) fail(ctx context.Context, job storage.Job, code string, retry b
 }
 
 func (e *Engine) finishFailure(ctx context.Context, job storage.Job, call storage.AICall, result ModelResult, duration time.Duration,
-	old storage.AISummary, check storage.SummaryCheck) error {
+	old storage.AISummary, check storage.SummaryCheck, topicsFingerprint string) error {
 	return settleCall(ctx, func(final context.Context) error {
-		return e.recordCallFailure(final, job, call, result, duration, old, check)
+		return e.recordCallFailure(final, job, call, result, duration, old, check, topicsFingerprint)
 	})
 }
 
 func (e *Engine) recordCallFailure(ctx context.Context, job storage.Job, call storage.AICall, result ModelResult, duration time.Duration,
-	old storage.AISummary, check storage.SummaryCheck) error {
+	old storage.AISummary, check storage.SummaryCheck, topicsFingerprint string) error {
 	retry := result.Retry
 	if result.Code == "invalid_output" && retry && e.Queue.AI.Summary.RepairAttempts < job.MaxAttempts-1 {
 		var count int64
@@ -93,7 +93,7 @@ func (e *Engine) recordCallFailure(ctx context.Context, job storage.Job, call st
 	}
 	return e.Queue.settle(ctx, job, outcome{status: status, code: result.Code, next: retryAt(job, time.Now()),
 		attempts: job.Attempts, call: &call, model: result, duration: duration, apply: func(tx *gorm.DB) error {
-			return saveObserved(tx, old, check)
+			return saveObserved(tx, old, check, topicsFingerprint)
 		}})
 }
 

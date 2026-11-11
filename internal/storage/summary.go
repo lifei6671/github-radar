@@ -21,6 +21,31 @@ type AISummary struct {
 
 func (AISummary) TableName() string { return "ai_summaries" }
 
+// RepoAITopics 保存模型提取的主题词及其生成依据，空数组表示已分析但未提取到主题。
+type RepoAITopics struct {
+	RepoID            int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
+	TopicsJSON        string `gorm:"column:topics_json"`
+	SourceFingerprint string `gorm:"column:source_fingerprint"`
+	ModelProvider     string `gorm:"column:model_provider"`
+	ModelName         string `gorm:"column:model_name"`
+	PromptVersion     int    `gorm:"column:prompt_version"`
+	GeneratedAt       int64  `gorm:"column:generated_at"`
+}
+
+func (RepoAITopics) TableName() string { return "repo_ai_topics" }
+
+// RepoReadmeTranslation 按 README 版本缓存译文片段，已保存的批次可在重试时继续使用。
+type RepoReadmeTranslation struct {
+	RepoID      int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
+	ReadmeSHA   string `gorm:"column:readme_sha"`
+	ReadmeBytes int    `gorm:"column:readme_bytes"`
+	ModelKey    string `gorm:"column:model_key"`
+	PartsJSON   string `gorm:"column:parts_json"`
+	Complete    bool   `gorm:"column:complete"`
+}
+
+func (RepoReadmeTranslation) TableName() string { return "repo_readme_translations" }
+
 type SummaryCheck struct {
 	RepoID            int64   `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
 	ReadmeETag        *string `gorm:"column:readme_etag"`
