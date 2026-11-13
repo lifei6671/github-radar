@@ -9,14 +9,23 @@ import (
 )
 
 // periodProjects 按采集时间选取周期证据，同一仓库保留其最佳上榜记录或最新发现。
-func periodProjects(tx *gorm.DB, kind reports.Kind, key string, now time.Time) ([]PublicItem, error) {
+func periodProjects(tx *gorm.DB, kind reports.Kind, key string, now time.Time, keys []evidenceKey) ([]PublicItem, error) {
 	from, to, _ := kind.Bounds(key)
 	size := 10
 	if kind == reports.Monthly {
 		size = 15
 	}
-	candidates := publicItems(tx).Where("daily_report_items.observed_at >= ? AND daily_report_items.observed_at < ? AND daily_report_items.observed_at <= ?",
-		from.UnixMilli(), to.UnixMilli(), now.UnixMilli()).Select(`daily_report_items.*, repositories.full_name, repositories.html_url,
+	dates := make(map[string]struct{})
+	for _, row := range keys {
+		dates[row.IssueDate] = struct{}{}
+	}
+	var eligibleDates []string
+	for date := range dates {
+		eligibleDates = append(eligibleDates, date)
+	}
+	candidates := publicItems(tx).Where("daily_report_items.issue_date IN ?", eligibleDates).
+		Where("daily_report_items.observed_at >= ? AND daily_report_items.observed_at < ? AND daily_report_items.observed_at <= ?",
+			from.UnixMilli(), to.UnixMilli(), now.UnixMilli()).Select(`daily_report_items.*, repositories.full_name, repositories.html_url,
 		row_number() OVER (PARTITION BY daily_report_items.repo_id
 			ORDER BY rank NULLS LAST, observed_at DESC, issue_date DESC, position) AS occurrence`)
 	ranked := tx.Table("(?) AS chosen", candidates).Where("occurrence=1").Select(`chosen.*,

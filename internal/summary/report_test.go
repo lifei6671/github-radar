@@ -105,7 +105,7 @@ func TestReportJobsUseSavedEvidenceAndAccountForAI(t *testing.T) {
 	q, db := e.Queue, e.Queue.DB
 	q.AI.Summary.AutoDailyCalls = 10
 	e.Queue = q
-	at := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	at := time.Date(2020, 11, 12, 10, 0, 0, 0, time.UTC)
 	for id := int64(1); id <= 2; id++ {
 		if err := db.Model(&storage.Repository{}).Where("repo_id=?", id).
 			Updates(map[string]any{"discovered_at": at.UnixMilli(), "last_success_at": at.UnixMilli()}).Error; err != nil {
@@ -118,7 +118,7 @@ func TestReportJobsUseSavedEvidenceAndAccountForAI(t *testing.T) {
 		}
 	}
 	store := reportstore.Store{DB: db}
-	if err := store.Publish(t.Context(), reports.Window{Date: "2026-11-12", Start: at.Add(-time.Hour), End: at.Add(time.Hour), GeneratedAt: at}); err != nil {
+	if err := store.Publish(t.Context(), reports.Window{Date: "2020-11-12", Start: at.Add(-time.Hour), End: at.Add(time.Hour), GeneratedAt: at}); err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
@@ -147,7 +147,7 @@ func TestReportJobsUseSavedEvidenceAndAccountForAI(t *testing.T) {
 	if err := db.Model(&storage.AICall{}).Where("origin='auto' AND status='succeeded'").Count(&billed).Error; err != nil || billed != 4 {
 		t.Fatalf("报刊调用需要复用 AI 台账: %d %v", billed, err)
 	}
-	week, err := store.ReadEditorials(t.Context(), reports.Weekly, "", "", 25)
+	week, err := store.ReadEditorials(t.Context(), reports.Weekly, "", "", 25, time.Now())
 	if err != nil || week.Edition == nil || len(week.Citations) != 2 || len(week.Calendar) != 0 ||
 		week.Edition.PublicationStatus != reports.Preview || week.Edition.IssueNumber != nil ||
 		week.Edition.Headline != "把重复的项目操作变成可复用流程" {

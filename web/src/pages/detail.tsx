@@ -12,6 +12,7 @@ import { AnimatedPills } from '../components/navigation-feedback'
 import { RepoReaderTools } from '../components/repo-reader-tools'
 import { RefreshAction, SummaryActions } from '../components/tasks'
 import { RepoReading } from '../components/readme'
+import { StarHistoryPanel } from '../components/star-history'
 import { ActionButton, Badge, Empty, Notice, PageError, Skeleton } from '../components/ui'
 import { decimal, number, qualityLabel, relativeTime, repoCategoryPath, repoPath, repoState, resolutionLabel, sourceLabel, summaryLabel, timestamp } from '../lib/format'
 
@@ -385,9 +386,37 @@ function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<stri
         <div><dt>最近采样</dt><dd>{repo.lastSuccessAt ? <time dateTime={repo.lastSuccessAt}>{timestamp(repo.lastSuccessAt)}</time> : '等待采样'}</dd></div>
         {repo.followedAt && <div><dt>加入重点监控时间</dt><dd><time dateTime={repo.followedAt}>{timestamp(repo.followedAt)}</time></dd></div>}
       </dl>
+      {Boolean(repo.observationHistory?.length) && <ul className="repo-discovery-events" aria-label="观察池变更">
+        {repo.observationHistory?.map((entry) => <li key={entry.id}>
+          <strong>{observationReason[entry.reason] ?? entry.reason}</strong>
+          <time className="minor muted" dateTime={entry.at}>{timestamp(entry.at)}</time>
+          <span className="minor">{observationLabel(entry.fromState, entry.fromGrade)} → {observationLabel(entry.toState, entry.toGrade)}</span>
+          {entry.evidence.exact24h !== undefined && <span className="minor muted">24h 实测净增 {number(entry.evidence.exact24h)}</span>}
+        </li>)}
+      </ul>}
       {!repo.blocked && <RefreshAction repoId={repo.id} />}
     </section>}
   </aside>
+}
+
+const observationReason: Record<string, string> = {
+  breakout: '本地快照确认爆发',
+  manual_follow: '人工重点监控',
+  exact_growth_50: '达到重点观察增长门槛',
+  exact_growth_15: '达到普通观察增长门槛',
+  slowed_48h: '连续 48 小时放缓',
+  below_peers_7d: '连续 7 天低于同类基线',
+  quiet_14d: '连续 14 天无增长及新传播信号',
+  capacity: '观察池容量调整',
+  github_unavailable: 'GitHub 仓库不可用',
+  blocked: '管理员屏蔽',
+  identity_changed: '仓库地址待确认',
+  identity_restored: '公开仓库身份已恢复',
+}
+
+function observationLabel(state: RepoDetail['state'], grade: RepoDetail['grade']) {
+  if (state !== 'active') return repoState[state]
+  return { S: 'S 爆发', A: 'A 重点', B: 'B 普通', C: 'C 冷却' }[grade]
 }
 
 type SimilarProject = Pick<RepoDetail, 'id' | 'fullName' | 'description' | 'language' | 'stars'>
@@ -435,6 +464,7 @@ function TrendSection({ repo, range, trend, admin }: { repo: RepoDetail; range: 
   const growth = [[repo.growth24h, '24h 净增'], [repo.growth7d, '7d 净增'], [repo.growth30d, '30d 净增']] as const
   return <section id="star-trend" className="detail-panel trend-section" aria-labelledby="repo-trend-title">
     <h2 id="repo-trend-title">Star 趋势</h2>
+    <h3 className="star-source-title">本地累计 Star 与窗口净增</h3>
     <div className="trend-toolbar">
       {(admin || growth.some(([value]) => value.delta !== null)) && <div className="trend-stats">
         {growth.map(([value, label]) => <GrowthValue key={label} value={value} label={label} showMissing={admin} />)}
@@ -455,5 +485,6 @@ function TrendSection({ repo, range, trend, admin }: { repo: RepoDetail; range: 
       <span>{resolutionLabel[trend.data.resolution]}</span>
       {hasPoints && <time dateTime={trend.data.updatedAt}>观测于 {timestamp(trend.data.updatedAt)}</time>}
     </div>}
+    {!repo.blocked && <StarHistoryPanel key={repo.id} id={repo.id} admin={admin} />}
   </section>
 }

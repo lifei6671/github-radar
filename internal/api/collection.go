@@ -33,6 +33,8 @@ func (a *collectionAPI) register(v1 *gin.RouterGroup) {
 	v1.GET("/repos/by-name/:owner/:name", a.loadCategories, a.repo)
 	v1.GET("/repos/:id", a.loadCategories, a.repo)
 	v1.GET("/repos/:id/trend", a.trend)
+	v1.GET("/repos/:id/star-history", a.starHistory)
+	v1.POST("/repos/:id/star-history", a.requestStarHistory)
 	v1.GET("/repos/:id/readme", a.readme)
 	v1.POST("/repos/:id/readme/translate", a.requestTranslation)
 	v1.POST("/repos/:id/refresh", a.refresh)
@@ -42,6 +44,7 @@ func (a *collectionAPI) register(v1 *gin.RouterGroup) {
 	v1.POST("/repos/:id/topic", a.addTopic)
 	v1.GET("/topics", a.topics)
 	v1.GET("/topics/days", a.topicDays)
+	v1.GET("/topics/:id/evidence", a.topicEvidence)
 	v1.PATCH("/topics/:id", a.updateTopic)
 	v1.GET("/categories", a.loadCategories, a.categoryList)
 	v1.GET("/trending", a.loadCategories, a.trending)
@@ -243,6 +246,12 @@ func (a *collectionAPI) repo(c *gin.Context) {
 			return
 		}
 		body["discoveryEvents"] = events
+		history, err := repoObservationHistory(db, repo.RepoID)
+		if err != nil {
+			a.fail(c, err)
+			return
+		}
+		body["observationHistory"] = history
 	}
 	for name, raw := range map[string]string{"features": summary.row.FeaturesJSON, "audience": summary.row.AudienceJSON} {
 		tags := []string{}

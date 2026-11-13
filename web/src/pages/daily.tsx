@@ -134,8 +134,7 @@ function ReportPaper({ kind, report, calendar, location, older, newer, showOutli
   calendar: string[]; showOutline: boolean; closeOutline: () => void
 }) {
   const citations = new Map(report.items.map((item) => [item.repoId, item]))
-  const highlights = report.publicationStatus === 'preview' ? '采集看点' :
-    kind === 'daily' ? '今日看点' : kind === 'weekly' ? '本周看点' : '本月看点'
+  const highlights = report.publicationStatus === 'preview' ? '采集看点' : '本期看点'
   return <>
       {showOutline && <Dialog title="本期目录" onClose={closeOutline}>
         <a className="daily-outline-link" href="#daily-title" onClick={closeOutline}>头版</a>

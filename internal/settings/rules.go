@@ -25,6 +25,7 @@ type Rule struct {
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"intervalMinutes"`
 	Priority        int    `json:"priority"`
+	AgeWindow       string `json:"ageWindow,omitempty"`
 }
 
 func initialRules(seed config.Config, now time.Time) ([]storage.DiscoveryRule, error) {
@@ -83,7 +84,7 @@ func rulesFromDB(tx *gorm.DB) ([]storage.DiscoveryRule, error) {
 
 func ruleView(row storage.DiscoveryRule) Rule {
 	item := Rule{SourceType: row.SourceType, SourceKey: row.SourceKey, Enabled: row.Enabled,
-		IntervalMinutes: row.IntervalMinutes, Priority: row.Priority}
+		IntervalMinutes: row.IntervalMinutes, Priority: row.Priority, AgeWindow: row.AgeWindow}
 	if row.SourceType == consts.SourceSearch {
 		item.Query, item.MinStars = row.Query, &row.MinStars
 	}
@@ -135,7 +136,7 @@ func normalizeRules(items []Rule) ([]Rule, error) {
 			if _, _, _, err := config.TrendingSource(item.SourceKey); err != nil {
 				return nil, err
 			}
-			if item.Query != "" {
+			if item.Query != "" || item.AgeWindow != "" {
 				return nil, fmt.Errorf("Trending 规则使用来源键和周期，无需搜索查询")
 			}
 			if item.MinStars != nil {
@@ -149,7 +150,12 @@ func normalizeRules(items []Rule) ([]Rule, error) {
 			if floor < 0 {
 				return nil, fmt.Errorf("最低 Star 必须为非负整数")
 			}
-			if _, err := (collection.Payload{Query: item.Query, StarFloor: floor}).SearchQuery(); err != nil {
+			if item.AgeWindow != "" {
+				if _, _, ok := collection.CreationWindow(item.AgeWindow, time.Now(), collection.DiscoveryPrimary); !ok {
+					return nil, fmt.Errorf("无效的仓库年龄窗口")
+				}
+			}
+			if _, err := (collection.Payload{Query: item.Query, StarFloor: floor, AgeWindow: item.AgeWindow}).SearchQuery(); err != nil {
 				return nil, err
 			}
 			item.MinStars = &floor
@@ -187,7 +193,7 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 			delete(existing, key)
 			if !found {
 				row = storage.DiscoveryRule{
-					SourceType: item.SourceType, SourceKey: item.SourceKey, Query: item.Query, MinStars: floor,
+					SourceType: item.SourceType, SourceKey: item.SourceKey, Query: item.Query, MinStars: floor, AgeWindow: item.AgeWindow,
 					Enabled: item.Enabled, IntervalMinutes: item.IntervalMinutes, Priority: item.Priority, NextRunAt: now, DisplayPosition: position,
 				}
 				if err := tx.Create(&row).Error; err != nil {
@@ -206,7 +212,8 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 			}
 			if err := tx.Model(&row).Updates(map[string]any{
 				storage.DiscoveryRuleColumns.Query: item.Query, storage.DiscoveryRuleColumns.MinStars: floor, storage.DiscoveryRuleColumns.Enabled: item.Enabled, storage.DiscoveryRuleColumns.IntervalMinutes: item.IntervalMinutes,
-				storage.DiscoveryRuleColumns.Priority: item.Priority, storage.DiscoveryRuleColumns.NextRunAt: now, storage.DiscoveryRuleColumns.DisplayPosition: position,
+				storage.DiscoveryRuleColumns.AgeWindow: item.AgeWindow,
+				storage.DiscoveryRuleColumns.Priority:  item.Priority, storage.DiscoveryRuleColumns.NextRunAt: now, storage.DiscoveryRuleColumns.DisplayPosition: position,
 			}).Error; err != nil {
 				return err
 			}
@@ -228,11 +235,15 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 }
 
 func cancelRuleJobs(tx *gorm.DB, id, now int64) error {
-	return tx.Model(&storage.Job{}).
+	if err := tx.Model(&storage.Job{}).
 		Where(storage.JobColumns.Type+" IN ('"+consts.JobDiscoverSearch+"','"+consts.JobDiscoverTrending+"') AND "+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusRunning+"','"+consts.StatusFailed+"')").
 		Where("CAST(json_extract("+storage.JobColumns.PayloadJSON+",'$.ruleId') AS INTEGER) = ?", id).
 		Updates(map[string]any{
 			storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LeaseToken: nil, storage.JobColumns.LeaseUntil: nil,
 			storage.JobColumns.LastErrorCode: consts.CodeSourceRuleChanged, storage.JobColumns.UpdatedAt: now,
-		}).Error
+		}).Error; err != nil {
+		return err
+	}
+	return tx.Model(&storage.DiscoveryRuleRun{}).Where("rule_id = ? AND finished_at = 0", id).
+		Updates(map[string]any{"status": consts.StatusCanceled, "finished_at": now, "error_code": consts.CodeSourceRuleChanged}).Error
 }

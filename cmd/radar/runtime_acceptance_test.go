@@ -70,8 +70,9 @@ func TestAcceptanceRuntimeReload(t *testing.T) {
 	if err == nil {
 		_, err = pool.ExecContext(t.Context(), `INSERT INTO report_editorials
 		(kind,issue_key,publication_status,coverage_days,fingerprint,headline,lead,stories_json,repo_ids_json,source_issues,observed_from,observed_to,generated_at) VALUES
-		('weekly','2026-W46','preview',1,'fixture-week','周报采集预览','正文','[]','[]',1,1,2,3),
-		('monthly','2026-11','preview',1,'fixture-month','月报采集预览','正文','[]','[]',1,1,2,3)`)
+		('weekly','2020-W46','preview',1,'fixture-week','周报采集预览','正文','[]','[]',1,1,2,?),
+		('monthly','2020-11','preview',1,'fixture-month','月报采集预览','正文','[]','[]',1,1,2,?)`,
+			time.Now().UnixMilli(), time.Now().UnixMilli())
 	}
 	closeErr := pool.Close()
 	if err != nil || closeErr != nil {

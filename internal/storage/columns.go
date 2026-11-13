@@ -72,6 +72,7 @@ var AISummaryColumns = struct {
 	FeaturesJSON         string
 	AudienceJSON         string
 	ValueTagsJSON        string
+	EditorialBriefJSON   string
 	SourceReadmeURL      string
 	ModelProvider        string
 	ModelName            string
@@ -90,6 +91,7 @@ var AISummaryColumns = struct {
 	FeaturesJSON:         "features_json",
 	AudienceJSON:         "audience_json",
 	ValueTagsJSON:        "value_tags_json",
+	EditorialBriefJSON:   "editorial_brief_json",
 	SourceReadmeURL:      "source_readme_url",
 	ModelProvider:        "model_provider",
 	ModelName:            "model_name",
@@ -163,6 +165,7 @@ var DiscoveryRuleColumns = struct {
 	NextRunAt       string
 	Priority        string
 	DisplayPosition string
+	AgeWindow       string
 }{
 	ID:              "id",
 	SourceType:      "source_type",
@@ -174,6 +177,7 @@ var DiscoveryRuleColumns = struct {
 	NextRunAt:       "next_run_at",
 	Priority:        "priority",
 	DisplayPosition: "display_position",
+	AgeWindow:       "age_window",
 }
 
 // HourlyMetricColumns 对应 HourlyMetric 的 GORM 字段。
@@ -193,37 +197,39 @@ var HourlyMetricColumns = struct {
 
 // JobColumns 对应 Job 的 GORM 字段。
 var JobColumns = struct {
-	ID            string
-	Type          string
-	RepoID        string
-	DedupKey      string
-	PayloadJSON   string
-	Priority      string
-	Status        string
-	AvailableAt   string
-	LeaseUntil    string
-	LeaseToken    string
-	Attempts      string
-	MaxAttempts   string
-	LastErrorCode string
-	CreatedAt     string
-	UpdatedAt     string
+	ID             string
+	Type           string
+	RepoID         string
+	DiscoveryRunID string
+	DedupKey       string
+	PayloadJSON    string
+	Priority       string
+	Status         string
+	AvailableAt    string
+	LeaseUntil     string
+	LeaseToken     string
+	Attempts       string
+	MaxAttempts    string
+	LastErrorCode  string
+	CreatedAt      string
+	UpdatedAt      string
 }{
-	ID:            "id",
-	Type:          "type",
-	RepoID:        "repo_id",
-	DedupKey:      "dedup_key",
-	PayloadJSON:   "payload_json",
-	Priority:      "priority",
-	Status:        "status",
-	AvailableAt:   "available_at",
-	LeaseUntil:    "lease_until",
-	LeaseToken:    "lease_token",
-	Attempts:      "attempts",
-	MaxAttempts:   "max_attempts",
-	LastErrorCode: "last_error_code",
-	CreatedAt:     "created_at",
-	UpdatedAt:     "updated_at",
+	ID:             "id",
+	Type:           "type",
+	RepoID:         "repo_id",
+	DiscoveryRunID: "discovery_run_id",
+	DedupKey:       "dedup_key",
+	PayloadJSON:    "payload_json",
+	Priority:       "priority",
+	Status:         "status",
+	AvailableAt:    "available_at",
+	LeaseUntil:     "lease_until",
+	LeaseToken:     "lease_token",
+	Attempts:       "attempts",
+	MaxAttempts:    "max_attempts",
+	LastErrorCode:  "last_error_code",
+	CreatedAt:      "created_at",
+	UpdatedAt:      "updated_at",
 }
 
 // LatestMetricColumns 对应 LatestMetric 的 GORM 字段。
@@ -243,6 +249,7 @@ var LatestMetricColumns = struct {
 	TrendingScore      string
 	HotnessScore       string
 	CandidateBurst     string
+	BreakoutJSON       string
 	DataQuality        string
 	WindowDetailsJSON  string
 	CalculatedAt       string
@@ -262,6 +269,7 @@ var LatestMetricColumns = struct {
 	TrendingScore:      "trending_score",
 	HotnessScore:       "hotness_score",
 	CandidateBurst:     "candidate_burst",
+	BreakoutJSON:       "breakout_json",
 	DataQuality:        "data_quality",
 	WindowDetailsJSON:  "window_details_json",
 	CalculatedAt:       "calculated_at",
@@ -394,69 +402,75 @@ var RepoSnapshotColumns = struct {
 
 // RepositoryColumns 对应 Repository 的 GORM 字段。
 var RepositoryColumns = struct {
-	RepoID           string
-	Owner            string
-	Name             string
-	FullName         string
-	NameIsCurrent    string
-	HTMLURL          string
-	Description      string
-	TopicsJSON       string
-	PrimaryLanguage  string
-	LicenseSPDXID    string
-	LicenseName      string
-	Stars            string
-	Forks            string
-	Archived         string
-	Disabled         string
-	Blocked          string
-	Grade            string
-	BelowGradeSince  string
-	StarredByUser    string
-	FollowedAt       string
-	State            string
-	GitHubCreatedAt  string
-	GitHubPushedAt   string
-	DiscoveredAt     string
-	LastDiscoveredAt string
-	LastCheckedAt    string
-	LastSuccessAt    string
-	FirstNotFoundAt  string
-	NextFetchAt      string
-	MetadataETag     string
-	UpdatedAt        string
+	RepoID                   string
+	Owner                    string
+	Name                     string
+	FullName                 string
+	NameIsCurrent            string
+	HTMLURL                  string
+	Description              string
+	TopicsJSON               string
+	PrimaryLanguage          string
+	LicenseSPDXID            string
+	LicenseName              string
+	Stars                    string
+	Forks                    string
+	Archived                 string
+	Disabled                 string
+	Blocked                  string
+	Grade                    string
+	BelowGradeSince          string
+	BreakoutGradeJSON        string
+	ObservationProbeSignalAt string
+	ObservationProbeDueAt    string
+	StarredByUser            string
+	FollowedAt               string
+	State                    string
+	GitHubCreatedAt          string
+	GitHubPushedAt           string
+	DiscoveredAt             string
+	LastDiscoveredAt         string
+	LastCheckedAt            string
+	LastSuccessAt            string
+	FirstNotFoundAt          string
+	NextFetchAt              string
+	MetadataETag             string
+	UpdatedAt                string
 }{
-	RepoID:           "repo_id",
-	Owner:            "owner",
-	Name:             "name",
-	FullName:         "full_name",
-	NameIsCurrent:    "name_is_current",
-	HTMLURL:          "html_url",
-	Description:      "description",
-	TopicsJSON:       "topics_json",
-	PrimaryLanguage:  "primary_language",
-	LicenseSPDXID:    "license_spdx_id",
-	LicenseName:      "license_name",
-	Stars:            "stars",
-	Forks:            "forks",
-	Archived:         "archived",
-	Disabled:         "disabled",
-	Blocked:          "blocked",
-	Grade:            "grade",
-	BelowGradeSince:  "below_grade_since",
-	StarredByUser:    "starred_by_user",
-	FollowedAt:       "followed_at",
-	State:            "state",
-	GitHubCreatedAt:  "github_created_at",
-	GitHubPushedAt:   "github_pushed_at",
-	DiscoveredAt:     "discovered_at",
-	LastDiscoveredAt: "last_discovered_at",
-	LastCheckedAt:    "last_checked_at",
-	LastSuccessAt:    "last_success_at",
-	FirstNotFoundAt:  "first_not_found_at",
-	NextFetchAt:      "next_fetch_at",
-	MetadataETag:     "metadata_etag",
-	UpdatedAt:        "updated_at",
+	RepoID:                   "repo_id",
+	Owner:                    "owner",
+	Name:                     "name",
+	FullName:                 "full_name",
+	NameIsCurrent:            "name_is_current",
+	HTMLURL:                  "html_url",
+	Description:              "description",
+	TopicsJSON:               "topics_json",
+	PrimaryLanguage:          "primary_language",
+	LicenseSPDXID:            "license_spdx_id",
+	LicenseName:              "license_name",
+	Stars:                    "stars",
+	Forks:                    "forks",
+	Archived:                 "archived",
+	Disabled:                 "disabled",
+	Blocked:                  "blocked",
+	Grade:                    "grade",
+	BelowGradeSince:          "below_grade_since",
+	BreakoutGradeJSON:        "breakout_grade_json",
+	ObservationProbeSignalAt: "observation_probe_signal_at",
+	ObservationProbeDueAt:    "observation_probe_due_at",
+	StarredByUser:            "starred_by_user",
+	FollowedAt:               "followed_at",
+	State:                    "state",
+	GitHubCreatedAt:          "github_created_at",
+	GitHubPushedAt:           "github_pushed_at",
+	DiscoveredAt:             "discovered_at",
+	LastDiscoveredAt:         "last_discovered_at",
+	LastCheckedAt:            "last_checked_at",
+	LastSuccessAt:            "last_success_at",
+	FirstNotFoundAt:          "first_not_found_at",
+	NextFetchAt:              "next_fetch_at",
+	MetadataETag:             "metadata_etag",
+	UpdatedAt:                "updated_at",
 }
 
 // SearchObservationColumns 对应 SearchObservation 的 GORM 字段。
@@ -506,39 +520,47 @@ var SystemSettingColumns = struct {
 
 // TopicCandidateColumns 对应 TopicCandidate 的 GORM 字段。
 var TopicCandidateColumns = struct {
-	ID                string
-	RepoID            string
-	AngleKey          string
-	TitleZh           string
-	ReaderValue       string
-	SourceURL         string
-	SourceFingerprint string
-	Reason            string
-	TopicScore        string
-	HotnessScore      string
-	Growth24h         string
-	Status            string
-	Feedback          string
-	ReviewedAt        string
-	CreatedAt         string
-	UpdatedAt         string
+	ID                  string
+	RepoID              string
+	AngleKey            string
+	TitleZh             string
+	ReaderValue         string
+	SourceURL           string
+	SourceFingerprint   string
+	Reason              string
+	TopicScore          string
+	HotnessScore        string
+	Growth24h           string
+	Status              string
+	Feedback            string
+	ReviewedAt          string
+	CreatedAt           string
+	UpdatedAt           string
+	ScoreVersion        string
+	ScoreDetailsJSON    string
+	EditorialReviewJSON string
+	ReleaseKey          string
 }{
-	ID:                "id",
-	RepoID:            "repo_id",
-	AngleKey:          "angle_key",
-	TitleZh:           "title_zh",
-	ReaderValue:       "reader_value",
-	SourceURL:         "source_url",
-	SourceFingerprint: "source_fingerprint",
-	Reason:            "reason",
-	TopicScore:        "topic_score",
-	HotnessScore:      "hotness_score",
-	Growth24h:         "growth_24h",
-	Status:            "status",
-	Feedback:          "feedback",
-	ReviewedAt:        "reviewed_at",
-	CreatedAt:         "created_at",
-	UpdatedAt:         "updated_at",
+	ID:                  "id",
+	RepoID:              "repo_id",
+	AngleKey:            "angle_key",
+	TitleZh:             "title_zh",
+	ReaderValue:         "reader_value",
+	SourceURL:           "source_url",
+	SourceFingerprint:   "source_fingerprint",
+	Reason:              "reason",
+	TopicScore:          "topic_score",
+	HotnessScore:        "hotness_score",
+	Growth24h:           "growth_24h",
+	Status:              "status",
+	Feedback:            "feedback",
+	ReviewedAt:          "reviewed_at",
+	CreatedAt:           "created_at",
+	UpdatedAt:           "updated_at",
+	ScoreVersion:        "score_version",
+	ScoreDetailsJSON:    "score_details_json",
+	EditorialReviewJSON: "editorial_review_json",
+	ReleaseKey:          "release_key",
 }
 
 // TrendingBatchRecordColumns 对应 TrendingBatchRecord 的 GORM 字段。

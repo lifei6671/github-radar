@@ -94,7 +94,7 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) Step(ctx context.Context) (bool, error) {
-	job, localOnly, err := e.Queue.claimWork(ctx, time.Now(), e.Provider != nil || e.Translate != nil || e.WriteReport != nil, e.GitHub != nil, e.Provider != nil)
+	job, localOnly, err := e.Queue.claimWork(ctx, time.Now(), e.Provider != nil || e.Translate != nil || e.WriteReport != nil, e.GitHub != nil, e.Provider != nil, e.Translate != nil)
 	if err != nil || job == nil {
 		return false, err
 	}
@@ -146,7 +146,7 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 		return e.fail(ctx, job, consts.CodeSummaryRepoUnavailable, false, 0, false)
 	}
 	if job.Type == TranslationJob {
-		return e.runTranslation(ctx, job, repo, p.Manual)
+		return e.runTranslation(ctx, job, repo, p, localOnly)
 	}
 	var old storage.AISummary
 	var check storage.SummaryCheck
@@ -273,7 +273,9 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 		return err
 	}
 	input.themePrompt = themePrompt(catalog, q.AI.Summary.InputTokens/4)
-	prompt, sent := input.prompt(q.AI.Summary.InputTokens, makeSummary, makeTopics)
+	// 选题材料为可选输出，给低输出预算保留导读及译文所需空间。
+	editorial := q.AI.Summary.OutputTokens >= 1536
+	prompt, sent := input.prompt(q.AI.Summary.InputTokens, makeSummary, makeTopics, editorial)
 	if sent.body == "" && sent.description == "" {
 		return e.fail(ctx, job, consts.CodeSummaryInputBudgetTooSmall, false, 0, false)
 	}
@@ -286,7 +288,8 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 		}
 		if len(segments) > 0 {
 			encoded, _ := json.Marshal(segments)
-			basePrompt, baseSource := input.prompt(q.AI.Summary.InputTokens-len(combinedTranslationInstruction)-len(encoded)-1, makeSummary, makeTopics)
+			basePrompt, baseSource := input.prompt(q.AI.Summary.InputTokens-len(combinedTranslationInstruction)-len(encoded)-1,
+				makeSummary, makeTopics, editorial && q.AI.Summary.OutputTokens >= 3072)
 			if len(basePrompt)+len(systemPrompt)+len(combinedTranslationInstruction)+len(encoded)+1 > q.AI.Summary.InputTokens {
 				segments = nil
 			} else {

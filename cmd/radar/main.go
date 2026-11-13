@@ -168,9 +168,13 @@ func prepareDatabase(ctx context.Context, cfg config.Config) (config.Config, int
 	if err != nil {
 		return config.Config{}, 0, fmt.Errorf("初始化配置连接: %w", err)
 	}
-	snapshot, err := (settings.Store{DB: db}).Initialize(ctx, cfg)
+	store := settings.Store{DB: db}
+	snapshot, err := store.Initialize(ctx, cfg)
 	if err != nil {
 		return config.Config{}, 0, fmt.Errorf("加载数据库配置: %w", err)
+	}
+	if err := store.InstallEarlyDiscovery(ctx, time.Now()); err != nil {
+		return config.Config{}, 0, fmt.Errorf("安装早期发现规则: %w", err)
 	}
 	return cfg.WithRuntime(snapshot.Settings), applied, nil
 }

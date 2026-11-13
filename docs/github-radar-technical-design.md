@@ -741,7 +741,7 @@ GET /repos/{owner}/{repo}/readme
 - 高热度候选优先于普通项目；失败指数退避，达到上限转 dead 并可人工重试。
 - 缓存键使用 repo_id + source_fingerprint + provider + model + prompt_version；有 README 时 fingerprint 为 `readme:<sha>`，无 README 时为规范化 description 的 SHA-256，避免所有无 README 情况共用 null 键。readme_sha 在无 README 时仍为 null。
 - AI 分析依赖可用预算但不阻断 Star 采集和榜单展示。
-- 摘要 Worker 独立调度。README 下载及公开性复核使用 GitHub core 配额中的本地子预算，默认每小时 120 次，每个 Worker 至少预留 8 次。发送模型前再次核对数字仓库 ID、公开状态及当前地址。
+- 摘要 Worker 独立调度。README 下载及发布复核使用 GitHub core 配额中的本地子预算，默认每小时 120 次，每个 Worker 至少预留 8 次。首次下载前后核对数字仓库 ID、公开状态及当前地址。续译可在 GitHub 请求等待期间读取已确认公开的持久化快照，并检查本地仓库状态；最后一批译文落盘后由 GitHub 复核确认版本与公开状态，再发布中文正文。
 
 调用与费用边界：
 - 本地结果幂等不代表供应商只计费一次。调用前在短事务中预留当日名额并创建 ai_calls，发送前核对仍持有有效 lease_token 并持久化 sending；收到有效结果后与摘要及任务完成状态一起提交 succeeded。任何重新领取必须先检查该任务的调用记录，存在 sending/unknown 时只转 unknown，不发送新请求。数据库中只存调用标识、状态和计量，不存请求正文。

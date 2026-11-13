@@ -86,27 +86,42 @@ func (e *Engine) discoverTrending(ctx context.Context, p collection.Payload) (po
 
 func (e *Engine) search(ctx context.Context, job storage.Job, p collection.Payload) (port.Change, error) {
 	query, err := p.SearchQuery()
-	if err != nil || query == "" {
+	if err != nil {
 		return nil, err
+	}
+	if query == "" {
+		if p.RunID == nil {
+			return nil, nil
+		}
+		return func(w port.Writer) error { return w.SaveSearch(port.Search{Parent: job, Plan: p}) }, nil
 	}
 	page, err := e.GitHub.Search(ctx, query, max(p.Page, 1))
 	if err != nil {
 		return nil, err
 	}
-	result := port.Search{Parent: job, Plan: p}
+	result := port.Search{Parent: job, Plan: p, UpstreamTotal: page.Total}
 	if page.Total > 1000 {
+		if p.Page > 1 {
+			// 翻页时结果集扩张，不能用已经落库的半个分片冒充一轮完整扫描。
+			return nil, &gh.Failure{Code: consts.CodeGitHubIncompleteSearch, SearchTotal: &page.Total}
+		}
 		var highest *int
 		if len(page.Repositories) > 0 {
 			stars := page.Repositories[0].GetStargazersCount()
 			highest = &stars
 		}
 		result.Next, err = collection.SplitSearch(p, highest)
+		result.Split = true
 		if err != nil {
+			if p.RunID != nil {
+				return nil, &gh.Failure{Code: consts.CodeGitHubIncompleteSearch, SearchTotal: &page.Total}
+			}
 			return nil, err
 		}
 	} else {
 		for i := range page.Repositories {
-			if repo := page.Repositories[i]; repo != nil && repo.GetStargazersCount() < p.StarFloor {
+			if repo := page.Repositories[i]; repo != nil && (repo.GetStargazersCount() < p.StarFloor ||
+				p.AgeWindow != "" && (repo.GetCreatedAt().IsZero() || repo.GetCreatedAt().UnixMilli() < p.CreatedFrom || repo.GetCreatedAt().UnixMilli() > p.CreatedUntil)) {
 				page.Repositories[i] = nil
 				continue
 			}
@@ -116,10 +131,12 @@ func (e *Engine) search(ctx context.Context, job storage.Job, p collection.Paylo
 			}
 		}
 		result.Repositories, result.ObservedAt = page.Repositories, time.Now().UnixMilli()
-		if page.NextPage > p.Page && page.NextPage <= 20 {
+		if page.NextPage == max(p.Page, 1)+1 && page.NextPage <= 20 {
 			next := p
 			next.Page = page.NextPage
 			result.Next = []collection.Payload{next}
+		} else if page.NextPage != 0 {
+			return nil, &gh.Failure{Code: consts.CodeGitHubIncompleteSearch}
 		}
 	}
 	return func(w port.Writer) error { return w.SaveSearch(result) }, nil

@@ -15,6 +15,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/domain/collection"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -45,9 +46,16 @@ func metadata(source *sdk.Repository) map[string]any {
 }
 
 // detachName 解除旧名称寻址，历史、数字 ID 和关注状态始终保留。
-func detachName(tx *gorm.DB, id int64, at int64) error {
+func (q Queue) detachName(tx *gorm.DB, repo storage.Repository, at int64) error {
+	if q.Cfg.ObservationPool {
+		if err := storage.RecordObservation(tx, repo, consts.StatusAddressPending, repo.Grade, "identity_changed", at, metrics.ObservationEvidence{Stars: repo.Stars}); err != nil {
+			return err
+		}
+	}
+	id := repo.RepoID
 	if err := tx.Model(&storage.Repository{}).Where(storage.RepositoryColumns.RepoID+" = ?", id).Updates(map[string]any{
 		storage.RepositoryColumns.NameIsCurrent: false, storage.RepositoryColumns.State: consts.StatusAddressPending, storage.RepositoryColumns.MetadataETag: nil, storage.RepositoryColumns.UpdatedAt: at,
+		"observation_probe_due_at": 0,
 	}).Error; err != nil {
 		return err
 	}
@@ -72,7 +80,7 @@ func (q Queue) Discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, er
 	var occupied storage.Repository
 	err := tx.Take(&occupied, storage.RepositoryColumns.FullName+" = ? COLLATE NOCASE AND "+storage.RepositoryColumns.NameIsCurrent+" = 1 AND "+storage.RepositoryColumns.RepoID+" <> ?", source.GetFullName(), source.GetID()).Error
 	if err == nil {
-		if err := detachName(tx, occupied.RepoID, at); err != nil {
+		if err := q.detachName(tx, occupied, at); err != nil {
 			return false, err
 		}
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -102,6 +110,16 @@ func (q Queue) Discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, er
 	if source.GetDisabled() {
 		values[storage.RepositoryColumns.State] = consts.StatusUnavailable
 	}
+	if state, ok := values[storage.RepositoryColumns.State].(string); ok && state != repo.State && q.Cfg.ObservationPool {
+		reason := "identity_restored"
+		if state == consts.StatusUnavailable {
+			reason = "github_unavailable"
+		}
+		if err := storage.RecordObservation(tx, repo, state, repo.Grade, reason, at, metrics.ObservationEvidence{Stars: source.GetStargazersCount()}); err != nil {
+			return false, err
+		}
+		values["observation_probe_due_at"] = 0
+	}
 	if err := tx.Model(&repo).Updates(values).Error; err != nil {
 		return false, err
 	}
@@ -112,6 +130,12 @@ func (q Queue) Discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, er
 }
 
 func (q Queue) admit(tx *gorm.DB, repo *storage.Repository, at int64) error {
+	if q.Cfg.ObservationPool {
+		if !repo.StarredByUser || !repo.MonitoringState().CanProbeObservation() {
+			return nil
+		}
+		return q.admitFollowedObservation(tx, repo, at)
+	}
 	if !repo.MonitoringState().CanMonitor() {
 		return nil
 	}
@@ -174,6 +198,10 @@ func (q Queue) availableGrade(tx *gorm.DB) (string, error) {
 
 // Rebalance 每日按关注、新上榜和发现时间更新准入；阶段 2 接入有效热度。
 func (q Queue) Rebalance(ctx context.Context, now time.Time) error {
+	if q.Cfg.ObservationPool {
+		// 观察池在指标事务内统一分配四档容量，旧的每日准入不再独立修改档位。
+		return nil
+	}
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var followedActive int64
 		if err := tx.Model(&storage.Repository{}).Where(storage.RepositoryColumns.State + "='" + consts.StatusActive + "' AND " + storage.RepositoryColumns.StarredByUser + "=1").Count(&followedActive).Error; err != nil {
@@ -295,7 +323,10 @@ func (q Queue) Follow(ctx context.Context, repoID int64, followed bool, now time
 			return storage.ErrRepositoryBlocked
 		}
 		wasFollowed := repo.StarredByUser
-		canBecomeActive := (repo.State == consts.StatusCandidate || repo.State == consts.StatusPaused) && !repo.Disabled && repo.NameIsCurrent
+		canBecomeActive := repo.MonitoringState().CanMonitor()
+		if q.Cfg.ObservationPool {
+			canBecomeActive = repo.MonitoringState().CanProbeObservation()
+		}
 		if followed && !wasFollowed && (repo.State == consts.StatusActive || canBecomeActive) {
 			allowed, err := q.canActivateFollow(tx)
 			if err != nil {
@@ -305,7 +336,7 @@ func (q Queue) Follow(ctx context.Context, repoID int64, followed bool, now time
 				return collection.ErrCapacity
 			}
 		}
-		if followed && !wasFollowed && repo.State != consts.StatusActive {
+		if followed && !wasFollowed && repo.State != consts.StatusActive && !q.Cfg.ObservationPool {
 			var count int64
 			if err := tx.Model(&storage.Repository{}).Where(storage.RepositoryColumns.State + "='" + consts.StatusActive + "'").Count(&count).Error; err != nil {
 				return err

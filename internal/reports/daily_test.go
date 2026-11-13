@@ -20,27 +20,28 @@ func (s *windowFixture) Publish(_ context.Context, window Window) error {
 	return nil
 }
 
-func TestDailyCatchUpContinuesAnEarlyFirstIssue(t *testing.T) {
+func TestDailyCatchUpUsesClosedBeijingDates(t *testing.T) {
 	firstEnd := time.Date(2026, 11, 11, 23, 0, 0, 0, time.UTC) // 北京时间 11 月 12 日 07:00
 	store := &windowFixture{}
 	if err := Generate(t.Context(), store, firstEnd); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.planned) != 1 || store.planned[0].Date != "2026-11-12" || !store.planned[0].End.Equal(firstEnd) {
-		t.Fatalf("首期应以北京时间记期: %+v", store.planned)
+	if len(store.planned) != catchUpDays || store.planned[catchUpDays-1].Date != "2026-11-10" {
+		t.Fatalf("早于 08:00 时昨天尚未到出刊点: %+v", store.planned)
 	}
-	store.published = []PublishedWindow{{Date: "2026-11-12", End: firstEnd}}
+	store.published = []PublishedWindow{{Date: "2026-11-12", End: firstEnd}, {Date: "2026-11-13", End: time.Date(2026, 11, 13, 16, 0, 0, 0, time.UTC)}}
 	store.planned = nil
 	cutoff := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
 	if err := Generate(t.Context(), store, cutoff); err != nil {
 		t.Fatal(err)
 	}
-	if len(store.planned) != 3 || !store.planned[0].Start.Equal(firstEnd) || !store.planned[2].End.Equal(cutoff) {
-		t.Fatalf("恢复后应连续补查三期，接续首期实际截止时间: %+v", store.planned)
+	if len(store.planned) != catchUpDays-1 || store.planned[len(store.planned)-2].Date != "2026-11-12" ||
+		store.planned[len(store.planned)-1].Date != "2026-11-14" {
+		t.Fatalf("应重建旧窗口、跳过已收口期次，并生成昨天的日报: %+v", store.planned)
 	}
-	for i := 1; i < len(store.planned); i++ {
-		if !store.planned[i-1].End.Equal(store.planned[i].Start) {
-			t.Fatalf("日报窗口之间出现缺口: %+v", store.planned)
+	for _, window := range store.planned {
+		if window.Start.Hour() != 0 || window.End.Hour() != 0 || window.End.Sub(window.Start) != 24*time.Hour {
+			t.Fatalf("日报必须覆盖北京时间的完整自然日: %+v", window)
 		}
 	}
 }

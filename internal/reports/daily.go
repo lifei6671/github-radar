@@ -25,39 +25,35 @@ type Store interface {
 	Publish(ctx context.Context, window Window) error
 }
 
-// Generate 首期使用当前已有观测，后续北京时间 08:00 截稿。重启补查最近已到期的缺刊。
+// DailyCatchUpStart 限定自动补刊和旧版窗口校正的日期范围。
+func DailyCatchUpStart(now time.Time) time.Time {
+	latest, _, _ := Daily.Bounds(Daily.LatestDueKey(now))
+	return latest.AddDate(0, 0, 1-catchUpDays)
+}
+
+// ClosedDailyWindow 检查已保存的窗口是否以对应北京时间自然日结束。
+func ClosedDailyWindow(date string, end int64) bool {
+	_, boundary, valid := Daily.Bounds(date)
+	return valid && boundary.UnixMilli() == end
+}
+
+// Generate 每期使用北京时间上一自然日的观测，次日 08:00 起出刊。
+// 重启补查最近缺刊，并重新取证仍使用旧时间窗的期次。
 func Generate(ctx context.Context, store Store, now time.Time) error {
-	cutoff := now.UTC().Truncate(24 * time.Hour)
-	earliest := cutoff.AddDate(0, 0, 1-catchUpDays)
+	latest, _, _ := Daily.Bounds(Daily.LatestDueKey(now))
+	earliest := DailyCatchUpStart(now)
 	windows, err := store.Windows(ctx, earliest.Format(time.DateOnly))
 	if err != nil {
 		return err
-	}
-	if len(windows) == 0 {
-		return store.Publish(ctx, Window{Date: now.In(beijing).Format(time.DateOnly),
-			Start: now.Add(-24 * time.Hour), End: now, GeneratedAt: now})
-	}
-	// 保留上线后的归档，跳过首期之前的日期。
-	first, err := time.Parse(time.DateOnly, windows[0].Date)
-	if err != nil {
-		return err
-	}
-	if first.After(earliest) {
-		earliest = first
 	}
 	published := make(map[string]time.Time, len(windows))
 	for _, w := range windows {
 		published[w.Date] = w.End
 	}
-	for end := earliest; !end.After(cutoff); end = end.AddDate(0, 0, 1) {
-		date := end.Format(time.DateOnly)
-		if _, exists := published[date]; exists {
+	for start := earliest; !start.After(latest); start = start.AddDate(0, 0, 1) {
+		date, end := start.Format(time.DateOnly), start.AddDate(0, 0, 1)
+		if published[date].Equal(end) {
 			continue
-		}
-		start := end.AddDate(0, 0, -1)
-		// 首期可能在 08:00 前后任意时刻出刊，下一期接着首期实际截止时间。
-		if previous, exists := published[start.Format(time.DateOnly)]; exists {
-			start = previous
 		}
 		if err := store.Publish(ctx, Window{Date: date, Start: start, End: end, GeneratedAt: now}); err != nil {
 			return err

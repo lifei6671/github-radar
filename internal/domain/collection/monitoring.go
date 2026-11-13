@@ -24,6 +24,17 @@ func (r RepositoryState) CanSample(manual bool) bool {
 	return !r.Blocked && (manual || r.State == consts.StatusActive)
 }
 
+// CanProbeObservation 仅对已确认身份且目前未监控的公开候选执行有限采样。
+func (r RepositoryState) CanProbeObservation() bool {
+	return r.CanMonitor() && r.FirstNotFoundAt == nil
+}
+
+// CanRecheckObservation 允许首次 404 后按数字 ID 再核对公开身份。
+func (r RepositoryState) CanRecheckObservation() bool {
+	return r.FirstNotFoundAt != nil && !r.Blocked && !r.Disabled && r.NameIsCurrent &&
+		(r.State == consts.StatusActive || r.State == consts.StatusCandidate || r.State == consts.StatusPaused)
+}
+
 func (r RepositoryState) HasBaseline() bool {
 	return r.LastSuccessAt != nil && r.MetadataETag != nil
 }

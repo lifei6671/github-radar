@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
-import type { CategorySetting, DiscoveryRanking, DiscoverySelection, DiscoveryTab, Job, Limits, ListSettings, ProjectThemeGroup, ProjectThemeSetting, Quality, RepoDetail, RepoReadme, RuleSetting, Topic } from '../src/api/types'
+import type { CategorySetting, DiscoveryRanking, DiscoverySelection, DiscoveryTab, Job, Limits, ListSettings, ProjectThemeGroup, ProjectThemeSetting, Quality, RepoDetail, RepoReadme, RuleSetting, StarHistory, Topic } from '../src/api/types'
 
 const at = '2026-11-11T12:00:00Z'
 const adminPassword = 'fixture-admin-password'
@@ -138,6 +138,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
   let recentJobs: Job[] = []
   let jobPolls = 0
   const readmes = new Map<number, RepoReadme>()
+  const starHistory = new Map<number, StarHistory>()
   const detail = (repo: RepoDetail, publicRead: boolean) => ({
     ...(publicRead ? published(repo) : repo), readme: readmes.get(repo.id) ?? repo.readme,
   })
@@ -159,7 +160,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     if (publicRead) {
       expect(headers.authorization).toBeUndefined()
       expect(headers.cookie).toBeUndefined()
-      if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/published|\/\d+\/(?:trend|readme|similar)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
+      if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/published|\/\d+\/(?:trend|readme|similar|star-history)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
         return reply(route, { code: 'not_found' }, 404)
       }
       if (query.get('followed') === 'true') return reply(route, { code: 'invalid_filter' }, 400)
@@ -222,6 +223,8 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
         (!query.get('q') || repo.fullName.includes(query.get('q')!)) &&
         (!categoriesWanted.length || repo.categories.some((category) => categoriesWanted.includes(category))) &&
         (!query.get('grade') || repo.grade === query.get('grade')) &&
+        (!query.get('breakout') || starHistory.get(repo.id)?.breakout?.source ===
+          (query.get('breakout') === 'local' ? 'local_net_24h' : 'github_daily_stars')) &&
         (!query.has('tag') || repo.valueTags.includes(query.get('tag')!)) &&
         (!query.get('state') || repo.state === query.get('state')) &&
         (!query.get('language') || repo.language === query.get('language')) &&
@@ -273,6 +276,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       }
       if (!action) return reply(route, detail(repo, publicRead))
       if (action === 'readme') return reply(route, readmes.get(repo.id) ?? repo.readme)
+      if (action === 'star-history' && method === 'GET') return reply(route, starHistory.get(repo.id) ?? { days: [], breakout: null })
       if (action === 'similar' && publicRead) {
         const ids = similarRepos.get(repo.id) ?? []
         const items = ids.map((id) => repos[id - 1]).filter(canPublish)
@@ -298,11 +302,11 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
         return reply(route, { followed: repo.followed })
       }
       if (action === 'topic') return reply(route, topic)
-      if (action === 'summary' || action === 'refresh') {
+      if (action === 'summary' || action === 'refresh' || action === 'star-history') {
         attempts.push(request.postDataJSON())
         if (action === 'summary' && !request.postDataJSON().force && repo.summaryZh) return reply(route, { cached: true, summaryStatus: 'ready' })
         jobPolls = 0
-        job = { id: 31, type: action === 'summary' ? 'refresh_readme_summary' : 'refresh_repo', status: 'pending',
+        job = { id: 31, type: action === 'summary' ? 'refresh_readme_summary' : action === 'star-history' ? 'star_history' : 'refresh_repo', status: 'pending',
           attempts: 0, maxAttempts: 4, errorCode: null, repoId: repo.id, createdAt: at, updatedAt: at }
         return reply(route, { jobId: job.id, statusUrl: '/api/v1/jobs/' + job.id }, 202)
       }
@@ -368,6 +372,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       }
       return reply(route, { revision, settings: runtime, restartRequired: false })
     }
+    if (path === '/system/discovery-runs') return reply(route, { items: [], alerts: [] })
     if (path === '/system/discovery-rules') {
       if (method === 'PUT') {
         const body: ListSettings<RuleSetting> = request.postDataJSON()
@@ -453,8 +458,11 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     },
     setAITopics: (id: number, topics: string[]) => { repos[id - 1].aiTopics = topics },
     setDiscoveryEvents: (id: number, events: RepoDetail['discoveryEvents']) => { repos[id - 1].discoveryEvents = events },
+    setObservationHistory: (id: number, entries: RepoDetail['observationHistory']) => { repos[id - 1].observationHistory = entries },
+    setTopicAssessment: (assessment: Topic['assessment']) => { topic = { ...topic, scoreVersion: 2, suggestion: 'candidate', assessment } },
     setSimilarRepos: (id: number, items: number[]) => { similarRepos.set(id, items) },
     setReadme: (id: number, readme: RepoReadme) => { readmes.set(id, readme) },
+    setStarHistory: (id: number, history: StarHistory) => { starHistory.set(id, history) },
     expire: () => { authorized = false },
     conflict: () => { conflict = true },
     updateRule: (key: string, change: Partial<RuleSetting>) => {

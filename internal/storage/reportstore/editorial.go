@@ -42,14 +42,32 @@ func (Editorial) TableName() string { return "report_editorials" }
 var ErrEvidenceChanged = errors.New("组稿证据已变化")
 
 type evidenceKey struct {
-	IssueDate  string
-	RepoID     int64
-	ObservedAt int64
+	IssueDate   string
+	RepoID      int64
+	ObservedAt  int64
+	WindowEnd   int64
+	GeneratedAt int64
 }
 
 func evidenceKeys(db *gorm.DB) *gorm.DB {
-	return publicItems(db).Select("daily_report_items.issue_date, daily_report_items.repo_id, daily_report_items.observed_at").
+	return publicItems(db).Joins("JOIN daily_reports ON daily_reports.issue_date = daily_report_items.issue_date").
+		Select("daily_report_items.issue_date, daily_report_items.repo_id, daily_report_items.observed_at, daily_reports.window_end, daily_reports.generated_at").
 		Order("daily_report_items.issue_date DESC, daily_report_items.repo_id")
+}
+
+// currentEvidenceDates 排除近期仍待重新取证的旧窗口，三种报刊使用同一组有效日报。
+func currentEvidenceDates(ctx context.Context, db *gorm.DB, now time.Time) ([]string, error) {
+	windows, err := (Store{DB: db}).Windows(ctx, reports.DailyCatchUpStart(now).Format(time.DateOnly))
+	if err != nil {
+		return nil, err
+	}
+	var invalid []string
+	for _, window := range windows {
+		if invalidRecentDaily(window.Date, window.End.UnixMilli(), now) {
+			invalid = append(invalid, window.Date)
+		}
+	}
+	return invalid, nil
 }
 
 func addEvidence(digest hash.Hash, item evidenceKey) {
@@ -80,12 +98,19 @@ func makePlan(kind reports.Kind, key string, rows []evidenceKey, now time.Time, 
 	dates := make(map[string]struct{})
 	for _, item := range rows {
 		addEvidence(digest, item)
+		if reports.ClosedDailyWindow(item.IssueDate, item.WindowEnd) {
+			fmt.Fprintf(digest, "calendar-day:%d:%d\n", item.GeneratedAt, item.ObservedAt)
+		}
 		dates[reports.ObservationDate(item.ObservedAt)] = struct{}{}
 	}
 	plan := reports.Plan{Kind: kind, Key: key}
 	if kind != reports.Daily {
 		plan.Status = kind.PublicationStatus(key, len(dates), now, rules)
 		fmt.Fprintf(digest, "period-v2:%s\n", plan.Status)
+		if plan.Status == reports.Preview {
+			// 旧版在周期内生成过预览，收口后需按新计划重新组稿。
+			fmt.Fprintln(digest, "closed-period")
+		}
 	}
 	plan.Fingerprint = fmt.Sprintf("%x", digest.Sum(nil))
 	return plan, evidenceWindow{Rows: rows, Days: len(dates)}
@@ -94,7 +119,16 @@ func makePlan(kind reports.Kind, key string, rows []evidenceKey, now time.Time, 
 // Plans 按实际观测时间划分周/月，刊物状态也是证据版本的一部分。
 func (s Store) Plans(ctx context.Context, now time.Time) ([]reports.Plan, error) {
 	var keys []evidenceKey
-	if err := evidenceKeys(s.DB.WithContext(ctx)).Where("daily_report_items.observed_at <= ?", now.UnixMilli()).Scan(&keys).Error; err != nil {
+	db := s.DB.WithContext(ctx)
+	query := evidenceKeys(db).Where("daily_report_items.observed_at <= ?", now.UnixMilli())
+	invalidDates, err := currentEvidenceDates(ctx, db, now)
+	if err != nil {
+		return nil, err
+	}
+	if len(invalidDates) > 0 {
+		query = query.Where("daily_report_items.issue_date NOT IN ?", invalidDates)
+	}
+	if err := query.Scan(&keys).Error; err != nil {
 		return nil, err
 	}
 	rules, err := publicationRules(ctx, s.DB)
@@ -107,11 +141,15 @@ func (s Store) Plans(ctx context.Context, now time.Time) ([]reports.Plan, error)
 	}
 	windows := make(map[period][]evidenceKey)
 	order := make([]period, 0)
+	due := map[reports.Kind]string{reports.Daily: reports.Daily.LatestDueKey(now), reports.Weekly: reports.Weekly.LatestDueKey(now), reports.Monthly: reports.Monthly.LatestDueKey(now)}
 	for _, item := range keys {
 		for _, kind := range []reports.Kind{reports.Daily, reports.Weekly, reports.Monthly} {
 			key := period{kind, item.IssueDate}
 			if kind != reports.Daily {
 				key.Key = kind.Key(time.UnixMilli(item.ObservedAt))
+			}
+			if key.Key > due[kind] {
+				continue
 			}
 			if len(windows[key]) == 0 {
 				order = append(order, key)
@@ -128,8 +166,20 @@ func (s Store) Plans(ctx context.Context, now time.Time) ([]reports.Plan, error)
 }
 
 func (s Store) matchEvidence(ctx context.Context, plan reports.Plan, now time.Time) (evidenceWindow, error) {
+	var rules config.ReportPublication
+	if plan.Kind != reports.Daily {
+		var err error
+		rules, err = publicationRules(ctx, s.DB)
+		if err != nil {
+			return evidenceWindow{}, err
+		}
+	}
+	return s.matchEvidenceWithRules(ctx, plan, now, rules)
+}
+
+func (s Store) matchEvidenceWithRules(ctx context.Context, plan reports.Plan, now time.Time, rules config.ReportPublication) (evidenceWindow, error) {
 	from, to, valid := plan.Kind.Bounds(plan.Key)
-	if !valid || plan.Fingerprint == "" {
+	if !valid || plan.Fingerprint == "" || plan.Key > plan.Kind.LatestDueKey(now) {
 		return evidenceWindow{}, ErrEvidenceChanged
 	}
 	var keys []evidenceKey
@@ -138,17 +188,19 @@ func (s Store) matchEvidence(ctx context.Context, plan reports.Plan, now time.Ti
 		query = query.Where("daily_report_items.issue_date=?", plan.Key)
 	} else {
 		query = query.Where("daily_report_items.observed_at >= ? AND daily_report_items.observed_at < ?", from.UnixMilli(), to.UnixMilli())
+		invalidDates, err := currentEvidenceDates(ctx, s.DB, now)
+		if err != nil {
+			return evidenceWindow{}, err
+		}
+		if len(invalidDates) > 0 {
+			query = query.Where("daily_report_items.issue_date NOT IN ?", invalidDates)
+		}
 	}
 	if err := query.Scan(&keys).Error; err != nil {
 		return evidenceWindow{}, err
 	}
-	var rules config.ReportPublication
-	if plan.Kind != reports.Daily {
-		var err error
-		rules, err = publicationRules(ctx, s.DB)
-		if err != nil {
-			return evidenceWindow{}, err
-		}
+	if plan.Kind == reports.Daily && len(keys) > 0 && invalidRecentDaily(plan.Key, keys[0].WindowEnd, now) {
+		return evidenceWindow{}, ErrEvidenceChanged
 	}
 	actual, window := makePlan(plan.Kind, plan.Key, keys, now, rules)
 	if len(keys) == 0 || actual != plan {
@@ -189,7 +241,7 @@ func (s Store) Evidence(ctx context.Context, plan reports.Plan, now time.Time) (
 			source.ObservedTo = max(source.ObservedTo, item.ObservedAt)
 		}
 		source.SourceIssues = len(issues)
-		items, err = periodProjects(tx, plan.Kind, plan.Key, now)
+		items, err = periodProjects(tx, plan.Kind, plan.Key, now, window.Rows)
 		return err
 	}, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
@@ -267,11 +319,83 @@ type Editorials struct {
 	Total     int64
 }
 
-func (s Store) ReadEditorials(ctx context.Context, kind reports.Kind, date, before string, limit int) (Editorials, error) {
+func (s Store) ReadEditorials(ctx context.Context, kind reports.Kind, date, before string, limit int, now time.Time) (Editorials, error) {
 	result := Editorials{Calendar: []string{}}
 	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		invalidDates, err := currentEvidenceDates(ctx, tx, now)
+		if err != nil {
+			return err
+		}
+		var hiddenPeriods []string
+		if kind != reports.Daily {
+			// 升级前生成的预览也须在收口后重新组稿，避免刚到点就展示旧内容。
+			var editions []Editorial
+			if err := tx.Select("issue_key", "generated_at", "publication_status", "fingerprint").Where("kind=?", kind).Find(&editions).Error; err != nil {
+				return err
+			}
+			var dailyEditions []Edition
+			// 校正水位不随补刊期限过期，覆盖不足时也不能重新展示已失效的旧稿。
+			if err := tx.Select("issue_date", "window_end", "generated_at").Find(&dailyEditions).Error; err != nil {
+				return err
+			}
+			changedAt := make(map[string]int64)
+			for _, daily := range dailyEditions {
+				if !reports.ClosedDailyWindow(daily.IssueDate, daily.WindowEnd) {
+					continue
+				}
+				start, _, _ := reports.Daily.Bounds(daily.IssueDate)
+				key := kind.Key(start)
+				changedAt[key] = max(changedAt[key], daily.GeneratedAt)
+				// 旧窗口在出刊日和前一自然日均可能留下证据。
+				previous := kind.Key(start.AddDate(0, 0, -1))
+				changedAt[previous] = max(changedAt[previous], daily.GeneratedAt)
+			}
+			for _, date := range invalidDates {
+				start, _, valid := reports.Daily.Bounds(date)
+				if valid {
+					for _, key := range []string{kind.Key(start), kind.Key(start.AddDate(0, 0, -1))} {
+						changedAt[key] = max(changedAt[key], now.UnixMilli())
+					}
+				}
+			}
+			var rules config.ReportPublication
+			if len(editions) > 0 {
+				rules, err = publicationRules(ctx, tx)
+				if err != nil {
+					return err
+				}
+			}
+			for _, edition := range editions {
+				cutoff, _ := kind.PublicationPolicy(edition.IssueKey, config.DefaultReportPublication())
+				if edition.PublicationStatus == reports.Preview && edition.GeneratedAt < cutoff.UnixMilli() {
+					hiddenPeriods = append(hiddenPeriods, edition.IssueKey)
+					continue
+				}
+				if changedAt[edition.IssueKey] > edition.GeneratedAt {
+					// 只撤回证据确实变化的稿件，保留跨周期边界但证据未受影响的期次。
+					if _, err := (Store{DB: tx}).matchEvidenceWithRules(ctx, reports.Plan{Kind: kind, Key: edition.IssueKey,
+						Fingerprint: edition.Fingerprint, Status: edition.PublicationStatus}, now, rules); errors.Is(err, ErrEvidenceChanged) {
+						hiddenPeriods = append(hiddenPeriods, edition.IssueKey)
+					} else if err != nil {
+						return err
+					}
+				}
+			}
+		}
 		visible := func(statuses ...string) *gorm.DB {
-			return tx.Model(&Editorial{}).Where("kind=? AND publication_status IN ?", kind, statuses).Where(`NOT EXISTS (
+			query := tx.Model(&Editorial{}).Where("kind=? AND issue_key <= ? AND publication_status IN ?", kind, kind.LatestDueKey(now), statuses)
+			if len(hiddenPeriods) > 0 {
+				query = query.Where("issue_key NOT IN ?", hiddenPeriods)
+			}
+			if kind == reports.Daily {
+				if len(invalidDates) > 0 {
+					query = query.Where("issue_key NOT IN ?", invalidDates)
+				}
+				// 证据重建后等待新版组稿，避免继续显示旧采集窗口的正文。
+				query = query.Where("NOT EXISTS (?)", tx.Model(&Edition{}).Select("1").
+					Where("daily_reports.issue_date = report_editorials.issue_key AND daily_reports.generated_at > report_editorials.generated_at"))
+			}
+			return query.Where(`NOT EXISTS (
 				SELECT 1 FROM json_each(repo_ids_json) AS cited WHERE NOT EXISTS (
 					SELECT 1 FROM repositories WHERE repositories.repo_id=cited.value AND ` + storage.PublishableRepositoryCondition + `
 				))`)
@@ -311,4 +435,9 @@ func (s Store) ReadEditorials(ctx context.Context, kind reports.Kind, date, befo
 				json_each(story.value, '$.repoIds') AS cited)`, edition.StoriesJSON).Scan(&result.Citations).Error
 	}, &sql.TxOptions{ReadOnly: true})
 	return result, err
+}
+
+// 最近一期如果仍是旧采集窗口，等待校正后再组稿。
+func invalidRecentDaily(date string, end int64, now time.Time) bool {
+	return date >= reports.DailyCatchUpStart(now).Format(time.DateOnly) && !reports.ClosedDailyWindow(date, end)
 }

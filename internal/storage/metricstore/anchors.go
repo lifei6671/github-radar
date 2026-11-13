@@ -10,7 +10,7 @@ import (
 )
 
 // LoadAnchors 每个仓库对目标时刻做两次索引查找；小时层只读取可能命中的桶。
-func (r transaction) LoadAnchors(target, limit, asOf int64, hourlyOnly bool) (metrics.Anchors, error) {
+func (r transaction) LoadAnchors(target, limit, asOf int64, hourlyOnly, observation bool) (metrics.Anchors, error) {
 	tx := r.db
 	a := metrics.Anchors{Raw: make(map[int64][]metrics.Point), Hourly: make(map[int64][]metrics.Point)}
 	if !hourlyOnly {
@@ -26,12 +26,12 @@ func (r transaction) LoadAnchors(target, limit, asOf int64, hourlyOnly bool) (me
 		} {
 			var rows []row
 			err := tx.Raw(fmt.Sprintf(`
-SELECT r.%[1]s AS repo_id,s.%[2]s AS at,s.%[3]s AS stars,s.%[4]s AS slot
-FROM %[5]s r JOIN %[6]s s ON s.%[7]s=r.%[1]s AND s.%[4]s=(
-  SELECT x.%[4]s FROM %[6]s x WHERE x.%[7]s=r.%[1]s AND x.%[2]s BETWEEN ? AND ?
+SELECT %[5]s.%[1]s AS repo_id,s.%[2]s AS at,s.%[3]s AS stars,s.%[4]s AS slot
+FROM %[5]s JOIN %[6]s s ON s.%[7]s=%[5]s.%[1]s AND s.%[4]s=(
+  SELECT x.%[4]s FROM %[6]s x WHERE x.%[7]s=%[5]s.%[1]s AND x.%[2]s BETWEEN ? AND ?
   ORDER BY x.%[2]s `,
 				storage.RepositoryColumns.RepoID, storage.RepoSnapshotColumns.ObservedAt, storage.RepoSnapshotColumns.Stars, storage.RepoSnapshotColumns.SampleSlot, storage.RepositoryTable, storage.RepoSnapshotTable, storage.RepoSnapshotColumns.RepoID)+seek.order+`,x.`+storage.RepoSnapshotColumns.SampleSlot+` ASC LIMIT 1
-) WHERE r.`+storage.RepositoryColumns.State+`='`+consts.StatusActive+`'`, seek.min, seek.max).Scan(&rows).Error
+) WHERE `+observationSubjects(observation), seek.min, seek.max).Scan(&rows).Error
 			if err != nil {
 				return a, err
 			}
@@ -43,7 +43,8 @@ FROM %[5]s r JOIN %[6]s s ON s.%[7]s=r.%[1]s AND s.%[4]s=(
 	}
 	var hours []storage.HourlyMetric
 	if err := tx.Table(storage.HourlyMetricTable+" AS h").Select("h.*").
-		Joins("JOIN "+storage.RepositoryTable+" r ON r."+storage.RepositoryColumns.RepoID+"=h."+storage.HourlyMetricColumns.RepoID+" AND r."+storage.RepositoryColumns.State+"='"+consts.StatusActive+"'").
+		Joins("JOIN "+storage.RepositoryTable+" ON "+storage.RepositoryTable+"."+storage.RepositoryColumns.RepoID+"=h."+storage.HourlyMetricColumns.RepoID).
+		Where(observationSubjects(observation)).
 		Where("h."+storage.HourlyMetricColumns.HourStart+" BETWEEN ? AND ?", time.UnixMilli(target-limit).UTC().Truncate(time.Hour).UnixMilli(), min(asOf, target+limit)).
 		Find(&hours).Error; err != nil {
 		return a, err

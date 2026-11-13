@@ -21,14 +21,17 @@ func (e *Engine) refresh(ctx context.Context, job storage.Job, p collection.Payl
 		return nil, err
 	}
 	state := baseline.MonitoringState()
-	if !state.CanSample(p.Manual) {
+	if !state.CanSample(p.Manual) && !(p.ObservationProbe && (state.CanProbeObservation() || p.ObservationRecheck && state.CanRecheckObservation())) {
 		return nil, nil
 	}
 	policy := gh.Policy{Resource: gh.Core, RepositoryID: baseline.RepoID, Sample: true, Grade: baseline.Grade, Priority: p.Manual || baseline.Grade == consts.GradeS}
+	if p.ObservationProbe && baseline.State != consts.StatusActive {
+		policy.Grade, policy.Priority = consts.GradeB, false
+	}
 	var result gh.RepositoryResult
 	var requestErr error
 	started := time.Now()
-	if !baseline.NameIsCurrent {
+	if !baseline.NameIsCurrent || p.ObservationRecheck {
 		result, requestErr = e.GitHub.RepositoryByID(ctx, baseline.RepoID, policy)
 	} else {
 		result, requestErr = e.GitHub.Repository(ctx, baseline.Owner, baseline.Name, state.ConditionalETag(), policy)

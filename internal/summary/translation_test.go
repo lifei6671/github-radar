@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -182,6 +183,7 @@ func TestReadmeTranslationIncludesNonLatinText(t *testing.T) {
 		t.Fatal(err)
 	}
 	step(t, e)
+	step(t, e)
 	view, err := CachedReadme(e.Queue.DB, 1)
 	if err != nil || !view.Complete || !strings.Contains(view.ChineseHTML, "本地开发任务") {
 		t.Fatalf("非拉丁文字的译文应当发布: %+v %v", view, err)
@@ -208,6 +210,7 @@ func TestTranslationDiscardsSnapshotWhenUpstreamVersionChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	step(t, e)
 	step(t, e)
 	job := row[storage.Job](t, e.Queue.DB, "id = ?", decision.Job.ID)
 	view, err := CachedReadme(e.Queue.DB, 1)
@@ -293,6 +296,138 @@ func TestReadmeTranslationResumesAndPublishesMatchingSource(t *testing.T) {
 	view, err = CachedReadme(db, 1)
 	if err != nil || view.ChineseHTML != "" || view.State != "pending" {
 		t.Fatalf("新版本不应拼接旧译文: %+v %v", view, err)
+	}
+}
+
+func TestCachedTranslationRunsWhileGitHubIsPacedAndPersistsBeforeVerification(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	q, db, now := &e.Queue, e.Queue.DB, time.Now()
+	if err := db.Model(&storage.Repository{}).Where("repo_id = ?", 1).Update("full_name", "owner/project").Error; err != nil {
+		t.Fatal(err)
+	}
+	// 导读先写入原文，模拟已有导读但还没排入翻译的旧数据。
+	source.body = "# Setup\n\nThis tool runs scripts."
+	refreshReadmeFixture(t, e, "seed-source")
+	reads, identityChecks, versionChecks := len(source.etags), source.identityChecks, source.versionChecks
+	q.AI.Summary.AutoDailyCalls = 1
+	if _, err := q.insert(db, JobType, 2, "upstream-backlog", payload{}, 100, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	q.Pacing = storage.JobPacing{{Key: "readme", Types: []string{JobType, TranslationJob},
+		Resource: gh.ReadmeCheckResource, Window: time.Hour, Budget: 120}}
+	rate := storage.RateLimit{Resource: gh.ReadmeCheckResource, LocalWindow: now.UnixMilli(), LocalRequests: 120}
+	if err := db.Create(&rate).Error; err != nil {
+		t.Fatal(err)
+	}
+	schedule(t, e)
+	job := row[storage.Job](t, db, "repo_id = 1 AND type = ?", TranslationJob)
+	calls := 0
+	e.Translate = func(_ context.Context, prompt string) ModelResult {
+		calls++
+		var input struct{ Segments []string }
+		if err := json.Unmarshal([]byte(prompt), &input); err != nil {
+			t.Fatal(err)
+		}
+		for i := range input.Segments {
+			input.Segments[i] = "运行本地任务"
+		}
+		raw, _ := json.Marshal(map[string][]string{"t": input.Segments})
+		return ModelResult{Content: string(raw)}
+	}
+	step(t, e)
+	saved := row[storage.RepoReadmeTranslation](t, db, "repo_id = 1")
+	call := row[storage.AICall](t, db, "job_id = ?", job.ID)
+	if calls != 1 || saved.Complete || call.Status != consts.StatusSucceeded ||
+		len(source.etags) != reads || source.identityChecks != identityChecks || source.versionChecks != versionChecks {
+		t.Fatalf("GitHub 额度用尽时应从原文生成并保存译文: calls=%d saved=%+v call=%+v", calls, saved, call)
+	}
+	if done, err := e.Step(t.Context()); err != nil || done {
+		t.Fatalf("发布复核须等待 GitHub: done=%v err=%v", done, err)
+	}
+	if err := db.Model(&rate).Where("resource = ?", rate.Resource).Update("local_requests", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	e.Provider, e.Translate = nil, nil
+	source.shaFailures = 1
+	step(t, e)
+	failed := row[storage.Job](t, db, "id = ?", job.ID)
+	if failed.Status != consts.StatusFailed || failed.LastErrorCode == nil || *failed.LastErrorCode != consts.CodeGitHubNetwork {
+		t.Fatalf("发布复核应保留 GitHub 错误码: %+v", failed)
+	}
+	if err := db.Model(&failed).Update("available_at", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	step(t, e)
+	view, err := CachedReadme(db, 1)
+	if err != nil || !view.Complete || calls != 1 || len(source.etags) != reads ||
+		source.identityChecks != identityChecks+2 || source.versionChecks != versionChecks+2 {
+		t.Fatalf("发布重试应复用落盘译文，只复核身份与版本: view=%+v calls=%d err=%v", view, calls, err)
+	}
+}
+
+func TestManualCachedTranslationChecksCurrentVisibility(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	db := e.Queue.DB
+	if err := db.Model(&storage.Repository{}).Where("repo_id = ?", 1).Update("full_name", "owner/project").Error; err != nil {
+		t.Fatal(err)
+	}
+	refreshReadmeFixture(t, e, "seed-for-manual")
+	source.private = true
+	e.Translate = func(context.Context, string) ModelResult {
+		t.Fatal("已转为私有的仓库不能发起手动译文调用")
+		return ModelResult{}
+	}
+	decision, err := e.Queue.ManualTranslation(t.Context(), 1, "private-cache", true, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	step(t, e)
+	job := row[storage.Job](t, db, "id = ?", decision.Job.ID)
+	repo := row[storage.Repository](t, db, "repo_id = ?", 1)
+	if job.Status != consts.StatusDead || repo.State != consts.StatusUnavailable {
+		t.Fatalf("手动续译应识别转私并撤回公开状态: job=%+v repo=%+v", job, repo)
+	}
+}
+
+func TestTranslationVerificationDoesNotTranslateReplacementSnapshot(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	q, db := &e.Queue, e.Queue.DB
+	source.body = "# Setup\n\nThis tool runs scripts."
+	e.Translate = func(_ context.Context, prompt string) ModelResult {
+		var input struct{ Segments []string }
+		if err := json.Unmarshal([]byte(prompt), &input); err != nil {
+			t.Fatal(err)
+		}
+		for i := range input.Segments {
+			input.Segments[i] = "运行本地脚本"
+		}
+		raw, _ := json.Marshal(map[string][]string{"t": input.Segments})
+		return ModelResult{Content: string(raw)}
+	}
+	decision, err := q.ManualTranslation(t.Context(), 1, "translated-a", true, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	step(t, e)
+	job := row[storage.Job](t, db, "id = ?", decision.Job.ID)
+	if job.Status != consts.StatusPending || !strings.Contains(job.PayloadJSON, source.sha) {
+		t.Fatalf("复核应绑定已完成翻译的来源: %+v", job)
+	}
+	replacement := strings.Repeat("b", 40)
+	if err := db.Model(&storage.RepoReadmeDocument{}).Where("repo_id = ?", 1).Update("readme_sha", replacement).Error; err != nil {
+		t.Fatal(err)
+	}
+	reads, identityChecks, versionChecks := len(source.etags), source.identityChecks, source.versionChecks
+	e.Translate = func(context.Context, string) ModelResult {
+		t.Fatal("旧版本的发布复核不能翻译新版本")
+		return ModelResult{}
+	}
+	step(t, e)
+	job = row[storage.Job](t, db, "id = ?", decision.Job.ID)
+	doc := row[storage.RepoReadmeDocument](t, db, "repo_id = ?", 1)
+	if job.Status != consts.StatusCanceled || doc.ReadmeSHA != replacement || doc.Complete ||
+		len(source.etags) != reads || source.identityChecks != identityChecks || source.versionChecks != versionChecks {
+		t.Fatalf("旧复核应取消并保留新快照: job=%+v doc=%+v", job, doc)
 	}
 }
 

@@ -13,6 +13,7 @@ import { ThemeIcon } from '../components/theme-icon'
 import { ThemeIconPicker } from '../components/theme-icon-picker'
 import { SortableSettings, SortableSettingsRow } from '../components/sortable-settings'
 import { ActionButton, Badge, Dialog, Notice, PageError, Skeleton, Spinner } from '../components/ui'
+import { DiscoveryRunHistory } from '../components/discovery-run-history'
 import { number, topicPath } from '../lib/format'
 import { runtimeHelp } from './runtime-help'
 
@@ -41,6 +42,7 @@ function refreshSettings(queryClient: ReturnType<typeof useQueryClient>, path: C
     // Search 门槛变化会同时影响已收录项目的公开列表与详情。
     void resetPublicRepoLists(queryClient)
     void queryClient.resetQueries({ queryKey: ['repo'], predicate: ({ queryKey }) => queryKey[2] === 'public' })
+    void queryClient.invalidateQueries({ queryKey: ['discovery-runs'] })
   }
   if (path === '/system/project-themes' || path === '/system/project-theme-groups') {
     // 编辑或删除专题后，重新读取公开目录和受该专题限制的项目列表。
@@ -150,6 +152,7 @@ const settingsNames: Record<string, string> = {
   workerConcurrency: '采集并发', workers: '摘要并发', apiVersion: 'GitHub API 版本',
   tickMinutes: '扫描周期（分钟）', metricsIntervalMinutes: '指标计算周期（分钟）',
   maxMonitoredRepos: '最大监控项目数', maxHot: 'S 级上限', maxActive: 'A 级上限', maxNormal: 'B 级上限',
+  observationPool: '启用观察池', maxCooling: 'C 级上限',
   intervalsMinutes: '分级采样间隔（分钟）', leaseSeconds: '任务租约（秒）', autoDailyCalls: '每日自动调用上限',
   manualDailyCalls: '每日手动调用上限', readmeMaxBytes: 'README 读取上限（字节）', inputTokens: '输入 Token 预算',
   outputTokens: '输出 Token 预算', githubBudgetPerHour: 'README 每小时 GitHub 请求上限',
@@ -296,12 +299,38 @@ export function RuntimeEditor() {
               {key === 'github' && <p className="minor muted">在部署 YAML 中填写 <code>credentials.github_token</code>，留空时读取 <code>{String(fields?.tokenEnv || 'GITHUB_TOKEN')}</code> 环境变量。修改 YAML 后需重启服务。</p>}
               {key === 'ai' && <p className="minor muted">仅支持 OpenAI 兼容供应商，需支持 Chat Completions 的 JSON 模式和 <code>max_completion_tokens</code>。在部署 YAML 中填写 <code>credentials.ai_api_key</code>，留空时读取 <code>{String(fields?.apiKeyEnv || 'AI_API_KEY')}</code> 环境变量。修改 YAML 后需重启服务。</p>}
               {key === 'embedding' && <p className="minor muted">使用独立的 OpenAI 兼容 <code>/embeddings</code> 接口。服务进程从 <code>{String(fields?.apiKeyEnv || 'EMBEDDING_API_KEY')}</code> 环境变量读取 API Key。</p>}
+              {key === 'scheduler' && fields && <ObservationTrial apply={(scheduler) => setValue({ ...fields, ...scheduler })} />}
               {fields ? <Fields path={key} value={fields} update={setValue} /> : <Setting name={key} path={key} value={value} update={setValue} />}
             </div>
           </section>
         })}
       </>
     }} />
+}
+
+type ObservationReplay = {
+  report: { legacyActiveGrades: Record<string, number>; trial: Record<string, number> }
+  scheduler: SettingFields
+}
+
+function ObservationTrial({ apply }: { apply: (scheduler: SettingFields) => void }) {
+  const replay = useMutation({ mutationFn: () => api<ObservationReplay>('/system/observation-replay') })
+  const result = replay.data
+  const active = (counts: Record<string, number>) => ['S', 'A', 'B', 'C'].reduce((total, grade) => total + (counts[grade] ?? 0), 0)
+  return <div className="runtime-setting">
+    <div className="detail-side-actions">
+      <ActionButton type="button" className="button" pending={replay.isPending} onClick={() => replay.mutate()}>演算观察池</ActionButton>
+      {result && <button type="button" className="button" onClick={() => {
+        const { observationPool, maxHot, maxActive, maxNormal, maxCooling, maxMonitoredRepos, intervalsMinutes } = result.scheduler
+        apply({ observationPool, maxHot, maxActive, maxNormal, maxCooling, maxMonitoredRepos, intervalsMinutes })
+      }}>填入试运行参数</button>}
+    </div>
+    {replay.isError && <Notice error>{errorText(replay.error)}</Notice>}
+    {result && <p className="minor muted" role="status">
+      原规则 {number(active(result.report.legacyActiveGrades))} 个活跃，试运行 {number(active(result.report.trial))} 个活跃。
+      {['S', 'A', 'B', 'C'].map((grade) => ` ${grade} ${number(result.report.trial[grade] ?? 0)}`).join('，')}。
+    </p>}
+  </div>
 }
 
 type Directory<T> = {
@@ -322,6 +351,7 @@ type Directory<T> = {
   filter?: { label: string; options: { value: string; label: string }[]; match: (item: T, filter: string) => boolean }
   enabled?: (item: T) => boolean
   normalize?: (item: T) => T
+  afterList?: ReactNode
 }
 
 function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
@@ -468,6 +498,7 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
         </table></div>
       </SortableSettings> : <p className="admin-empty">{items.length ? '没有符合条件的' + directory.noun : '暂无' + directory.noun}</p>}
     </section>
+    {directory.afterList}
     {deleting && <Dialog title={'删除' + directory.noun} onClose={() => { if (!saveList.isPending) setDeleting(null) }}>
       <p>确定删除「{directory.name(deleting)}」？</p>
       {saveList.error && <Notice error>{errorText(saveList.error)}</Notice>}
@@ -516,10 +547,11 @@ const rules: Directory<RuleSetting> = {
   identity: (item) => item.sourceType + ':' + item.sourceKey,
   name: (item) => item.sourceKey, caption: (item) => item.sourceKey,
   search: (item) => [item.sourceKey, item.query, sourceNames[item.sourceType]].join(' '),
-  columns: ['来源类型', '状态', '扫描间隔', '优先级', '最低 Star', '搜索表达式'],
+  columns: ['来源类型', '状态', '扫描间隔', '优先级', '最低 Star', '仓库年龄', '搜索表达式'],
   cells: (item) => [<Badge>{sourceNames[item.sourceType]}</Badge>, enabledBadge(item.enabled),
     number(item.intervalMinutes) + ' 分钟', number(item.priority),
     item.sourceType === 'trending' ? '—' : item.minStars === 0 ? '不限' : number(item.minStars ?? defaultSearchMinStars),
+    item.ageWindow ? item.ageWindow.replace('-', '–') + ' 天' : '—',
     item.query ? <code>{item.query}</code> : '—'],
   metrics: (items) => [
     { label: '全部', value: number(items.length) },
@@ -537,22 +569,28 @@ const rules: Directory<RuleSetting> = {
       onChange={(e) => edit({ ...item, sourceKey: e.target.value })} /></label>
     <label className="field">来源类型<select value={item.sourceType} onChange={(e) => edit({
       ...item, sourceType: e.target.value === 'trending' ? 'trending' : 'search', sourceKey: '', query: '',
+      ageWindow: undefined,
       minStars: e.target.value === 'trending' ? undefined : defaultSearchMinStars,
     })}><option value="search">GitHub Search</option><option value="trending">GitHub Trending</option></select></label>
     <NumberInput label="扫描间隔（分钟）" value={item.intervalMinutes} onChange={(intervalMinutes) => edit({ ...item, intervalMinutes })} />
     <NumberInput label="优先级" value={item.priority} onChange={(priority) => edit({ ...item, priority })} />
     {item.sourceType === 'search' && <NumberInput label="最低 Star" value={item.minStars ?? defaultSearchMinStars}
       min={0} step={1} title="0 表示不限" onChange={(minStars) => edit({ ...item, minStars })} />}
+    {item.sourceType === 'search' && <label className="field">仓库年龄<select value={item.ageWindow ?? ''}
+      onChange={(e) => edit({ ...item, ageWindow: e.target.value as RuleSetting['ageWindow'] })}>
+      <option value="">不限</option><option value="0-3">0–3 天</option><option value="4-14">4–14 天</option><option value="15-30">15–30 天</option>
+    </select></label>}
     {item.sourceType === 'search' && <label className="field admin-field-wide">搜索表达式
       <input required value={item.query} onChange={(e) => edit({ ...item, query: e.target.value })} />
     </label>}
     <label className="check-field"><input type="checkbox" checked={item.enabled} onChange={(e) => edit({ ...item, enabled: e.target.checked })} />启用规则</label>
   </>,
-  status: (item) => <dl className="definition-list">
+  status: (item) => <><dl className="definition-list">
     <div><dt>规则状态</dt><dd>{enabledBadge(item.enabled)}</dd></div>
     <div><dt>来源类型</dt><dd>{sourceNames[item.sourceType]}</dd></div>
     <div><dt>扫描间隔</dt><dd>{number(item.intervalMinutes)} 分钟</dd></div>
-  </dl>,
+  </dl><DiscoveryRunHistory rule={item} /></>,
+  afterList: <DiscoveryRunHistory />,
 }
 
 export function CategoryEditor() {

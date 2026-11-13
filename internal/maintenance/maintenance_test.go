@@ -1,6 +1,7 @@
 package maintenance
 
 import (
+	"encoding/json"
 	"math"
 	"path/filepath"
 	"testing"
@@ -10,11 +11,41 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	domain "github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/storage/metricstore"
 	"github.com/lifei6671/github-radar/migrations"
 )
+
+// 精确净增和过去七个独立窗共同触发晋级，官方计数不能代替任何本地端点。
+func TestBreakoutPromotionPersistsLocalEvidence(t *testing.T) {
+	db, cfg, now := fixture(t)
+	cfg.Metrics.HotGrowth, cfg.Metrics.TopGrowthRepos = 9999, 0
+	for i := 1; i <= 8; i++ {
+		sample(t, db, 1, now.Add(-time.Duration(i)*24*time.Hour), 500)
+	}
+	sample(t, db, 1, now, 600)
+	state := storage.RepoStarHistoryStatus{RepoID: 1, BreakoutAt: new(now.Add(-12 * time.Hour).UnixMilli()), BreakoutJSON: `{"source":"github_daily_stars"}`}
+	if err := db.Create(&state).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := metrics.Compute(t.Context(), metricstore.Store{DB: db}, cfg, now, true); err != nil {
+		t.Fatal(err)
+	}
+	var repo storage.Repository
+	if err := db.Take(&repo, "repo_id = 1").Error; err != nil {
+		t.Fatal(err)
+	}
+	var evidence domain.Breakout
+	if err := json.Unmarshal([]byte(repo.BreakoutGradeJSON), &evidence); err != nil || repo.Grade != "S" ||
+		evidence.Source != domain.BreakoutLocal || evidence.Value != 100 || evidence.CoveredDays != 7 || evidence.MinimumRatio != 2.5 {
+		t.Fatalf("爆发晋级缺少实际证据: grade=%s evidence=%+v err=%v", repo.Grade, evidence, err)
+	}
+	if err := db.Take(&state, "repo_id = 1").Error; err != nil || state.ConfirmedAt == nil || *state.ConfirmedAt != *state.BreakoutAt {
+		t.Fatalf("同一官方信号经本地复核后应保留确认状态: %+v %v", state, err)
+	}
+}
 
 func fixture(t *testing.T) (*gorm.DB, config.Config, time.Time) {
 	t.Helper()

@@ -30,7 +30,7 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 			t.Fatalf("空库不能显示周期报告: %v", empty)
 		}
 	}
-	now := time.Date(2026, 11, 12, 13, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 10, 7, 13, 0, 0, 0, time.UTC)
 	addRepo := func(id int64, at time.Time, ready bool) {
 		name := fmt.Sprint(id)
 		observed := at.UnixMilli()
@@ -76,7 +76,7 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	generate(now)
+	generate(time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC))
 	readDaily := func(date string) (*reportstore.Edition, []reportstore.PublicItem) {
 		t.Helper()
 		edition, items, _, _, err := store.Read(t.Context(), date, "", 25)
@@ -86,9 +86,22 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 		return edition, items
 	}
 	first, items := readDaily("")
-	if first.IssueDate != "2026-11-12" || first.ObservedFrom != searchAt ||
+	if first.IssueDate != "2026-10-07" || first.ObservedFrom != searchAt ||
 		first.ObservedTo != now.Add(-time.Hour+15*time.Second).UnixMilli() || len(items) != 2 {
 		t.Fatalf("首期证据应记录实际观测并跳过未就绪仓库: %+v %+v", first, items)
+	}
+	// 模拟旧版已归档的 08:00 截稿窗口。重建时应复用刊号，并排除次日观测。
+	legacyEnd := time.Date(2026, 10, 8, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if err := db.Model(first).Update("window_end", legacyEnd).Error; err != nil {
+		t.Fatal(err)
+	}
+	addRepo(4, now.Add(4*time.Hour), true)
+	generate(time.UnixMilli(legacyEnd).Add(time.Minute))
+	corrected, correctedItems := readDaily(first.IssueDate)
+	_, expectedEnd, _ := reports.Daily.Bounds(first.IssueDate)
+	if corrected.IssueNumber != first.IssueNumber || corrected.WindowEnd != expectedEnd.UnixMilli() ||
+		len(correctedItems) != 2 || corrected.ObservedTo >= expectedEnd.UnixMilli() {
+		t.Fatalf("重建旧日报时不得混入次日证据或改变期号: %+v %+v", corrected, correctedItems)
 	}
 	trend, newProject := items[0], items[1]
 	if trend.RepoID != 1 || trend.Rank == nil || *trend.Rank != 2 || trend.PreviousRank == nil ||
@@ -101,30 +114,24 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 	if err := db.Model(&storage.AISummary{}).Where("repo_id=1").Update("summary_zh", "之后更新的摘要").Error; err != nil {
 		t.Fatal(err)
 	}
-	addRepo(4, now.Add(2*time.Hour), true)
 	seedReadySummary(t, db, 3, now.UnixMilli())
-	generate(now.Add(3 * time.Hour))
-	generate(time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC))
+	generate(now.Add(5 * time.Hour))
+	generate(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
 	latest, latestItems := readDaily("")
-	if latest.IssueDate != "2026-11-13" || len(latestItems) != 1 || latestItems[0].RepoID != 4 || latest.IssueNumber != 2 {
+	if latest.IssueDate != "2026-10-08" || len(latestItems) != 1 || latestItems[0].RepoID != 4 || latest.IssueNumber != 3 {
 		t.Fatalf("次日不能重复采纳首期观测: %+v %+v", latest, latestItems)
 	}
-	_, saved := readDaily("2026-11-12")
+	_, saved := readDaily("2026-10-07")
 	if saved[0].SummaryZh != trend.SummaryZh {
 		t.Fatal("重跑应保持首期导读证据快照")
 	}
-	addRepo(5, now.Add(-26*time.Hour), true)
-	if err := store.Publish(t.Context(), reports.Window{Date: "2026-11-11", Start: now.Add(-48 * time.Hour),
-		End: now.Add(-24 * time.Hour), GeneratedAt: now.Add(25 * time.Hour)}); err != nil {
-		t.Fatal(err)
-	}
-	prior, _ := readDaily("2026-11-11")
+	prior, _ := readDaily("2026-10-06")
 	after, _ := readDaily("")
-	if prior.IssueNumber != 3 || after.IssueNumber != 2 {
+	if prior.IssueNumber != 1 || after.IssueNumber != 3 {
 		t.Fatalf("补刊不能重排期号: %+v %+v", prior, after)
 	}
 	const headline = "把项目发现组织成读者关心的问题"
-	evidenceNow := now.Add(36 * time.Hour)
+	evidenceNow := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
 	plans, err := store.Plans(t.Context(), evidenceNow)
 	if err != nil {
 		t.Fatal(err)
@@ -135,9 +142,9 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 		if err != nil || len(evidence) == 0 {
 			t.Fatalf("无法读取报刊证据: %+v %v", plan, err)
 		}
-		if plan.Kind != reports.Daily && (source.SourceIssues != 3 || source.CoverageDays != 2 ||
-			len(evidence) != 4 || evidence[0].ID != 1 || evidence[0].Rank == nil || *evidence[0].Rank != 2 ||
-			evidence[0].Guide != trend.SummaryZh || evidence[0].Date != "2026-11-12") {
+		if plan.Kind != reports.Daily && (source.SourceIssues != 3 || source.CoverageDays != 3 ||
+			len(evidence) != 3 || evidence[0].ID != 1 || evidence[0].Rank == nil || *evidence[0].Rank != 2 ||
+			evidence[0].Guide != trend.SummaryZh || evidence[0].Date != "2026-10-07") {
 			t.Fatalf("周期证据应按观测日计数，保留去重和最好名次: %+v", source)
 		}
 		ids := []int64{evidence[0].ID}
@@ -151,13 +158,13 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 	}
 
 	for _, period := range []struct{ kind, key, from, to string }{
-		{"weekly", "2026-W46", "2026-11-09", "2026-11-15"}, {"monthly", "2026-11", "2026-11-01", "2026-11-30"},
+		{"weekly", "2026-W41", "2026-10-05", "2026-10-11"}, {"monthly", "2026-10", "2026-10-01", "2026-10-31"},
 	} {
 		query := path + "?kind=" + period.kind
 		result := request(t, router, "GET", query+"&date="+period.key, "", "", 200)
 		report := result["report"].(map[string]any)
 		if report["headline"] != headline || report["periodFrom"] != period.from || report["periodTo"] != period.to ||
-			report["sourceIssues"] != float64(3) || report["coverageDays"] != float64(2) || report["publicationStatus"] != "preview" ||
+			report["sourceIssues"] != float64(3) || report["coverageDays"] != float64(3) || report["publicationStatus"] != "preview" ||
 			report["number"] != nil || len(report["stories"].([]any)) != 1 || len(report["items"].([]any)) != 1 ||
 			len(result["calendar"].([]any)) != 0 || len(result["archive"].([]any)) != 0 {
 			t.Fatalf("多份日报可能来自同一观测日，预览不能出现在归档和出刊日历: %v", result)
@@ -167,7 +174,7 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 			t.Fatalf("预览不得占用正式期数: %v", older)
 		}
 	}
-	daily := request(t, router, "GET", path+"?date=2026-11-12", "", "", 200)
+	daily := request(t, router, "GET", path+"?date=2026-10-07", "", "", 200)
 	if daily["archive"].([]any)[0].(map[string]any)["headline"] != headline || len(daily["calendar"].([]any)) != 3 {
 		t.Fatalf("往期列表使用编辑标题，出刊日历包含本月全部期次: %v", daily)
 	}
@@ -175,31 +182,31 @@ func TestReportEvidenceAndEditorialPublication(t *testing.T) {
 	if err := db.Model(&storage.Repository{}).Where("repo_id=2").Update("blocked", true).Error; err != nil {
 		t.Fatal(err)
 	}
-	request(t, router, "GET", path+"?date=2026-11-12", "", "", 404)
-	request(t, router, "GET", path+"?kind=weekly&date=2026-W46", "", "", 404)
+	request(t, router, "GET", path+"?date=2026-10-07", "", "", 404)
+	request(t, router, "GET", path+"?kind=weekly&date=2026-W41", "", "", 404)
 	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Update("blocked", true).Error; err != nil {
 		t.Fatal(err)
 	}
 	if archive := request(t, router, "GET", path, "", "", 200)["archive"].([]any); len(archive) != 1 ||
-		archive[0].(map[string]any)["date"] != "2026-11-13" {
+		archive[0].(map[string]any)["date"] != "2026-10-08" {
 		t.Fatalf("引用被撤回后隐藏原刊，其他期次仍可读: %v", archive)
 	}
 	request(t, router, "GET", path+"?date=2026-02-30", "", "", 400)
 	request(t, router, "GET", path+"?kind=weekly&date=2025-W53", "", "", 400)
-	request(t, router, "GET", path+"?kind=weekly&date=2026-W45", "", "", 404)
+	request(t, router, "GET", path+"?kind=weekly&date=2026-W40", "", "", 404)
 	request(t, router, "GET", path+"?kind=monthly&date=2026-13", "", "", 400)
 
 	for i, day := range []string{"2026-12-31", "2027-01-01"} {
-		end, err := time.Parse(time.DateOnly, day)
-		if err != nil {
+		start, end, valid := reports.Daily.Bounds(day)
+		if !valid {
 			t.Fatal(err)
 		}
 		addRepo(int64(10+i), end.Add(-time.Hour), true)
-		if err := store.Publish(t.Context(), reports.Window{Date: day, Start: end.Add(-24 * time.Hour), End: end, GeneratedAt: end}); err != nil {
+		if err := store.Publish(t.Context(), reports.Window{Date: day, Start: start, End: end, GeneratedAt: end}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	crossYear := time.Date(2027, 1, 3, 0, 0, 0, 0, time.UTC)
+	crossYear := time.Date(2027, 1, 4, 0, 0, 0, 0, time.UTC)
 	plans, err = store.Plans(t.Context(), crossYear)
 	if err != nil {
 		t.Fatal(err)
@@ -236,10 +243,11 @@ func TestWeeklyPreviewOnlyGetsNumberAfterFormalPublication(t *testing.T) {
 		cutoff.AddDate(0, 0, -5).Add(-time.Minute), cutoff.AddDate(0, 0, -4).Add(-time.Minute),
 		cutoff.AddDate(0, 0, -3).Add(-time.Minute), cutoff.AddDate(0, 0, -2).Add(-time.Minute), cutoff.Add(-9 * time.Hour),
 	} {
-		// 最后一条周日 23:00 的观测收录于下周一 08:00 截稿的日报。
-		issueDate := cutoff.AddDate(0, 0, index-4).Format(time.DateOnly)
+		// 周日 23:00 的观测归属周日，周一 08:00 起可以组稿。
+		issueDate := reports.ObservationDate(at.UnixMilli())
+		_, end, _ := reports.Daily.Bounds(issueDate)
 		issue := reportstore.Edition{IssueDate: issueDate, IssueNumber: index + 1, ObservedFrom: at.UnixMilli(),
-			ObservedTo: at.UnixMilli(), GeneratedAt: at.UnixMilli(), WindowEnd: at.Add(time.Minute).UnixMilli()}
+			ObservedTo: at.UnixMilli(), GeneratedAt: at.UnixMilli(), WindowEnd: end.UnixMilli()}
 		if err := db.Create(&issue).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -280,14 +288,22 @@ func TestWeeklyPreviewOnlyGetsNumberAfterFormalPublication(t *testing.T) {
 		})
 	}
 	beforeCutoff := cutoff.Add(-time.Second)
-	plan, source := planAt(beforeCutoff, reports.Preview)
-	if err := write(beforeCutoff, plan, source); err != nil {
+	early, err := store.Plans(ctx, beforeCutoff)
+	if err != nil {
 		t.Fatal(err)
 	}
-	preview := request(t, router, "GET", path, "", "", 200)
-	if preview["report"].(map[string]any)["number"] != nil || preview["total"] != float64(0) {
-		t.Fatalf("覆盖足够但尚未到出刊点，仍是未编号的预览: %v", preview)
+	for _, plan := range early {
+		if plan.Kind == reports.Weekly && plan.Key == key {
+			t.Fatalf("周一 08:00 之前不得组稿: %+v", plan)
+		}
 	}
+	currentDate := reports.Weekly.Key(time.Now())
+	futurePreview := reportstore.Editorial{Kind: reports.Weekly, IssueKey: currentDate, PublicationStatus: reports.Preview,
+		CoverageDays: 1, Fingerprint: "old-current-period", StoriesJSON: "[]", RepoIDsJSON: "[]"}
+	if err := db.Create(&futurePreview).Error; err != nil {
+		t.Fatal(err)
+	}
+	request(t, router, "GET", "/api/v1/public/daily-reports?kind=weekly&date="+currentDate, "", "", 404)
 	oldPlan, oldSource := planAt(cutoff, reports.Published)
 	options := settings.Store{DB: db}
 	update := func(days int) {
@@ -305,9 +321,15 @@ func TestWeeklyPreviewOnlyGetsNumberAfterFormalPublication(t *testing.T) {
 	if err := write(cutoff, oldPlan, oldSource); !errors.Is(err, reportstore.ErrEvidenceChanged) {
 		t.Fatalf("配置提交后，正在执行的旧规则任务不得正式出刊: %v", err)
 	}
-	planAt(cutoff, reports.Preview)
+	plan, source := planAt(cutoff, reports.Preview)
+	if err := write(cutoff, plan, source); err != nil {
+		t.Fatal(err)
+	}
+	preview := request(t, router, "GET", path, "", "", 200)
+	if preview["report"].(map[string]any)["number"] != nil || preview["total"] != float64(0) {
+		t.Fatalf("覆盖不足只能生成未编号的预览: %v", preview)
+	}
 	update(4)
-	planAt(beforeCutoff, reports.Preview)
 	plan, source = planAt(cutoff, reports.Published)
 	if err := write(cutoff, plan, source); err != nil {
 		t.Fatal(err)
@@ -316,5 +338,18 @@ func TestWeeklyPreviewOnlyGetsNumberAfterFormalPublication(t *testing.T) {
 	if issue["report"].(map[string]any)["number"] != float64(1) || issue["total"] != float64(1) ||
 		issue["calendar"].([]any)[0] != key || issue["report"].(map[string]any)["publicationStatus"] != "published" {
 		t.Fatalf("正式出刊时才编号并列入归档与日历: %v", issue)
+	}
+	// 后续校正仍应使旧周稿失效，即使该日报已经超过自动补刊期限。
+	date := reports.ObservationDate(cutoff.Add(-9 * time.Hour).UnixMilli())
+	if err := db.Model(&reportstore.Edition{}).Where("issue_date = ?", date).
+		Updates(map[string]any{"generated_at": cutoff.Add(time.Minute).UnixMilli(), "observed_from": 0, "observed_to": 0}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Delete(&reportstore.Item{}, "issue_date = ?", date).Error; err != nil {
+		t.Fatal(err)
+	}
+	archive, err := store.ReadEditorials(ctx, reports.Weekly, "", "", 25, cutoff.AddDate(0, 0, 14))
+	if err != nil || archive.Edition != nil || archive.Total != 0 {
+		t.Fatalf("校正后旧稿不得在补刊期限外重新可见: %+v %v", archive, err)
 	}
 }

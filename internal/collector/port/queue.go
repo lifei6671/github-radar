@@ -7,6 +7,7 @@ import (
 	sdk "github.com/google/go-github/v88/github"
 
 	"github.com/lifei6671/github-radar/internal/domain/collection"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/trending"
@@ -36,6 +37,15 @@ type Writer interface {
 	SaveSearch(Search) error
 	SaveTrending(Trending) error
 	SaveManualDiscovery(storage.Job, collection.Payload, *sdk.Repository, time.Time, time.Time) error
+	SaveStarHistory(storage.Job, collection.Payload, StarHistory) error
+}
+
+// StarHistory 是已通过公开身份验证的历史页；下一页在结算时入队。
+type StarHistory struct {
+	Weeks       []metrics.StarHistoryWeekData
+	NextPage    int
+	FetchedAt   int64
+	Unavailable bool
 }
 
 type Refresh struct {
@@ -47,11 +57,13 @@ type Refresh struct {
 }
 
 type Search struct {
-	Parent       storage.Job
-	Plan         collection.Payload
-	Repositories []*sdk.Repository
-	Next         []collection.Payload
-	ObservedAt   int64
+	Parent        storage.Job
+	Plan          collection.Payload
+	Repositories  []*sdk.Repository
+	Next          []collection.Payload
+	ObservedAt    int64
+	UpstreamTotal int
+	Split         bool
 }
 
 type Trending struct {

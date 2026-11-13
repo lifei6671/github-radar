@@ -3,10 +3,12 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 )
 
 // GitHub 控制 API 版本、上游超时和各资源的本地软预算。
@@ -21,8 +23,12 @@ type GitHub struct {
 	WorkerConcurrency      int    `yaml:"worker_concurrency" json:"workerConcurrency"`
 }
 
+const DefaultCoolingCapacity = 1000
+
 // Scheduler 定义扫描、租约、四档容量与采样周期。
 type Scheduler struct {
+	// ObservationPool 启用试运行规则。升级后的已有设置默认保留原有分档。
+	ObservationPool        bool           `yaml:"observation_pool" json:"observationPool"`
 	TickMinutes            int            `yaml:"tick_minutes" json:"tickMinutes"`
 	MetricsIntervalMinutes int            `yaml:"-" json:"metricsIntervalMinutes"`
 	TrendingDailyMinutes   int            `yaml:"trending_daily_minutes" json:"-"`
@@ -31,6 +37,7 @@ type Scheduler struct {
 	MaxHot                 int            `yaml:"max_hot" json:"maxHot"`
 	MaxActive              int            `yaml:"max_active" json:"maxActive"`
 	MaxNormal              int            `yaml:"max_normal" json:"maxNormal"`
+	MaxCooling             int            `yaml:"max_cooling" json:"maxCooling"`
 	MaxMonitoredRepos      int            `yaml:"max_monitored_repos" json:"maxMonitoredRepos"`
 	IntervalsMinutes       map[string]int `yaml:"intervals_minutes" json:"intervalsMinutes"`
 	LeaseSeconds           int            `yaml:"lease_seconds" json:"leaseSeconds"`
@@ -38,6 +45,20 @@ type Scheduler struct {
 
 func (s Scheduler) Interval(grade string) time.Duration {
 	return time.Duration(s.IntervalsMinutes[grade]) * time.Minute
+}
+
+// ObservationCapacities 按 S/A/B/C 顺序返回观察池的四档上限。
+func (s Scheduler) ObservationCapacities() [4]int {
+	return [4]int{s.MaxHot, s.MaxActive, s.MaxNormal, s.MaxCooling}
+}
+
+// ObservationTrial 给出方案的首轮容量和周期，保留现有扫描、租约和指标计算参数。
+func (s Scheduler) ObservationTrial() Scheduler {
+	s.ObservationPool = true
+	s.MaxHot, s.MaxActive, s.MaxNormal, s.MaxCooling = 30, 150, 400, DefaultCoolingCapacity
+	s.MaxMonitoredRepos = 1580
+	s.IntervalsMinutes = map[string]int{consts.GradeS: 60, consts.GradeA: 240, consts.GradeB: 1440, consts.GradeC: 4320}
+	return s
 }
 
 // Discovery 配置 Trending 来源和轮换执行的 Search 查询。
@@ -63,7 +84,7 @@ func collectionDefaults() (GitHub, Scheduler, Discovery) {
 	}
 	scheduler := Scheduler{
 		TickMinutes: 5, TrendingDailyMinutes: 60, TrendingOtherMinutes: 360,
-		SearchRoundMinutes: 30, MaxHot: 200, MaxActive: 800, MaxNormal: 2000, MaxMonitoredRepos: 5000,
+		SearchRoundMinutes: 30, MaxHot: 200, MaxActive: 800, MaxNormal: 2000, MaxCooling: DefaultCoolingCapacity, MaxMonitoredRepos: 5000,
 		IntervalsMinutes: map[string]int{consts.GradeS: 15, consts.GradeA: 60, consts.GradeB: 360, consts.GradeC: 1440}, LeaseSeconds: 180,
 	}
 	discovery := Discovery{
@@ -116,19 +137,38 @@ func (cfg Runtime) validateCollection() error {
 	s := cfg.Scheduler
 	if s.TickMinutes < 1 || int64(s.TickMinutes) > DurationLimit(time.Minute) ||
 		s.LeaseSeconds < 3 || int64(s.LeaseSeconds) > DurationLimit(time.Second) || s.MaxMonitoredRepos < 1 ||
-		s.MaxHot < 0 || s.MaxActive < 0 || s.MaxNormal < 0 {
+		s.MaxHot < 0 || s.MaxActive < 0 || s.MaxNormal < 0 || s.MaxCooling < 0 {
 		return fmt.Errorf("scheduler 的周期、租期或容量无效")
 	}
 	remaining := s.MaxMonitoredRepos
+	capacities := s.ObservationCapacities()
+	if !s.ObservationPool {
+		capacities[3] = remaining
+	}
 	var requestsPerHour float64
+	type lane struct{ capacity, minutes int }
+	var lanes []lane
 	for i, grade := range []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC} {
 		minutes := s.IntervalsMinutes[grade]
 		if minutes < 5 || int64(minutes) > DurationLimit(time.Minute)-5 {
 			return fmt.Errorf("scheduler.intervals_minutes.%s 必须是有效的分钟数，至少为 5", grade)
 		}
-		count := min(remaining, []int{s.MaxHot, s.MaxActive, s.MaxNormal, remaining}[i])
-		requestsPerHour += float64(count) * 60 / float64(minutes)
+		lanes = append(lanes, lane{capacities[i], minutes})
+	}
+	if s.ObservationPool {
+		// 总容量小于各档之和时按最快的档位先填，验证真实可出现的最大请求量。
+		slices.SortFunc(lanes, func(a, b lane) int { return a.minutes - b.minutes })
+	}
+	for _, lane := range lanes {
+		count := min(remaining, lane.capacity)
+		requestsPerHour += float64(count) * 60 / float64(lane.minutes)
 		remaining -= count
+	}
+	if s.ObservationPool && remaining > 0 {
+		return fmt.Errorf("观察池的总容量不能超过 S/A/B/C 四档容量之和")
+	}
+	if s.ObservationPool {
+		requestsPerHour += metrics.ObservationProbesPerHour
 	}
 	if requestsPerHour > float64(g.RepoSoftBudgetPerHour) {
 		return fmt.Errorf("scheduler 容量与采样周期需要约 %.1f 次每小时，超过仓库采样预算", requestsPerHour)

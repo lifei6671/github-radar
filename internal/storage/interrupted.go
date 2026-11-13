@@ -48,6 +48,6 @@ func InterruptJob(ctx context.Context, db *gorm.DB, job Job) error {
 		if result.RowsAffected != 1 {
 			return errors.New("排空时任务租约已失效")
 		}
-		return nil
+		return SettleDiscoveryRun(tx, job.DiscoveryRunID, at)
 	})
 }

@@ -41,6 +41,7 @@ func (a *collectionAPI) registerPublic(public *gin.RouterGroup) {
 	public.GET("/repos/published", a.publishedRepos)
 	public.GET("/repos/by-name/:owner/:name", a.loadCategories, a.repo)
 	public.GET("/repos/:id/trend", a.trend)
+	public.GET("/repos/:id/star-history", a.starHistory)
 	public.GET("/repos/:id/readme", a.readme)
 	public.GET("/repos/:id/similar", a.similar)
 	public.GET("/categories", a.loadCategories, a.categoryList)

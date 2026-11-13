@@ -19,6 +19,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	domain "github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/storage/discoverystore"
@@ -38,6 +39,7 @@ type repoFilters struct {
 	Blocked        string   `json:"blocked,omitempty"`
 	IncludeBlocked bool     `json:"includeBlocked,omitempty"`
 	Theme          string   `json:"theme,omitempty"`
+	Breakout       string   `json:"breakout,omitempty"`
 }
 
 type repoCursor struct {
@@ -206,6 +208,18 @@ func (a *collectionAPI) filterRepoList(c *gin.Context, tx, db *gorm.DB, filters 
 		db = db.Where(`EXISTS (SELECT 1 FROM `+storage.AISummaryTable+` s JOIN json_each(s.`+storage.AISummaryColumns.ValueTagsJSON+`) tag
 WHERE s.`+storage.AISummaryColumns.RepoID+`=`+storage.RepositoryTable+`.`+storage.RepositoryColumns.RepoID+` AND tag.value=?)`, filters.Tag)
 	}
+	if filters.Breakout != "" {
+		local := tx.Model(&storage.LatestMetric{}).Select("1").
+			Where("latest_metrics.repo_id = repositories.repo_id AND latest_metrics.breakout_json <> ''")
+		if filters.Breakout == "local" {
+			db = db.Where("EXISTS (?)", local)
+		} else {
+			history := tx.Model(&storage.RepoStarHistoryStatus{}).Select("1").
+				Where("repo_star_history_status.repo_id = repositories.repo_id AND breakout_at >= ?", time.Now().UnixMilli()-domain.StarHistorySignalAge).
+				Where("confirmed_at IS NULL OR confirmed_at <> breakout_at")
+			db = db.Where("EXISTS (?) AND NOT EXISTS (?)", history, local)
+		}
+	}
 	return filterProjectTheme(tx, a.filterCategories(c, db, filters.Category), filters.Theme)
 }
 
@@ -294,6 +308,10 @@ func (a *collectionAPI) filters(c *gin.Context) (repoFilters, string, error) {
 		return f, "", errors.New("专题筛选用于公开项目列表")
 	}
 	f.Grade, f.Tag = c.Query("grade"), strings.TrimSpace(c.Query("tag"))
+	f.Breakout = c.Query("breakout")
+	if f.Breakout != "" && f.Breakout != "local" && f.Breakout != "github" {
+		return f, "", errors.New("无效爆发信号")
+	}
 	if f.Grade != "" && !slices.Contains([]string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC}, f.Grade) {
 		return f, "", errors.New("无效采样等级")
 	}

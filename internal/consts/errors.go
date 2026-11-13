@@ -30,6 +30,7 @@ const (
 	CodeGitHubCoreReserve               = "github_core_reserve"
 	CodeGitHubForbidden                 = "github_forbidden"
 	CodeGitHubGone                      = "github_gone"
+	CodeStarHistoryPageChanged          = "star_history_page_changed"
 	CodeGitHubIncompleteSearch          = "github_incomplete_search"
 	CodeGitHubInvalidReadme             = "github_invalid_readme"
 	CodeGitHubInvalidRepository         = "github_invalid_repository"

@@ -109,8 +109,22 @@ func saveCombinedTranslation(tx *gorm.DB, row storage.RepoReadmeTranslation, raw
 	return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error
 }
 
-// scheduleTranslations 为已生成摘要的活跃仓库准备译文，使用摘要任务之外的剩余额度。
-func (q Queue) scheduleTranslations(tx *gorm.DB, now int64, slots int) (int, error) {
+// 已有公开原文的翻译任务可以直接读取持久化快照。
+func (q Queue) cachedTranslationRepos(db *gorm.DB) *gorm.DB {
+	limit := q.AI.Summary.ReadmeMaxBytes
+	return db.Model(&storage.Repository{}).Select("repositories.repo_id").
+		Joins("JOIN repo_readme_documents d ON d.repo_id = repositories.repo_id").
+		Where(storage.PublicRepositoryCondition).
+		Where("d.complete = ? AND d.readme_sha <> '' AND d.source_repo_name = repositories.full_name", false).
+		Where("d.readme_bytes > 0 AND d.readme_bytes <= ? AND (d.truncated = ? OR d.readme_bytes = ?)", limit, false, limit).
+		Where("LENGTH(d.source_markdown) = d.readme_bytes")
+}
+
+// 翻译完成后只需要远端复核，领取时沿用 GitHub 的请求节奏。
+const translationNeedsModel = "COALESCE(json_extract(payload_json,'$.readmeVerifySHA'),'')=''"
+
+// scheduleTranslations 为已有导读的仓库准备译文，缓存续译可独立于首次读取调度。
+func (q Queue) scheduleTranslations(tx *gorm.DB, now int64, slots int, cachedOnly bool) (int, error) {
 	var rows []struct {
 		RepoID     int64
 		Key        string
@@ -129,7 +143,8 @@ WITH candidates AS (
 )
 SELECT x.%[1]s AS repo_id,x.key,prior.%[24]s AS prior_job_id FROM candidates x
 LEFT JOIN %[25]s prior ON prior.%[26]s=x.key
-WHERE ((prior.%[24]s IS NULL AND COALESCE(x.%[5]s,0)=0) OR
+WHERE (NOT ? OR x.repo_id IN (?))
+AND ((prior.%[24]s IS NULL AND COALESCE(x.%[5]s,0)=0) OR
 	       (prior.%[27]s='%[28]s' AND prior.%[29]s IN ('%[33]s','%[34]s') AND COALESCE(x.%[5]s,0)=0))
 AND NOT EXISTS (
  SELECT 1 FROM %[25]s j WHERE j.%[30]s=? AND j.%[31]s=x.%[1]s AND j.%[27]s IN `,
@@ -142,15 +157,17 @@ AND NOT EXISTS (
 		storage.SummaryCheckColumns.SourceLanguage, consts.LanguageChinese, storage.JobColumns.ID, storage.JobTable, storage.JobColumns.DedupKey,
 		storage.JobColumns.Status, consts.StatusCanceled, storage.JobColumns.LastErrorCode, storage.JobColumns.Type, storage.JobColumns.RepoID,
 		consts.LanguageUndetermined, consts.CodeRepoBlocked, consts.CodeSummarySourceChanged)+unresolved+`
-) ORDER BY x.`+storage.RepositoryColumns.RepoID+` LIMIT ?`, q.translationKey(), q.translationKey(), TranslationJob, min(slots, 100)).Scan(&rows).Error
+) ORDER BY x.`+storage.RepositoryColumns.RepoID+` LIMIT ?`, q.translationKey(), q.translationKey(), cachedOnly, q.cachedTranslationRepos(tx), TranslationJob, min(slots, 100)).Scan(&rows).Error
 	if err != nil {
 		return 0, err
 	}
 	for _, row := range rows {
 		if row.PriorJobID != nil {
 			// 仓库解除屏蔽或重新使用旧 SHA 后，恢复同版本任务。
+			fields := jobFields(consts.StatusPending, "", now, now, 0)
+			fields[storage.JobColumns.PayloadJSON] = "{}"
 			if err := tx.Model(&storage.Job{}).Where(storage.JobColumns.ID+"=?", *row.PriorJobID).
-				Updates(jobFields(consts.StatusPending, "", now, now, 0)).Error; err != nil {
+				Updates(fields).Error; err != nil {
 				return 0, err
 			}
 		} else if _, err := q.insert(tx, TranslationJob, row.RepoID, row.Key, payload{}, 30, now); err != nil {
@@ -160,26 +177,30 @@ AND NOT EXISTS (
 	return len(rows), nil
 }
 
-func (e *Engine) runTranslation(ctx context.Context, job storage.Job, repo storage.Repository, manual bool) error {
+func (e *Engine) runTranslation(ctx context.Context, job storage.Job, repo storage.Repository, p payload, localOnly bool) error {
 	q := e.Queue
-	if e.Translate == nil {
-		return e.fail(ctx, job, consts.CodeSummaryUnavailable, false, 0, false)
-	}
 	db := q.DB.WithContext(ctx)
 	var document storage.RepoReadmeDocument
 	if err := db.Find(&document, "repo_id = ?", repo.RepoID).Error; err != nil {
 		return err
 	}
-	if document.Complete && !manual && readmeFits(document, q.AI.Summary.ReadmeMaxBytes) {
+	// 复核任务只负责刚刚译完的版本；新版本由正常调度处理。
+	stale := outcome{status: consts.StatusCanceled, code: consts.CodeSummarySourceChanged, attempts: job.Attempts}
+	if p.ReadmeVerifySHA != "" && document.ReadmeSHA != p.ReadmeVerifySHA {
+		return q.settle(ctx, job, stale)
+	}
+	if document.Complete && !p.Manual && readmeFits(document, q.AI.Summary.ReadmeMaxBytes) {
 		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts})
 	}
-	policy := gh.Policy{RepositoryID: repo.RepoID, Grade: repo.Grade, Priority: manual, ReadmeBudget: q.AI.Summary.GitHubBudget}
+	policy := gh.Policy{RepositoryID: repo.RepoID, Grade: repo.Grade, Priority: p.Manual, ReadmeBudget: q.AI.Summary.GitHubBudget}
 	snapshot, cached := savedReadme(document)
-	cached = cached && readmeFits(document, q.AI.Summary.ReadmeMaxBytes)
+	// 同一任务可能刚通过数字 ID 读到改名后的地址，此时采集表还没更新。
+	cached = cached && readmeFits(document, q.AI.Summary.ReadmeMaxBytes) && repo.FirstNotFoundAt == nil &&
+		(strings.EqualFold(document.SourceRepoName, repo.FullName) || document.SourceJobID == job.ID)
 	fullName := document.SourceRepoName
 	sourceJobID := document.SourceJobID
-	if cached {
-		// 已存的公开原文发给模型前仍须复核可见性，改名后重新按数字 ID 查找。
+	if cached && p.Manual && p.ReadmeVerifySHA == "" {
+		// 手动续译保留即时公开性复核。自动续译使用已确认公开的落盘版本。
 		var err error
 		if document.Complete {
 			_, err = e.verifyReadmeVersion(ctx, repo.RepoID, fullName, snapshot, policy)
@@ -194,7 +215,18 @@ func (e *Engine) runTranslation(ctx context.Context, job storage.Job, repo stora
 			return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts})
 		}
 	}
+	if localOnly && document.Complete {
+		// 领取后其他任务已经完成正文，无需重复翻译或消耗远端额度。
+		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts})
+	}
 	if !cached {
+		if p.ReadmeVerifySHA != "" {
+			return q.settle(ctx, job, stale)
+		}
+		if localOnly {
+			// 领取后缓存失效时交回远端队列。
+			return q.settle(ctx, job, outcome{status: consts.StatusPending, attempts: job.Attempts - 1, next: retryAt(job, time.Now())})
+		}
 		input, _, err := e.readSource(ctx, repo.RepoID, "", policy)
 		if err != nil {
 			return e.sourceFailed(ctx, job, err)
@@ -222,7 +254,14 @@ func (e *Engine) runTranslation(ctx context.Context, job storage.Job, repo stora
 		}
 	}
 	if len(translated) >= len(parts) {
-		// 最后一批已保存时，本轮只复核来源和发布。
+		// 已有完整译文时只复核来源和发布。旧任务也可能已保存最后一批。
+		if localOnly {
+			return q.settle(ctx, job, outcome{status: consts.StatusPending, attempts: job.Attempts - 1,
+				apply: func(tx *gorm.DB) error {
+					p.ReadmeVerifySHA = snapshot.SHA
+					return saveTranslationStage(tx, job, p)
+				}})
+		}
 		if _, err := e.verifyReadmeVersion(ctx, repo.RepoID, fullName, snapshot, policy); readmeAddressChanged(err) {
 			return q.settle(ctx, job, staleTranslation(job, snapshot.SHA, outcome{attempts: job.Attempts}))
 		} else if err != nil {
@@ -233,12 +272,27 @@ func (e *Engine) runTranslation(ctx context.Context, job storage.Job, repo stora
 			return publishTranslation(tx, saved, snapshot, fullName, sourceJobID)
 		}})
 	}
+	if p.ReadmeVerifySHA != "" {
+		return q.settle(ctx, job, stale)
+	}
+	if e.Translate == nil {
+		return e.fail(ctx, job, consts.CodeSummaryUnavailable, false, 0, false)
+	}
+	// 模型处理曾确认公开的快照，发送前复查本地可见性与地址，远端版本在发布阶段复核。
+	var stillPublic int64
+	if err := db.Model(&storage.Repository{}).Where(storage.PublicRepositoryCondition).
+		Where("repositories.repo_id = ? AND repositories.full_name = ?", repo.RepoID, repo.FullName).Count(&stillPublic).Error; err != nil {
+		return err
+	}
+	if stillPublic == 0 {
+		return e.fail(ctx, job, consts.CodeSummaryRepoUnavailable, false, 0, false)
+	}
 	// 每个任务领取只处理一批，以便摘要、手动任务和其他仓库先后获得预算。
 	limit := min(2800, q.AI.Summary.OutputTokens*2, (q.AI.Summary.InputTokens-len(translationPrompt))/2)
 	segments := selectTranslationBatch(parts[len(translated):], limit, true)
 	prompt, _ := json.Marshal(map[string][]string{"segments": segments})
 	now := time.Now()
-	call, err := q.reserve(ctx, job, manual, now)
+	call, err := q.reserve(ctx, job, p.Manual, now)
 	if errors.Is(err, errBudget) {
 		return q.settle(ctx, job, outcome{status: consts.StatusFailed, code: consts.CodeAIBudgetExhausted,
 			next: budgetRetryAt(job, now), attempts: job.Attempts - 1})
@@ -272,44 +326,28 @@ func (e *Engine) runTranslation(ctx context.Context, job storage.Job, repo stora
 	translated = append(translated, batch...)
 	encoded, _ := json.Marshal(translated)
 	saved = storage.RepoReadmeTranslation{RepoID: repo.RepoID, ReadmeSHA: snapshot.SHA, ReadmeBytes: len(snapshot.Body), ModelKey: key,
-		PartsJSON: string(encoded), Complete: finished}
-	if !finished {
-		out.status, out.attempts = consts.StatusPending, 0
-	}
-	var verifyErr error
-	if finished {
-		_, err := e.verifyReadmeVersion(ctx, repo.RepoID, fullName, snapshot, policy)
-		if errors.Is(err, ErrRepoUnavailable) {
-			out.status, out.code = consts.StatusDead, consts.CodeSummaryRepoUnavailable
-			out.apply = withdrawRepository(err, repo.RepoID)
-			return e.settleAfterCall(ctx, job, out)
-		}
-		if readmeAddressChanged(err) {
-			return e.settleAfterCall(ctx, job, staleTranslation(job, snapshot.SHA, out))
-		}
-		verifyErr = err
-		if err != nil {
-			saved.Complete = false
-			out.status, out.code, out.next = consts.StatusFailed, consts.CodeSummarySourceChanged, retryAt(job, time.Now())
-			var upstream *gh.Failure
-			if errors.As(err, &upstream) && upstream.Until > 0 {
-				out.next = max(out.next, upstream.Until)
-				if upstream.Status == 0 {
-					out.attempts--
-				}
-			}
-			if out.attempts >= job.MaxAttempts {
-				out.status = consts.StatusDead
-			}
-		}
-	}
+		PartsJSON: string(encoded)}
+	// 模型台账和译文先提交，随后由同一任务领取发布复核；限流或重启也不会重复调用模型。
+	out.status, out.attempts = consts.StatusPending, 0
 	out.apply = func(tx *gorm.DB) error {
-		if finished && verifyErr == nil {
-			return publishTranslation(tx, saved, snapshot, fullName, sourceJobID)
+		if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&saved).Error; err != nil {
+			return err
 		}
-		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&saved).Error
+		if finished {
+			p.ReadmeVerifySHA = snapshot.SHA
+		}
+		return saveTranslationStage(tx, job, p)
 	}
 	return e.settleAfterCall(ctx, job, out)
+}
+
+// 更新阶段与台账、任务状态共用已检查租约的结算事务。
+func saveTranslationStage(tx *gorm.DB, job storage.Job, p payload) error {
+	data, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	return tx.Model(&job).Update(storage.JobColumns.PayloadJSON, string(data)).Error
 }
 
 func staleTranslation(job storage.Job, sha string, out outcome) outcome {

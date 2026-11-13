@@ -29,7 +29,7 @@ func (a *collectionAPI) dailyReport(c *gin.Context) {
 		}
 	}
 	store := reportstore.Store{DB: a.db}
-	published, err := store.ReadEditorials(c.Request.Context(), kind, date, before, pageSize+1)
+	published, err := store.ReadEditorials(c.Request.Context(), kind, date, before, pageSize+1, time.Now())
 	if err != nil {
 		a.fail(c, err)
 		return

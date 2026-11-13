@@ -30,12 +30,22 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 		// 补齐主题词使用剩余自动额度，避免为低优先级仓库堆积等待额度的任务。
 		var topicSlots int
 		start := now.UTC().Truncate(24 * time.Hour)
+		var calls int64
+		if err := tx.Model(&storage.AICall{}).Where("origin = ? AND reserved_at >= ? AND reserved_at < ?",
+			consts.OriginAuto, start.UnixMilli(), start.Add(24*time.Hour).UnixMilli()).Count(&calls).Error; err != nil {
+			return err
+		}
+		remaining := max(0, q.AI.Summary.AutoDailyCalls-int(calls))
+		if remaining > 0 {
+			if err := q.scheduleCachedTranslations(tx, ms, remaining); err != nil {
+				return err
+			}
+		}
 		if err := tx.Raw(fmt.Sprintf(`
-SELECT max(0, ? - (SELECT count(*) FROM %[1]s WHERE %[2]s='%[3]s' AND %[4]s>=? AND %[4]s<?)
-  - (SELECT count(*) FROM %[5]s WHERE %[6]s IN (?,?) AND %[7]s<200 AND %[8]s<=?
-     AND %[9]s IN ('%[10]s','%[11]s','%[12]s')))`,
-			storage.AICallTable, storage.AICallColumns.Origin, consts.OriginAuto, storage.AICallColumns.ReservedAt, storage.JobTable, storage.JobColumns.Type, storage.JobColumns.Priority, storage.JobColumns.AvailableAt, storage.JobColumns.Status, consts.StatusPending, consts.StatusRunning, consts.StatusFailed),
-			q.AI.Summary.AutoDailyCalls, start.UnixMilli(), start.Add(24*time.Hour).UnixMilli(), JobType, TranslationJob, ms).Scan(&topicSlots).Error; err != nil {
+SELECT max(0, ? - (SELECT count(*) FROM %[1]s WHERE %[2]s IN (?,?) AND %[3]s<200 AND %[4]s<=?
+     AND %[5]s IN ('%[6]s','%[7]s','%[8]s')))`,
+			storage.JobTable, storage.JobColumns.Type, storage.JobColumns.Priority, storage.JobColumns.AvailableAt, storage.JobColumns.Status, consts.StatusPending, consts.StatusRunning, consts.StatusFailed),
+			remaining, JobType, TranslationJob, ms).Scan(&topicSlots).Error; err != nil {
 			return err
 		}
 		if topicSlots > 0 {
@@ -96,7 +106,7 @@ ORDER BY (e.high_priority AND (s.repo_id IS NULL OR s.summary_status<>'ready')) 
 			topicsOnly := !row.HighPriority && !row.HasSummary
 			if topicsOnly && !translationsScheduled && topicSlots > 0 {
 				// 为译文留出一部分余量，避免长尾主题词占用全部可用名额。
-				count, err := q.scheduleTranslations(tx, ms, min(topicSlots, max(1, q.AI.Summary.AutoDailyCalls/10)))
+				count, err := q.scheduleTranslations(tx, ms, min(topicSlots, max(1, q.AI.Summary.AutoDailyCalls/10)), false)
 				if err != nil {
 					return err
 				}
@@ -121,11 +131,32 @@ ORDER BY (e.high_priority AND (s.repo_id IS NULL OR s.summary_status<>'ready')) 
 			}
 		}
 		if !translationsScheduled && topicSlots > 0 {
-			_, err := q.scheduleTranslations(tx, ms, topicSlots)
+			_, err := q.scheduleTranslations(tx, ms, topicSlots, false)
 			return err
 		}
 		return nil
 	})
+}
+
+// 已缓存原文的续译只按实际剩余 AI 额度入队，批量保持有界。
+func (q Queue) scheduleCachedTranslations(tx *gorm.DB, now int64, remaining int) error {
+	active := tx.Model(&storage.Job{}).Where("type = ? AND repo_id IN (?) AND priority < ?",
+		TranslationJob, q.cachedTranslationRepos(tx), 200).Where(translationNeedsModel)
+	// 旧任务可能因 GitHub 额度延期，已有快照时可直接续译。
+	if err := active.Session(&gorm.Session{}).Where("status = ? AND last_error_code = ? AND available_at > ?",
+		consts.StatusFailed, consts.CodeGitHubLocalBudget, now).Update("available_at", now).Error; err != nil {
+		return err
+	}
+	var outstanding int64
+	if err := active.Where("status IN ?", []string{consts.StatusPending, consts.StatusRunning, consts.StatusFailed}).Count(&outstanding).Error; err != nil {
+		return err
+	}
+	slots := min(remaining, 100) - int(outstanding)
+	if slots <= 0 {
+		return nil
+	}
+	_, err := q.scheduleTranslations(tx, now, slots, true)
+	return err
 }
 
 func prioritizeThemeBackfill(tx *gorm.DB, now int64) error {

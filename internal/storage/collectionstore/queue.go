@@ -20,12 +20,14 @@ import (
 )
 
 type Queue struct {
-	DB     *gorm.DB
-	Cfg    config.Scheduler
-	Pacing storage.JobPacing
+	DB                      *gorm.DB
+	Cfg                     config.Scheduler
+	Pacing                  storage.JobPacing
+	StarHistory             bool
+	ObservationExactMinutes *int
 }
 
-var collectionJobs = []string{consts.JobRefreshRepo, consts.JobDiscoverTrending, consts.JobDiscoverSearch, consts.JobDiscoverManual}
+var collectionJobs = []string{consts.JobRefreshRepo, consts.JobDiscoverTrending, consts.JobDiscoverSearch, consts.JobDiscoverManual, consts.JobStarHistory}
 
 func (q Queue) enqueue(tx *gorm.DB, kind string, repoID *int64, key string, payload collection.Payload, priority int, now int64) (storage.Job, error) {
 	data, err := json.Marshal(payload)
@@ -33,7 +35,7 @@ func (q Queue) enqueue(tx *gorm.DB, kind string, repoID *int64, key string, payl
 		return storage.Job{}, err
 	}
 	job := storage.Job{
-		Type: kind, RepoID: repoID, DedupKey: key, PayloadJSON: string(data),
+		Type: kind, RepoID: repoID, DiscoveryRunID: payload.RunID, DedupKey: key, PayloadJSON: string(data),
 		Priority: priority, Status: consts.StatusPending, AvailableAt: now, MaxAttempts: 5,
 		CreatedAt: now, UpdatedAt: now,
 	}
@@ -47,11 +49,11 @@ func (q Queue) enqueue(tx *gorm.DB, kind string, repoID *int64, key string, payl
 }
 
 func cancelDisabledRules(tx *gorm.DB, now int64) error {
-	return tx.Model(&storage.Job{}).
+	return updateDiscoveryJobs(tx, tx.Model(&storage.Job{}).
 		Where(storage.JobColumns.Type+" IN ('"+consts.JobDiscoverSearch+"','"+consts.JobDiscoverTrending+"')").
 		Where("("+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusFailed+"') OR ("+storage.JobColumns.Status+"='"+consts.StatusRunning+"' AND "+storage.JobColumns.LeaseUntil+"<=?))", now).
-		Where("CAST(json_extract(" + storage.JobColumns.PayloadJSON + ",'$.ruleId') AS INTEGER) IN (SELECT " + storage.DiscoveryRuleColumns.ID + " FROM " + storage.DiscoveryRuleTable + " WHERE " + storage.DiscoveryRuleColumns.Enabled + "=0)").
-		Updates(map[string]any{storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LastErrorCode: consts.CodeSourceDisabled, storage.JobColumns.UpdatedAt: now}).Error
+		Where("CAST(json_extract("+storage.JobColumns.PayloadJSON+",'$.ruleId') AS INTEGER) IN (SELECT "+storage.DiscoveryRuleColumns.ID+" FROM "+storage.DiscoveryRuleTable+" WHERE "+storage.DiscoveryRuleColumns.Enabled+"=0)"),
+		consts.StatusCanceled, consts.CodeSourceDisabled, now)
 }
 
 // Schedule 在短事务内建立到期任务；运行中的任务不会被另一轮扫描重复投递。
@@ -61,6 +63,14 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 		if err := cancelDisabledRules(tx, ms); err != nil {
 			return err
 		}
+		if err := cancelIneligibleObservationProbes(tx, ms, q.Cfg.ObservationPool); err != nil {
+			return err
+		}
+		if q.Cfg.ObservationPool {
+			if err := q.scheduleObservationProbes(tx, now); err != nil {
+				return err
+			}
+		}
 		for _, grade := range []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC} {
 			if err := tx.Model(&storage.Repository{}).Where(storage.RepositoryColumns.Grade+"=? AND "+storage.RepositoryColumns.State+"='"+consts.StatusActive+"'", grade).
 				Where(fmt.Sprintf("%[1]s IN (SELECT %[2]s FROM %[3]s WHERE %[4]s='%[5]s' AND %[6]s='%[7]s' AND %[8]s<=? AND %[9]s>=%[10]s)",
@@ -69,14 +79,32 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 				return err
 			}
 		}
-		if err := tx.Model(&storage.Job{}).Where(storage.JobColumns.Type+" IN ? AND "+storage.JobColumns.Status+" = '"+consts.StatusRunning+"' AND "+storage.JobColumns.LeaseUntil+" <= ? AND "+storage.JobColumns.Attempts+" >= "+storage.JobColumns.MaxAttempts,
-			collectionJobs, ms).
-			Updates(map[string]any{storage.JobColumns.Status: consts.StatusDead, storage.JobColumns.LastErrorCode: consts.CodeLeaseExpired, storage.JobColumns.UpdatedAt: ms}).Error; err != nil {
+		expired := tx.Model(&storage.Job{}).Where(storage.JobColumns.Type+" IN ? AND "+storage.JobColumns.Status+" = '"+consts.StatusRunning+"' AND "+storage.JobColumns.LeaseUntil+" <= ? AND "+storage.JobColumns.Attempts+" >= "+storage.JobColumns.MaxAttempts,
+			collectionJobs, ms)
+		var expiredProbes []storage.Job
+		if err := expired.Session(&gorm.Session{}).Where("dedup_key LIKE ?", observationProbePattern).Find(&expiredProbes).Error; err != nil {
+			return err
+		}
+		for _, job := range expiredProbes {
+			if err := settleFailedObservationProbe(tx, job, ms); err != nil {
+				return err
+			}
+		}
+		if err := updateDiscoveryJobs(tx, expired, consts.StatusDead, consts.CodeLeaseExpired, ms); err != nil {
+			return err
+		}
+		if q.Cfg.ObservationPool {
+			// 调整配置后，已有任务也必须遵守新采样周期。首次采样和人工任务照常保留。
+			if err := q.alignObservationSchedule(tx, ms); err != nil {
+				return err
+			}
+		} else if err := tx.Delete(&storage.MaintenanceState{}, "key = ?", observationSamplingKey).Error; err != nil {
 			return err
 		}
 		for _, grade := range []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC} {
 			// 积压任务跨过当前采样周期时，取消旧槽，按当前扫描重建。
 			query := tx.Model(&storage.Job{}).Where(storage.JobColumns.Type+" = '"+consts.JobRefreshRepo+"' AND "+storage.JobColumns.DedupKey+" LIKE '"+consts.AutoJobPattern+"'").
+				Where("dedup_key NOT LIKE ?", observationProbePattern).
 				Where("("+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusFailed+"') OR ("+storage.JobColumns.Status+" = '"+consts.StatusRunning+"' AND "+storage.JobColumns.LeaseUntil+" <= ?))", ms).
 				Where(storage.JobColumns.RepoID+" IN (SELECT "+storage.RepositoryColumns.RepoID+" FROM "+storage.RepositoryTable+" WHERE "+storage.RepositoryColumns.Grade+" = ?)", grade).
 				Where("CAST(json_extract("+storage.JobColumns.PayloadJSON+",'$.plannedAt') AS INTEGER) < ?", now.Add(-q.Cfg.Interval(grade)).UnixMilli())
@@ -94,14 +122,14 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 		}
 		for _, repo := range repos {
 			key := fmt.Sprintf(consts.RefreshAutoDedupFormat, repo.RepoID, collection.Slot(ms))
-			if _, err := q.enqueue(tx, consts.JobRefreshRepo, &repo.RepoID, key, collection.Payload{PlannedAt: ms}, gradePriority(repo.Grade), ms); err != nil {
+			if _, err := q.enqueue(tx, consts.JobRefreshRepo, &repo.RepoID, key, collection.Payload{PlannedAt: ms}, storage.SamplingPriority(repo.Grade), ms); err != nil {
 				return err
 			}
 		}
 		var rules []storage.DiscoveryRule
 		if err := tx.Where(storage.DiscoveryRuleColumns.Enabled+" = 1 AND "+storage.DiscoveryRuleColumns.NextRunAt+" <= ?", ms).
-			Where(fmt.Sprintf("NOT EXISTS (SELECT 1 FROM %[1]s WHERE %[2]s IN ('%[3]s','%[4]s') AND CAST(json_extract(%[5]s,'$.ruleId') AS INTEGER) = %[6]s.%[7]s AND %[8]s IN ('%[9]s','%[10]s','%[11]s'))",
-				storage.JobTable, storage.JobColumns.Type, consts.JobDiscoverSearch, consts.JobDiscoverTrending, storage.JobColumns.PayloadJSON, storage.DiscoveryRuleTable, storage.DiscoveryRuleColumns.ID, storage.JobColumns.Status, consts.StatusPending, consts.StatusRunning, consts.StatusFailed)).
+			Where(fmt.Sprintf("NOT EXISTS (SELECT 1 FROM %[1]s WHERE %[2]s IN ('%[3]s','%[4]s') AND CAST(json_extract(%[5]s,'$.ruleId') AS INTEGER) = %[6]s.%[7]s AND %[8]s IN ('%[9]s','%[10]s','%[11]s') AND NOT EXISTS (SELECT 1 FROM discovery_rule_runs b WHERE b.id = jobs.discovery_run_id AND b.pass = ?))",
+				storage.JobTable, storage.JobColumns.Type, consts.JobDiscoverSearch, consts.JobDiscoverTrending, storage.JobColumns.PayloadJSON, storage.DiscoveryRuleTable, storage.DiscoveryRuleColumns.ID, storage.JobColumns.Status, consts.StatusPending, consts.StatusRunning, consts.StatusFailed), collection.DiscoveryBackfill).
 			Order(storage.DiscoveryRuleColumns.NextRunAt + ", " + storage.DiscoveryRuleColumns.ID).Find(&rules).Error; err != nil {
 			return err
 		}
@@ -114,8 +142,7 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 				}
 				payload = collection.Payload{RuleID: rule.ID, PlannedAt: ms, SourceKey: source, Language: language, Period: period}
 			}
-			key := fmt.Sprintf(consts.DiscoveryAutoDedupFormat, rule.SourceType, rule.ID, collection.Slot(ms))
-			job, err := q.enqueue(tx, "discover_"+rule.SourceType, nil, key, payload, rule.Priority, ms)
+			job, err := q.enqueueRuleRun(tx, rule, payload, now, collection.DiscoveryPrimary)
 			if err != nil {
 				return err
 			}
@@ -124,21 +151,35 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 				// 同槽旧规则任务可能已被撤销，下一槽重新安排新定义。
 				nextRun = collection.Slot(ms) + 300000
 			}
+			if rule.AgeWindow != "" && job.Status == consts.StatusPending {
+				if err := q.enqueueEarlyBackfill(tx, rule, payload, now); err != nil {
+					return err
+				}
+			}
 			if err := tx.Model(&rule).Update(storage.DiscoveryRuleColumns.NextRunAt, nextRun).Error; err != nil {
 				return err
 			}
+		}
+		if q.StarHistory {
+			return q.scheduleStarHistory(tx, now)
 		}
 		return nil
 	})
 }
 
-func gradePriority(grade string) int {
-	return map[string]int{consts.GradeS: 100, consts.GradeA: 80, consts.GradeB: 40, consts.GradeC: 20}[grade]
-}
-
 // Claim 单条 UPDATE RETURNING 原子领取任务，过期租约可由新 token 接管。
 func (q Queue) Claim(ctx context.Context, now time.Time) (*storage.Job, error) {
+	// 领取和首次开工时间同一事务提交，Worker 崩溃后仍能从同一轮继续。
 	return q.Pacing.Claim(q.DB.WithContext(ctx), now, func(db *gorm.DB, deferred []string) (*storage.Job, error) {
+		if len(q.Pacing) == 0 {
+			var job *storage.Job
+			err := db.Transaction(func(tx *gorm.DB) error {
+				var err error
+				job, err = q.claim(tx, now, deferred)
+				return err
+			})
+			return job, err
+		}
 		return q.claim(db, now, deferred)
 	})
 }
@@ -154,13 +195,26 @@ func (q Queue) claim(db *gorm.DB, now time.Time, blocked []string) (*storage.Job
 	ms := now.UnixMilli()
 	next := db.Model(&storage.Job{}).Select(j.ID).
 		Where(j.Type+" IN ?", collectionJobs).
-		Where("("+j.Type+"=? OR ("+j.Type+"=? AND EXISTS (?)) OR ("+j.Type+" IN ? AND EXISTS (?)))",
-			consts.JobDiscoverManual, consts.JobRefreshRepo, jobRepo, []string{consts.JobDiscoverTrending, consts.JobDiscoverSearch}, jobRule).
+		Where("("+j.Type+"=? OR ("+j.Type+" IN ? AND EXISTS (?)) OR ("+j.Type+" IN ? AND EXISTS (?)))",
+			consts.JobDiscoverManual, []string{consts.JobRefreshRepo, consts.JobStarHistory}, jobRepo, []string{consts.JobDiscoverTrending, consts.JobDiscoverSearch}, jobRule).
 		Where(j.Attempts+"<"+j.MaxAttempts).Where(j.AvailableAt+"<=?", ms).
 		Where("("+j.Status+" IN ? OR ("+j.Status+"=? AND "+j.LeaseUntil+"<=?))", []string{consts.StatusPending, consts.StatusFailed}, consts.StatusRunning, ms).
 		Order(j.Priority + " DESC").Order(j.AvailableAt).Order(j.ID).Limit(1)
 	if len(blocked) > 0 {
 		next = next.Where("(json_extract("+j.PayloadJSON+",'$.manual')=1 OR "+j.Type+" NOT IN ?)", blocked)
+	}
+	if !q.StarHistory {
+		next = next.Where(j.Type+" <> ?", consts.JobStarHistory)
+	} else {
+		// 同仓库同一时刻只允许一页历史在飞行，自动探测和手动回补不能覆盖彼此。
+		inFlight := db.Table("jobs AS history_in_flight").Select("1").
+			Where("history_in_flight.repo_id = jobs.repo_id AND history_in_flight.id <> jobs.id").
+			Where("history_in_flight.type = ? AND history_in_flight.status = ? AND history_in_flight.lease_until > ?",
+				consts.JobStarHistory, consts.StatusRunning, ms)
+		next = next.Where("(jobs.type <> ? OR NOT EXISTS (?))", consts.JobStarHistory, inFlight)
+	}
+	if !q.Cfg.ObservationPool {
+		next = next.Where("dedup_key NOT LIKE ?", observationProbePattern)
 	}
 	var job storage.Job
 	err := db.Raw("UPDATE "+storage.JobTable+" SET "+j.Status+"=?, "+j.Attempts+"="+j.Attempts+"+1, "+
@@ -168,6 +222,12 @@ func (q Queue) claim(db *gorm.DB, now time.Time, blocked []string) (*storage.Job
 		consts.StatusRunning, rand.Text(), now.Add(time.Duration(q.Cfg.LeaseSeconds)*time.Second).UnixMilli(), ms, next).Scan(&job).Error
 	if err != nil || job.ID == 0 {
 		return nil, err
+	}
+	if job.DiscoveryRunID != nil {
+		if err := db.Model(&storage.DiscoveryRuleRun{}).Where("id = ? AND started_at = 0", *job.DiscoveryRunID).
+			Updates(map[string]any{"started_at": ms, "status": consts.StatusRunning}).Error; err != nil {
+			return nil, err
+		}
 	}
 	return &job, nil
 }
@@ -213,7 +273,7 @@ func (q Queue) Complete(ctx context.Context, job storage.Job, apply port.Change)
 		if result.RowsAffected != 1 {
 			return collection.ErrLeaseLost
 		}
-		return nil
+		return storage.SettleDiscoveryRun(tx, job.DiscoveryRunID, time.Now().UnixMilli())
 	})
 }
 
@@ -232,11 +292,15 @@ func (q Queue) Fail(ctx context.Context, job storage.Job, cause error, now time.
 			}
 		}
 	}
-	if job.Type == consts.JobDiscoverManual && errors.Is(cause, storage.ErrRepositoryBlocked) {
+	if (job.Type == consts.JobDiscoverManual || job.Type == consts.JobStarHistory) && errors.Is(cause, storage.ErrRepositoryBlocked) {
 		code, status = consts.CodeRepoBlocked, consts.StatusDead
 	}
-	if attempts >= job.MaxAttempts || job.Type == consts.JobDiscoverManual &&
+	if attempts >= job.MaxAttempts || (job.Type == consts.JobDiscoverManual || job.Type == consts.JobStarHistory) &&
 		(code == consts.CodeGitHubNotFound || code == consts.CodeGitHubGone) {
+		status = consts.StatusDead
+	}
+	if job.Type == consts.JobStarHistory && code == consts.CodeStarHistoryPageChanged {
+		// 分页基线已失效，重复同页无法修复；用户可从首页重新开始。
 		status = consts.StatusDead
 	}
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -249,6 +313,22 @@ func (q Queue) Fail(ctx context.Context, job storage.Job, cause error, now time.
 		}
 		if result.RowsAffected != 1 {
 			return collection.ErrLeaseLost
+		}
+		if job.DiscoveryRunID != nil && upstream != nil && upstream.SearchTotal != nil {
+			// 不完整响应的总量可供排查，但结果不会进入仓库表。
+			if err := tx.Model(&storage.DiscoveryRuleRun{}).Where("id = ? AND upstream_total IS NULL", *job.DiscoveryRunID).
+				Update("upstream_total", *upstream.SearchTotal).Error; err != nil {
+				return err
+			}
+		}
+		if err := storage.SettleDiscoveryRun(tx, job.DiscoveryRunID, now.UnixMilli()); err != nil {
+			return err
+		}
+		if job.Type == consts.JobStarHistory && job.RepoID != nil {
+			return recordStarHistoryFailure(tx, job, code, now.UnixMilli())
+		}
+		if status == consts.StatusDead && isObservationProbe(job) {
+			return settleFailedObservationProbe(tx, job, now.UnixMilli())
 		}
 		if status != consts.StatusDead || job.RepoID == nil {
 			return nil

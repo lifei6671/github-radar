@@ -39,12 +39,23 @@ func (w writer) SaveTrending(change port.Trending) error {
 	p, entries, observed := change.Plan, change.Entries, change.ObservedAt
 	key := collection.BatchKey(p.SourceKey, p.Period)
 	batch, found, err := trendingBatch(tx, key)
-	if err != nil || (found && batch.ObservedSlot >= collection.Slot(p.PlannedAt)) {
+	if err != nil {
 		return err
+	}
+	if found && batch.ObservedSlot >= collection.Slot(p.PlannedAt) {
+		if p.RunID == nil {
+			return nil
+		}
+		// 较新的榜单已发布时，旧任务仍保留本轮上游总量，覆盖标记维持不完整。
+		return tx.Model(&storage.DiscoveryRuleRun{}).Where("id = ?", *p.RunID).Update("upstream_total", len(entries)).Error
 	}
 	for _, entry := range entries {
 		if entry.Repository == nil {
 			continue
+		}
+		hit, err := discoveryRunHit(tx, p.RunID, entry.Repository.GetID())
+		if err != nil {
+			return err
 		}
 		applied, err := w.queue.Discover(tx, entry.Repository, observed)
 		if err != nil {
@@ -52,6 +63,9 @@ func (w writer) SaveTrending(change port.Trending) error {
 		}
 		if !applied {
 			continue
+		}
+		if err := saveDiscoveryRunHit(tx, hit); err != nil {
+			return err
 		}
 		observation := storage.TrendingObservation{
 			RepoID: entry.Repository.GetID(), SourceKey: p.SourceKey, Window: p.Period,
@@ -71,7 +85,14 @@ func (w writer) SaveTrending(change port.Trending) error {
 		return err
 	}
 	marker := storage.MaintenanceState{Key: key, Value: string(data), UpdatedAt: observed}
-	return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&marker).Error
+	if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&marker).Error; err != nil {
+		return err
+	}
+	if p.RunID != nil {
+		return tx.Model(&storage.DiscoveryRuleRun{}).Where("id = ?", *p.RunID).
+			Updates(map[string]any{"upstream_total": len(entries), "completed_shards": 1}).Error
+	}
+	return nil
 }
 
 func (w writer) SaveSearch(change port.Search) error {
@@ -81,6 +102,10 @@ func (w writer) SaveSearch(change port.Search) error {
 		if repo == nil || repo.GetStargazersCount() < p.StarFloor {
 			continue
 		}
+		hit, err := discoveryRunHit(tx, p.RunID, repo.GetID())
+		if err != nil {
+			return err
+		}
 		applied, err := w.queue.Discover(tx, repo, observed)
 		if err != nil {
 			return err
@@ -88,14 +113,32 @@ func (w writer) SaveSearch(change port.Search) error {
 		if !applied {
 			continue
 		}
+		if err := saveDiscoveryRunHit(tx, hit); err != nil {
+			return err
+		}
 		observation := storage.SearchObservation{RepoID: repo.GetID(), SourceKey: p.SourceKey, ObservedSlot: collection.Slot(p.PlannedAt), ObservedAt: observed}
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&observation).Error; err != nil {
 			return err
 		}
 	}
 	for _, next := range change.Next {
+		next.RunRoot = false
 		if err := w.queue.enqueueSearch(tx, change.Parent, next); err != nil {
 			return err
+		}
+	}
+	if p.RunID != nil {
+		updates := make(map[string]any)
+		if p.RunRoot {
+			updates["upstream_total"] = change.UpstreamTotal
+		}
+		if change.Split {
+			updates["planned_shards"] = gorm.Expr("planned_shards + ?", len(change.Next)-1)
+		} else if len(change.Next) == 0 {
+			updates["completed_shards"] = gorm.Expr("completed_shards + 1")
+		}
+		if len(updates) != 0 {
+			return tx.Model(&storage.DiscoveryRuleRun{}).Where("id = ?", *p.RunID).Updates(updates).Error
 		}
 	}
 	return nil
@@ -104,6 +147,9 @@ func (w writer) SaveSearch(change port.Search) error {
 func (q Queue) enqueueSearch(tx *gorm.DB, parent storage.Job, p collection.Payload) error {
 	key := fmt.Sprintf(consts.SearchShardDedupFormat,
 		p.RuleID, collection.Slot(p.PlannedAt), p.MinStars, p.MaxStars, p.CreatedFrom, p.CreatedUntil, p.Page)
+	if p.RunID != nil {
+		key = fmt.Sprintf("%s:run:%d", key, *p.RunID)
+	}
 	_, err := q.enqueue(tx, consts.JobDiscoverSearch, nil, key, p, parent.Priority, time.Now().UnixMilli())
 	return err
 }

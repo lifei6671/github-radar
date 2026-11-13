@@ -14,9 +14,23 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/migrations"
 )
+
+func TestSearchRejectsMissingPageLink(t *testing.T) {
+	client, _, _ := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		// 上游总数需要第二页，但响应没有分页链接。
+		_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 120, "incomplete_results": false, "items": make([]map[string]any, 50)})
+	})
+	_, err := client.Search(t.Context(), "archived:false", 1)
+	var failure *Failure
+	if !errors.As(err, &failure) || failure.Code != consts.CodeGitHubIncompleteSearch ||
+		failure.SearchTotal == nil || *failure.SearchTotal != 120 {
+		t.Fatalf("截断分页不能作为完整结果，仍应保留上游总量: %v", err)
+	}
+}
 
 func testClient(t *testing.T, handler http.HandlerFunc) (*Client, *gorm.DB, config.GitHub) {
 	t.Helper()
@@ -145,7 +159,7 @@ func TestIndependentBudgetsAndSearchPagination(t *testing.T) {
 		calls.Add(1)
 		if r.URL.Path == "/search/repositories" {
 			w.Header().Set("Link", "<http://example.com/search/repositories?page=2>; rel=\"next\"")
-			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 80, "incomplete_results": false, "items": []any{}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"total_count": 80, "incomplete_results": false, "items": make([]map[string]any, 50)})
 			return
 		}
 		_, _ = w.Write([]byte(repositoryJSON))

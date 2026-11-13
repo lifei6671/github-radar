@@ -12,6 +12,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -20,6 +21,7 @@ const (
 	Search              = consts.SourceSearch
 	RepoRefreshResource = "repo_refresh"
 	ReadmeCheckResource = "readme_check"
+	StarHistoryResource = "star_history"
 	repoLimit           = RepoRefreshResource
 	readmeLimit         = ReadmeCheckResource
 	secondary           = consts.CodeGitHubSecondary
@@ -33,6 +35,7 @@ type Policy struct {
 	Sample       bool
 	Priority     bool
 	ReadmeBudget int
+	StarHistory  bool
 }
 
 type limiter struct {
@@ -117,6 +120,13 @@ func (l limiter) reserve(ctx context.Context, p Policy, now time.Time) error {
 				return err
 			}
 			return consumeLocal(tx, &readme, p.ReadmeBudget, time.Hour, ms)
+		}
+		if p.StarHistory {
+			history, err := rateState(tx, StarHistoryResource)
+			if err != nil {
+				return err
+			}
+			return consumeLocal(tx, &history, metrics.StarHistoryBudget, time.Hour, ms)
 		}
 		return nil
 	})

@@ -15,6 +15,7 @@ import (
 	"github.com/yuin/goldmark/text"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/topics"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -28,6 +29,8 @@ const (
 	minFullSummaryChars  = 80
 	maxSummaryChars      = 200
 )
+
+const editorialInstruction = "。可选 editorial_brief 对象含 readerBenefit（读者收益）、demo（演示场景）、angle（写作角度）、steps（最多三条实测步骤）、risks（仅可用 code_execution、system_access、personal_data）。以资料为依据简短填写，勿编造命令或声称实测。"
 
 type source struct {
 	fullName                                                          string
@@ -163,7 +166,7 @@ func excerpts(s string, limit int) string {
 	return limitText(b.String(), limit)
 }
 
-func (s source) prompt(budget int, summary, topics bool) (string, source) {
+func (s source) prompt(budget int, summary, topics, editorial bool) (string, source) {
 	// 字节作为保守上界，给系统消息、角色和 JSON 留出固定开销。
 	task := "摘要"
 	if topics && summary {
@@ -177,6 +180,10 @@ func (s source) prompt(budget int, summary, topics bool) (string, source) {
 	instructionBytes := 0
 	if summary {
 		instructionBytes = max(len(fullLength), len(shortLength))
+	}
+	editorial = editorial && summary && budget >= 4096
+	if editorial {
+		instructionBytes += len(editorialInstruction)
 	}
 	prefix := "\n公开仓库：" + limitText(s.fullName, 160) + "\n检测语言：" + s.language + "\n"
 	if topics {
@@ -206,6 +213,10 @@ func (s source) prompt(budget int, summary, topics bool) (string, source) {
 	} else if summary {
 		task += shortLength
 	}
+	if editorial {
+		// 预算较小时优先把输入留给 README。
+		task += editorialInstruction
+	}
 	return task + prefix, s
 }
 
@@ -219,6 +230,7 @@ type answer struct {
 	Tags                 []string        `json:"value_tags"`
 	Evidence             []string        `json:"evidence"`
 	Uncertainty          []string        `json:"uncertainty"`
+	EditorialBrief       json.RawMessage `json:"editorial_brief"`
 }
 
 var topicSlug = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
@@ -308,8 +320,49 @@ func resultSummary(raw string, s source, repoID int64, provider, model string, v
 		SourceLanguage: s.language, TitleZh: &title, SummaryZh: a.Summary, RecommendationReason: &reason,
 		FeaturesJSON: tags(a.Features), AudienceJSON: tags(a.Audience),
 		ValueTagsJSON: tags(a.Tags), SourceReadmeURL: optional(s.url), ModelProvider: provider, ModelName: model,
-		PromptVersion: version, SummaryStatus: consts.StatusReady, GeneratedAt: now,
+		EditorialBriefJSON: editorialBrief(a.EditorialBrief),
+		PromptVersion:      version, SummaryStatus: consts.StatusReady, GeneratedAt: now,
 	}, true
+}
+
+// editorialBrief 校验可选材料，错误的选题字段不触发重新调用，也不阻断摘要发布。
+func editorialBrief(raw json.RawMessage) string {
+	var brief topics.Brief
+	if json.Unmarshal(raw, &brief) != nil {
+		return ""
+	}
+	short := func(value string) string {
+		value = strings.Join(strings.Fields(value), " ")
+		if utf8.RuneCountInString(value) > 120 || !containsChinese(value) {
+			return ""
+		}
+		return value
+	}
+	brief.ReaderBenefit, brief.Demo, brief.Angle = short(brief.ReaderBenefit), short(brief.Demo), short(brief.Angle)
+	steps := make([]string, 0, 3)
+	for _, step := range brief.Steps {
+		if step = short(step); step != "" {
+			steps = append(steps, step)
+			if len(steps) == 3 {
+				break
+			}
+		}
+	}
+	var risks []string
+	for _, key := range []string{"code_execution", "system_access", "personal_data"} {
+		for _, value := range brief.Risks {
+			if key == value {
+				risks = append(risks, key)
+				break
+			}
+		}
+	}
+	brief.Steps, brief.Risks = steps, risks
+	if brief.ReaderBenefit == "" && brief.Demo == "" && brief.Angle == "" && len(steps) == 0 && len(risks) == 0 {
+		return ""
+	}
+	data, _ := json.Marshal(brief)
+	return string(data)
 }
 
 func summaryTitle(raw, brief string) string {

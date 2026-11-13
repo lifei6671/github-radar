@@ -14,6 +14,7 @@ func TestPublicationRequiresEndedPeriodAndDistinctObservationDays(t *testing.T) 
 		cutoff   string
 		required int
 	}{
+		{Daily, "2026-11-12", "2026-11-13", 1},
 		{Weekly, "2026-W46", "2026-11-16", 5},
 		{Monthly, "2026-11", "2026-12-01", 23},
 		{Monthly, "2026-12", "2027-01-01", 24},
@@ -29,6 +30,9 @@ func TestPublicationRequiresEndedPeriodAndDistinctObservationDays(t *testing.T) 
 			test.kind.PublicationStatus(test.key, required-1, cutoff.AddDate(0, 0, 5), config.DefaultReportPublication()) != Preview ||
 			test.kind.PublicationStatus(test.key, required, cutoff, config.DefaultReportPublication()) != Published {
 			t.Fatalf("%s 正式出刊必须同时满足时间和覆盖", test.key)
+		}
+		if test.kind.LatestDueKey(cutoff) != test.key || test.kind.LatestDueKey(cutoff.Add(-time.Second)) >= test.key {
+			t.Fatalf("%s 不能在收口之前进入组稿: %s", test.kind, test.key)
 		}
 	}
 }

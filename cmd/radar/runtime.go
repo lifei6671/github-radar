@@ -17,6 +17,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/embedding"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
@@ -122,7 +123,7 @@ func newCollector(db *gorm.DB, cfg config.Config, logger *slog.Logger, backgroun
 	if err != nil {
 		return nil, nil, err
 	}
-	queue := collectionstore.Queue{DB: db, Cfg: cfg.Scheduler}
+	queue := collectionstore.Queue{DB: db, Cfg: cfg.Scheduler, StarHistory: true, ObservationExactMinutes: &cfg.Metrics.Day.Exact}
 	if background {
 		queue.Pacing = storage.JobPacing{
 			{Key: "search", Types: []string{consts.JobDiscoverSearch}, Gap: 2 * time.Second,
@@ -130,11 +131,13 @@ func newCollector(db *gorm.DB, cfg config.Config, logger *slog.Logger, backgroun
 			{Key: "trending", Types: []string{consts.JobDiscoverTrending}, Gap: 2 * time.Second},
 			{Key: "sampling", Types: []string{consts.JobRefreshRepo}, Gap: time.Second,
 				Resource: gh.RepoRefreshResource, Window: time.Hour, Budget: cfg.GitHub.RepoSoftBudgetPerHour},
+			{Key: "star-history", Types: []string{consts.JobStarHistory}, Gap: 10 * time.Second,
+				Resource: gh.StarHistoryResource, Window: time.Hour, Budget: metrics.StarHistoryBudget, Burst: 4},
 		}
 	}
 	return &collector.Engine{
 		Queue:  queue,
-		GitHub: client, Trending: trending.New(time.Duration(cfg.GitHub.TimeoutSeconds) * time.Second),
+		GitHub: client, History: client, Trending: trending.New(time.Duration(cfg.GitHub.TimeoutSeconds) * time.Second),
 		Cfg: cfg, Logger: logger,
 	}, client, nil
 }

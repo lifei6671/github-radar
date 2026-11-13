@@ -95,11 +95,23 @@ export interface RepoDetail extends Repo {
   summaryModel?: string | null
   summaryAvailable?: boolean
   discoveryEvents?: DiscoveryEvent[]
+  observationHistory?: ObservationTransition[]
   sourceReadmeUrl: string | null
   readme: RepoReadme
   features: string[]
   audience: string[]
   aiTopics: string[]
+}
+
+export interface ObservationTransition {
+  id: number
+  at: string
+  fromState: Repo['state']
+  toState: Repo['state']
+  fromGrade: Repo['grade']
+  toGrade: Repo['grade']
+  reason: string
+  evidence: { stars: number; exact24h?: number; lastSignalAt?: number; requestedGrade?: Repo['grade'] }
 }
 
 export interface DiscoveryEvent {
@@ -130,6 +142,37 @@ export interface TrendPoint {
 }
 
 export interface Trend { points: TrendPoint[]; resolution: Resolution; updatedAt: string }
+
+export interface StarHistoryDay {
+  date: string
+  count: number | null
+  state: 'complete' | 'partial' | 'missing'
+}
+
+export interface StarBreakout {
+  source: 'local_net_24h' | 'github_daily_stars'
+  value: number
+  at: number
+  startAt: number
+  coveredDays: number
+  baseline: number | null
+  ratio: number | null
+  absolute: boolean
+  minimum: number
+  direct: number
+  minimumRatio: number
+  minimumDays: number
+  smoothing: number
+}
+
+export interface StarHistory {
+  days: StarHistoryDay[]
+  breakout: StarBreakout | null
+  fetchedAt?: string
+  errorCode?: string | null
+  jobId?: number
+  gradeEvidence?: StarBreakout
+}
 
 export interface Page<T> { items: T[]; nextCursor: string | null; updatedAt: string | null }
 export interface Items<T> { items: T[] }
@@ -172,6 +215,15 @@ export interface Topic {
   topicScore: number
   hotnessScore: number | null
   recommendationScore: number | null
+  growth24h?: number | null
+  scoreVersion?: number
+  suggestion?: 'prepare' | 'candidate' | 'observe'
+  assessment?: {
+    revision?: string
+    dimensions: { key: string; points: number; maximum: number; source: string; confidence: string; evidence: string }[]
+    brief: { readerBenefit?: string; demo?: string; angle?: string; steps?: string[]; risks?: string[] }
+  }
+  review?: { verification?: 'pending' | 'verified' | 'failed'; evidence?: string; override?: string }
   status: TopicStatus
   feedback: string | null
   reviewedAt: string | null
@@ -180,6 +232,12 @@ export interface Topic {
 }
 
 export interface TopicDay { day: string; title: string; count: number }
+
+export interface TopicEvidence {
+  events: DiscoveryEvent[]
+  trending: { source: string; period: string; rank: number; at: string }[]
+  history: (Pick<Topic, 'id' | 'status' | 'feedback' | 'topicScore' | 'scoreVersion' | 'review' | 'sourceUrl'> & { archivedAt: string })[]
+}
 
 export interface Limits {
   githubConfigured: boolean
@@ -231,5 +289,32 @@ export interface RuleSetting {
   enabled: boolean
   intervalMinutes: number
   priority: number
+  ageWindow?: '' | '0-3' | '4-14' | '15-30'
+}
+
+export interface DiscoveryRun {
+  id: number
+  sourceType: RuleSetting['sourceType']
+  sourceKey: string
+  pass: 'primary' | 'backfill'
+  plannedAt: string
+  startedAt: string | null
+  finishedAt: string | null
+  createdFrom: string | null
+  createdUntil: string | null
+  delayMs: number | null
+  upstreamTotal: number | null
+  plannedShards: number
+  completedShards: number
+  uniqueRepos: number
+  newRepos: number
+  status: JobStatus
+  errorCode: string | null
+  complete: boolean
+}
+
+export interface DiscoveryRuns {
+  items: DiscoveryRun[]
+  alerts: { sourceType: RuleSetting['sourceType']; sourceKey: string; reason: 'consecutive_failures' | 'quota_backlog' | 'not_run' }[]
 }
 export interface ListSettings<T> { revision: number; items: T[] }

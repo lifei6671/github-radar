@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/reports"
@@ -63,8 +62,8 @@ type ArchiveEntry struct {
 func (s Store) Windows(ctx context.Context, since string) ([]reports.PublishedWindow, error) {
 	var rows []Edition
 	err := s.DB.WithContext(ctx).Select("issue_date", "window_end").
-		Where("issue_date >= ? OR issue_date = (SELECT max(issue_date) FROM daily_reports WHERE issue_date < ?)", since, since).
-		Order("issue_date").Find(&rows).Error
+		Where("issue_date >= ? AND EXISTS (?)", since, s.DB.Model(&Item{}).Select("1").
+			Where("daily_report_items.issue_date = daily_reports.issue_date")).Find(&rows).Error
 	windows := make([]reports.PublishedWindow, 0, len(rows))
 	for _, row := range rows {
 		windows = append(windows, reports.PublishedWindow{Date: row.IssueDate, End: time.UnixMilli(row.WindowEnd)})
@@ -76,8 +75,14 @@ func (s Store) Windows(ctx context.Context, since string) ([]reports.PublishedWi
 func (s Store) Publish(ctx context.Context, window reports.Window) error {
 	return s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var existing Edition
-		if err := tx.Select("issue_date").Find(&existing, "issue_date = ?", window.Date).Error; err != nil || existing.IssueDate != "" {
+		if err := tx.Find(&existing, "issue_date = ?", window.Date).Error; err != nil {
 			return err
+		}
+		if existing.IssueDate != "" && existing.WindowEnd == window.End.UnixMilli() {
+			var count int64
+			if err := tx.Model(&Item{}).Where("issue_date = ?", window.Date).Count(&count).Error; err != nil || count > 0 {
+				return err
+			}
 		}
 		from, to := window.Start.UnixMilli(), window.End.UnixMilli()
 		official, err := trendingItems(tx, from, to)
@@ -103,6 +108,14 @@ func (s Store) Publish(ctx context.Context, window reports.Window) error {
 		}
 		entries := append(official, recent...)
 		if len(entries) == 0 {
+			if existing.IssueDate != "" && existing.WindowEnd != to {
+				// 已校正但无可用证据的旧期次保留刊号，后续摘要就绪时可补写。
+				if err := tx.Where("issue_date = ?", window.Date).Delete(&Item{}).Error; err != nil {
+					return err
+				}
+				return tx.Model(&existing).Updates(map[string]any{"window_end": to, "generated_at": window.GeneratedAt.UnixMilli(),
+					"observed_from": 0, "observed_to": 0}).Error
+			}
 			return nil
 		}
 		edition := Edition{IssueDate: window.Date, WindowEnd: to, GeneratedAt: window.GeneratedAt.UnixMilli(),
@@ -125,12 +138,17 @@ SELECT min(observed_at) AS first, max(observed_at) AS last FROM (
 			edition.ObservedFrom = min(edition.ObservedFrom, *observed.First)
 			edition.ObservedTo = max(edition.ObservedTo, *observed.Last)
 		}
-		if err := tx.Model(&Edition{}).Select("COALESCE(max(issue_number),0)+1").Scan(&edition.IssueNumber).Error; err != nil {
+		edition.IssueNumber = existing.IssueNumber
+		if existing.IssueDate == "" {
+			if err := tx.Model(&Edition{}).Select("COALESCE(max(issue_number),0)+1").Scan(&edition.IssueNumber).Error; err != nil {
+				return err
+			}
+		} else if err := tx.Where("issue_date = ?", window.Date).Delete(&Item{}).Error; err != nil {
 			return err
 		}
-		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&edition)
-		if result.Error != nil || result.RowsAffected == 0 {
-			return result.Error
+		// 重建旧时间窗时复用刊号，正文证据与期次元数据一起提交。
+		if err := tx.Save(&edition).Error; err != nil {
+			return err
 		}
 		return tx.Create(&entries).Error
 	})

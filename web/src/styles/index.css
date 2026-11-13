@@ -704,6 +704,9 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent-t
 .trend-chart { width: 100%; height: 294px; margin-top: 8px; }
 .chart-note, .summary-meta { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
 .chart-note { justify-content: space-between; padding: 4px 0; }
+.star-history-panel { display: grid; gap: 12px; padding-top: 16px; margin-top: 8px; border-top: var(--border); min-width: 0; }
+.star-history-panel h3, .star-source-title { font-size: 14px; font-weight: 650; }
+.star-breakout { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 12px; color: var(--ink-muted); }
 .summary-body { white-space: pre-line; overflow-wrap: anywhere; color: var(--prose); line-height: 1.85; }
 .summary-meta { font-size: 12px; color: var(--ink-muted); }
 .summary-footer { border-top: var(--border); padding-top: 12px; }
@@ -759,6 +762,14 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent-t
 .topic-footer { justify-content: space-between; border-top: var(--border); padding-top: 7px; }
 .topic-form { display: grid; gap: 8px; grid-template-columns: minmax(130px, .35fr) minmax(0, 1fr); padding-top: 8px; border-top: var(--border); }
 .topic-form .action-row, .topic-form .notice { grid-column: 1 / -1; }
+.topic-form .topic-override { grid-column: 1 / -1; }
+.topic-review-section { border-top: var(--border); padding-block: 7px; }
+.topic-review-section > summary { cursor: pointer; width: fit-content; }
+.topic-review-section > :not(summary) { margin-top: 8px; }
+.topic-review-section a:hover { color: var(--accent-text); }
+.topic-dimensions { display: grid; gap: 5px; }
+.topic-dimensions > div { display: grid; grid-template-columns: 7rem 5rem minmax(0, 1fr); gap: 4px 10px; align-items: baseline; }
+.topic-review-steps { list-style: decimal; padding-inline-start: 1.35rem; }
 .daily-layout { min-width: 0; --daily-rule: .5px solid var(--control-line); }
 .daily-archive { display: none; }
 .daily-reader { min-width: 0; max-width: 1160px; margin-inline: auto; }
@@ -1349,6 +1360,8 @@ fieldset.backup-stack { border: 0; margin: 0; padding: 0; }
   .topic-edition-stats .text-button { min-height: 44px; }
   .trend-chart { height: 223px; }
   .topic-form { grid-template-columns: 1fr; }
+  .topic-dimensions > div { grid-template-columns: 1fr auto; }
+  .topic-dimensions > div > :last-child { grid-column: 1 / -1; }
   .login-form { gap: 13px; }
 }
 @media (hover: none) {

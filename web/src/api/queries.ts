@@ -145,6 +145,7 @@ export async function withdrawPublicRepo(queryClient: QueryClient, id: number) {
     query.queryKey[2] === 'public' && isRepoDetail(query, id) }
   await queryClient.cancelQueries(aliases)
   queryClient.setQueriesData(aliases, null)
+  queryClient.removeQueries({ queryKey: ['star-history', id], predicate: ({ queryKey }) => queryKey[3] === 'public' })
   await resetPublicRepoLists(queryClient)
 }
 
@@ -185,6 +186,7 @@ export function useRepoBlock(id: number) {
         client.invalidateQueries({ queryKey: ['readme', id] }),
         ...(!blocked ? [client.invalidateQueries({ queryKey: [similarReposKey] })] : []),
         client.invalidateQueries({ queryKey: ['trend', id] }),
+        client.invalidateQueries({ queryKey: ['star-history', id] }),
         client.invalidateQueries({ queryKey: ['jobs'] }),
         client.invalidateQueries({ queryKey: ['limits'] }),
       ])

@@ -13,6 +13,7 @@ type AISummary struct {
 	FeaturesJSON         string  `gorm:"column:features_json"`
 	AudienceJSON         string  `gorm:"column:audience_json"`
 	ValueTagsJSON        string  `gorm:"column:value_tags_json"`
+	EditorialBriefJSON   string  `gorm:"column:editorial_brief_json"`
 	SourceReadmeURL      *string `gorm:"column:source_readme_url"`
 	ModelProvider        string  `gorm:"column:model_provider"`
 	ModelName            string  `gorm:"column:model_name"`
@@ -102,22 +103,36 @@ type AICall struct {
 func (AICall) TableName() string { return AICallTable }
 
 type TopicCandidate struct {
-	ID                int64    `gorm:"column:id;primaryKey;autoIncrement"`
-	RepoID            int64    `gorm:"column:repo_id"`
-	AngleKey          string   `gorm:"column:angle_key"`
-	TitleZh           string   `gorm:"column:title_zh"`
-	ReaderValue       string   `gorm:"column:reader_value"`
-	SourceURL         string   `gorm:"column:source_url"`
-	SourceFingerprint *string  `gorm:"column:source_fingerprint"`
-	Reason            string   `gorm:"column:reason"`
-	TopicScore        float64  `gorm:"column:topic_score"`
-	HotnessScore      *float64 `gorm:"column:hotness_score"`
-	Growth24h         *int64   `gorm:"column:growth_24h"`
-	Status            string   `gorm:"column:status"`
-	Feedback          *string  `gorm:"column:feedback"`
-	ReviewedAt        *int64   `gorm:"column:reviewed_at"`
-	CreatedAt         int64    `gorm:"column:created_at;autoCreateTime:false"`
-	UpdatedAt         int64    `gorm:"column:updated_at;autoUpdateTime:false"`
+	ID                  int64    `gorm:"column:id;primaryKey;autoIncrement"`
+	RepoID              int64    `gorm:"column:repo_id"`
+	AngleKey            string   `gorm:"column:angle_key"`
+	TitleZh             string   `gorm:"column:title_zh"`
+	ReaderValue         string   `gorm:"column:reader_value"`
+	SourceURL           string   `gorm:"column:source_url"`
+	SourceFingerprint   *string  `gorm:"column:source_fingerprint"`
+	Reason              string   `gorm:"column:reason"`
+	TopicScore          float64  `gorm:"column:topic_score"`
+	HotnessScore        *float64 `gorm:"column:hotness_score"`
+	Growth24h           *int64   `gorm:"column:growth_24h"`
+	Status              string   `gorm:"column:status"`
+	Feedback            *string  `gorm:"column:feedback"`
+	ReviewedAt          *int64   `gorm:"column:reviewed_at"`
+	CreatedAt           int64    `gorm:"column:created_at;autoCreateTime:false"`
+	UpdatedAt           int64    `gorm:"column:updated_at;autoUpdateTime:false"`
+	ScoreVersion        int      `gorm:"column:score_version;default:1"`
+	ScoreDetailsJSON    string   `gorm:"column:score_details_json"`
+	EditorialReviewJSON string   `gorm:"column:editorial_review_json"`
+	ReleaseKey          string   `gorm:"column:release_key"`
 }
 
 func (TopicCandidate) TableName() string { return TopicCandidateTable }
+
+// TopicReviewHistory 保存重入前的状态、评分和人工复核。
+type TopicReviewHistory struct {
+	ID           int64 `gorm:"primaryKey"`
+	TopicID      int64
+	ArchivedAt   int64
+	SnapshotJSON string
+}
+
+func (TopicReviewHistory) TableName() string { return "topic_review_history" }

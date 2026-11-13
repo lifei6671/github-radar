@@ -7,6 +7,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -24,9 +25,22 @@ func (q Queue) SetBlocked(ctx context.Context, id int64, blocked bool, now time.
 		values := map[string]any{storage.RepositoryColumns.Blocked: blocked, storage.RepositoryColumns.UpdatedAt: at}
 		if blocked && repo.State == consts.StatusActive {
 			values[storage.RepositoryColumns.State] = consts.StatusPaused
+			if q.Cfg.ObservationPool {
+				if err := storage.RecordObservation(tx, repo, consts.StatusPaused, repo.Grade, "blocked", at,
+					metrics.ObservationEvidence{Stars: repo.Stars}); err != nil {
+					return err
+				}
+			}
+		}
+		if blocked {
+			values["observation_probe_due_at"] = 0
 		}
 		if !blocked {
 			values[storage.RepositoryColumns.NextFetchAt] = at
+			if q.Cfg.ObservationPool && repo.FirstNotFoundAt != nil {
+				// 解除屏蔽后恢复尚未完成的公开身份复核。
+				values["observation_probe_due_at"] = max(at, *repo.FirstNotFoundAt+metrics.Hour)
+			}
 		}
 		if err := tx.Model(&repo).Updates(values).Error; err != nil {
 			return err
@@ -38,7 +52,7 @@ func (q Queue) SetBlocked(ctx context.Context, id int64, blocked bool, now time.
 
 		unfinished := tx.Model(&storage.Job{}).Select(storage.JobColumns.ID).Where(
 			storage.JobColumns.RepoID+"=? AND "+storage.JobColumns.Type+" IN ? AND "+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusRunning+"','"+consts.StatusFailed+"')", id,
-			[]string{consts.JobRefreshRepo, consts.JobRefreshSummary, consts.JobTranslateReadme})
+			[]string{consts.JobRefreshRepo, consts.JobRefreshSummary, consts.JobTranslateReadme, consts.JobStarHistory})
 		// 请求已经发出的 AI 台账保留为待确认，解除屏蔽后仍需人工确认可能的计费。
 		if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.JobID+" IN (?) AND "+storage.AICallColumns.Status+"='"+consts.StatusSending+"'", unfinished).
 			Updates(map[string]any{storage.AICallColumns.Status: consts.StatusUnknown, storage.AICallColumns.ErrorCode: consts.CodeAIDeliveryUnknown, storage.AICallColumns.UpdatedAt: at}).Error; err != nil {

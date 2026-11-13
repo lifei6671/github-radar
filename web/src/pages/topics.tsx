@@ -2,11 +2,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronDown, Download } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
-import { api, errorText } from '../api/client'
+import { api, ApiError, errorText } from '../api/client'
 import { distinct, useTopics } from '../api/queries'
 import { PageTitle } from '../components/page-title'
 import type { Items, Topic, TopicDay, TopicStatus } from '../api/types'
 import { External } from '../components/repo'
+import { TopicAssessment, TopicSources } from '../components/topic-review'
 import { ActionButton, Badge, Empty, More, Notice, PageError, Skeleton } from '../components/ui'
 import { decimal, githubLink, number, repoPath, timestamp, topicLabel } from '../lib/format'
 
@@ -26,8 +27,9 @@ export function Topics() {
   const archive = days.data?.items ?? []
   const day = params.get('day') || archive[0]?.day
   const active = archive.find((item) => item.day === day)
+  const ranked = params.get('sort') !== 'date'
 
-  function choose(key: 'day' | 'status', value: string) {
+  function choose(key: 'day' | 'status' | 'sort', value: string) {
     const next = new URLSearchParams(params)
     if (value) next.set(key, value)
     else next.delete(key)
@@ -41,7 +43,7 @@ export function Topics() {
       {days.error && !days.data ? <PageError error={days.error} retry={() => { void days.refetch() }} /> :
         days.isPending ? <Skeleton /> : <>
           {days.error && <Notice error>{errorText(days.error)}</Notice>}
-          {day ? <TopicEdition day={day} total={active?.count} status={status} /> :
+          {day ? <TopicEdition day={day} total={active?.count} status={status} ranked={ranked} onSort={(value) => choose('sort', value)} /> :
             <EmptyTopics />}
         </>}
     </div>
@@ -102,9 +104,10 @@ function EmptyTopics() {
   return <Empty title="暂无匹配的选题"><Link className="button" to="/admin/repos">浏览项目<ArrowUpRight size={16} /></Link></Empty>
 }
 
-function TopicEdition({ day, total, status }: { day: string; total?: number; status?: TopicStatus }) {
+function TopicEdition({ day, total, status, ranked, onSort }: { day: string; total?: number; status?: TopicStatus; ranked: boolean; onSort: (value: string) => void }) {
   const criteria = new URLSearchParams({ limit: '30', day })
   if (status) criteria.set('status', status)
+  if (ranked) criteria.set('sort', 'score')
   const query = useTopics(criteria)
   const items = distinct(query.data?.pages.flatMap((page) => page.items) ?? [])
   const [lead, ...rest] = items
@@ -118,6 +121,9 @@ function TopicEdition({ day, total, status }: { day: string; total?: number; sta
       {status && <span>{topicLabel[status]}</span>}
       {query.hasNextPage && <span>已加载 {number(items.length)} 个</span>}
       {items.length > 0 && <div className="action-row">
+        <label className="field">排序<select value={ranked ? '' : 'date'} onChange={(event) => onSort(event.target.value)}>
+          <option value="">选题分</option><option value="date">入池时间</option>
+        </select></label>
         <button className="text-button" title="导出当前已加载选题" onClick={() => download(items, 'md')}><Download size={14} />Markdown</button>
         <button className="text-button" title="导出当前已加载选题" onClick={() => download(items, 'json')}><Download size={14} />JSON</button>
       </div>}
@@ -151,12 +157,25 @@ function TopicCard({ topic, lead = false }: { topic: Topic; lead?: boolean }) {
   const from = location.pathname + location.search
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
-  const [draft, setDraft] = useState({ status: topic.status, feedback: topic.feedback ?? '' })
+  const initialDraft = () => ({
+    status: topic.status, feedback: topic.feedback ?? '', verification: topic.review?.verification ?? '',
+    verificationEvidence: topic.review?.evidence ?? '', overrideReason: topic.review?.override ?? '',
+    assessmentRevision: topic.assessment?.revision,
+    expectedUpdatedAt: topic.updatedAt,
+  })
+  const [draft, setDraft] = useState(initialDraft)
   const save = useMutation({
-    mutationFn: () => api<Pick<Topic, 'id' | 'status'>>('/topics/' + topic.id, { method: 'PATCH', body: draft }),
+    mutationFn: (rescore: boolean) => api<Pick<Topic, 'id' | 'status'>>('/topics/' + topic.id, {
+      method: 'PATCH', body: rescore ? { rescore: true, expectedUpdatedAt: topic.updatedAt } : draft,
+    }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['topics'] })
       setEditing(false)
+    },
+    onError: (error) => {
+      if (error instanceof ApiError && error.code === 'topic_edit_conflict') {
+        void queryClient.invalidateQueries({ queryKey: ['topics'] })
+      }
     },
   })
   return <article id={'topic-item-' + topic.id} className={'topic-card' + (lead ? ' panel topic-lead-card' : '')}>
@@ -170,17 +189,29 @@ function TopicCard({ topic, lead = false }: { topic: Topic; lead?: boolean }) {
     <div className="context-tags repo-tags">{topic.valueTags.map((tag) => <Link className="context-chip" key={tag} to={'/admin/repos?' + new URLSearchParams({ tag })}>{tag}</Link>)}</div>
     <div className="topic-evidence">
       <span>{topic.reason}</span>
-      <span>选题分 <strong className="numeric">{decimal(topic.topicScore)}</strong></span>
-      {topic.hotnessScore !== null && <span>热度 <strong className="numeric">{decimal(topic.hotnessScore)}</strong></span>}
+      <span>选题分 <strong className="numeric">{decimal(topic.topicScore)}</strong>{(topic.scoreVersion ?? 1) === 1 && '（旧版）'}</span>
+      {topic.suggestion && <Badge>{suggestionLabel[topic.suggestion]}</Badge>}
+      {topic.hotnessScore !== null && <span>全局热度 <strong className="numeric">{decimal(topic.hotnessScore)}</strong></span>}
       {topic.recommendationScore !== null && <span>推荐分 <strong className="numeric">{decimal(topic.recommendationScore)}</strong></span>}
     </div>
+    <TopicAssessment topic={topic} />
+    <TopicSources topic={topic} from={from} />
     {topic.feedback && !editing && <p className="feedback-text">反馈：{topic.feedback}</p>}
-    {editing ? <form className="topic-form" onSubmit={(event) => { event.preventDefault(); if (!save.isPending) save.mutate() }}>
+    {editing ? <form className="topic-form" onSubmit={(event) => { event.preventDefault(); if (!save.isPending) save.mutate(false) }}>
       <label className="field">状态<select value={draft.status} disabled={save.isPending} onChange={(event) => setDraft({ ...draft, status: event.target.value as TopicStatus })}>
         {statusList.map((key) => <option key={key} value={key}>{topicLabel[key]}</option>)}
       </select></label>
       <label className="field feedback-field">反馈<textarea value={draft.feedback} disabled={save.isPending} rows={2} maxLength={500}
         onChange={(event) => setDraft({ ...draft, feedback: event.target.value })} /></label>
+      <label className="field">人工核验<select value={draft.verification} disabled={save.isPending}
+        onChange={(event) => setDraft({ ...draft, verification: event.target.value })}>
+        <option value="">待验证</option><option value="verified">通过</option><option value="failed">未通过</option>
+      </select></label>
+      <label className="field">实测结果或证据<textarea value={draft.verificationEvidence} disabled={save.isPending}
+        required={draft.verification === 'verified' || draft.verification === 'failed'} rows={2} maxLength={500}
+        onChange={(event) => setDraft({ ...draft, verificationEvidence: event.target.value })} /></label>
+      <label className="field topic-override">覆盖建议理由<textarea value={draft.overrideReason} disabled={save.isPending} rows={2} maxLength={500}
+        onChange={(event) => setDraft({ ...draft, overrideReason: event.target.value })} /></label>
       <div className="action-row">
         <button type="button" className="button" disabled={save.isPending} onClick={() => setEditing(false)}>取消</button>
         <ActionButton type="submit" className="button primary" pending={save.isPending}>保存反馈</ActionButton>
@@ -188,14 +219,20 @@ function TopicCard({ topic, lead = false }: { topic: Topic; lead?: boolean }) {
       {save.error && <Notice error>{errorText(save.error)}</Notice>}
     </form> : <footer className="topic-footer">
       <span className="muted minor">更新于 {timestamp(topic.updatedAt)}</span>
-      <button className="button" onClick={() => {
-        setDraft({ status: topic.status, feedback: topic.feedback ?? '' })
+      <div className="action-row">
+      {topic.status !== 'published' && <ActionButton type="button" className="button" pending={save.isPending} onClick={() => save.mutate(true)}>重新评分</ActionButton>}
+      <button className="button" disabled={save.isPending} onClick={() => {
+        setDraft(initialDraft())
         save.reset()
         setEditing(true)
       }}>编辑状态与反馈</button>
+      </div>
+      {save.error && <Notice error>{errorText(save.error)}</Notice>}
     </footer>}
   </article>
 }
+
+const suggestionLabel = { prepare: '优先准备', candidate: '进入候选', observe: '继续观察' }
 
 function download(items: Topic[], format: 'md' | 'json') {
   // 导出当前已加载的条目与已保存摘要，证据只包含来源链接。

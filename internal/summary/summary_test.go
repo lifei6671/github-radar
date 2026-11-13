@@ -45,9 +45,12 @@ type sourceFixture struct {
 	unsolicited304         bool
 	onRead                 func()
 	shaFailures            int
+	identityChecks         int
+	versionChecks          int
 }
 
 func (s *sourceFixture) RepositoryByID(_ context.Context, id int64, _ gh.Policy) (gh.RepositoryResult, error) {
+	s.identityChecks++
 	return gh.RepositoryResult{Repository: &sdk.Repository{ID: &id, FullName: new("owner/project"),
 		Description: &s.description, Private: &s.private, Topics: s.topics}}, nil
 }
@@ -71,6 +74,7 @@ func (s *sourceFixture) Readme(_ context.Context, _, _, etag string, _ int, _ gh
 }
 
 func (s *sourceFixture) ReadmeSHA(context.Context, string, string, string, gh.Policy) (string, error) {
+	s.versionChecks++
 	if s.shaFailures > 0 {
 		s.shaFailures--
 		return "", &gh.Failure{Code: consts.CodeGitHubNetwork}
@@ -817,18 +821,18 @@ func TestShortReadmeCanProduceGroundedRecommendation(t *testing.T) {
 func TestModelInputBudgetAndCopiedSource(t *testing.T) {
 	s := source{fullName: strings.Repeat("a", 39) + "/" + strings.Repeat("b", 100), language: "en",
 		description: strings.Repeat("description ", 200), body: strings.TrimSpace(readmeText), quality: sufficient}
-	prompt, sent := s.prompt(config.DefaultSummary().InputTokens, true, false)
+	prompt, sent := s.prompt(config.DefaultSummary().InputTokens, true, false, true)
 	task, _, _ := strings.Cut(prompt, "\n")
 	if sent.body == "" || sent.description == "" || !strings.Contains(prompt, sent.body) ||
-		!strings.Contains(task, "目标 80 至 160 个字符") ||
+		!strings.Contains(task, "目标 80 至 160 个字符") || !strings.Contains(task, "editorial_brief") ||
 		len(prompt)+len(systemPrompt)+128 > config.DefaultSummary().InputTokens {
 		t.Fatal("提示词须在预算内携带真实证据")
 	}
 	const lowBudget = 2048
 	s.body = strings.Repeat(readmeText, 10)
-	prompt, sent = s.prompt(lowBudget, true, true)
+	prompt, sent = s.prompt(lowBudget, true, true, true)
 	task, _, _ = strings.Cut(prompt, "\n")
-	if sent.body == "" || sent.quality != incomplete || !strings.Contains(task, "目标 50 至 80 个字符") ||
+	if sent.body == "" || sent.quality != incomplete || !strings.Contains(task, "目标 50 至 80 个字符") || strings.Contains(task, "editorial_brief") ||
 		len(prompt)+len(systemPrompt)+128 > lowBudget {
 		t.Fatal("低输入预算截断正文时应保留证据并允许短摘要")
 	}

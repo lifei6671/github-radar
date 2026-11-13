@@ -117,7 +117,7 @@ func TestDailySelectionAndReentry(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := db.Take(&first, "id=?", first.ID).Error; err != nil || first.Status != "candidate" ||
-		first.Feedback == nil || *first.Feedback != feedback || first.ReviewedAt == nil ||
+		first.Feedback != nil || first.ReviewedAt != nil || first.CreatedAt != next.UnixMilli() ||
 		first.ReaderValue != "工作流" || first.SourceFingerprint == nil || *first.SourceFingerprint != "readme:old" {
 		t.Fatal("明显增长回到候选时应保留人工记录")
 	}
@@ -155,5 +155,56 @@ func TestDailySelectionAndReentry(t *testing.T) {
 	var count int64
 	if err := db.Model(&storage.TopicCandidate{}).Where("repo_id=1").Count(&count).Error; err != nil || count != 1 {
 		t.Fatal("重新进入不应制造重复选题")
+	}
+	var history []storage.TopicReviewHistory
+	if err := db.Where("topic_id = ?", first.ID).Find(&history).Error; err != nil || len(history) != 2 {
+		t.Fatalf("每次重新入池须保留原状态和评分: %+v %v", history, err)
+	}
+	// 人工记录的发布链接即使没有新增长，也能成为一次独立重入证据。
+	if err := db.Model(&first).Update("status", "published").Error; err != nil {
+		t.Fatal(err)
+	}
+	link := "https://github.com/owner/repo-1/releases/tag/v2.0.0"
+	if err := db.Model(&storage.Repository{}).Where("repo_id = ?", 1).Update("html_url", "https://github.com/owner/repo-1").Error; err != nil {
+		t.Fatal(err)
+	}
+	next = next.AddDate(0, 0, 1)
+	if err := db.Table("repo_discovery_events").Create(map[string]any{"repo_id": 1, "source_type": "manual",
+		"source_key": link, "source_url": link, "first_observed_at": next.UnixMilli(), "note": ""}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&marker).Update("updated_at", next.UnixMilli()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, next); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Take(&first, "id=?", first.ID).Error; err != nil || first.Status != "candidate" || first.ReleaseKey != link ||
+		first.Reason != "发现新的 GitHub 发布记录" {
+		t.Fatalf("应按新发布链接重入: %+v %v", first, err)
+	}
+	for i, variant := range []string{"https://github.com/OWNER/repo-1/releases/tag/v2.0.0/?utm_source=test#notes",
+		"https://github.com/owner/repo-1/releases/tag/v3.0.0", "https://github.com/owner/repo-1/releases/tag/v2.0.0#repost"} {
+		next = next.AddDate(0, 0, 1)
+		if err := db.Model(&first).Update("status", "published").Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Table("repo_discovery_events").Create(map[string]any{"repo_id": 1, "source_type": "manual",
+			"source_key": variant, "source_url": variant, "first_observed_at": next.UnixMilli(), "note": ""}).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&marker).Update("updated_at", next.UnixMilli()).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, next); err != nil {
+			t.Fatal(err)
+		}
+		want := "published"
+		if i == 1 {
+			want = "candidate"
+		}
+		if err := db.Take(&first, "id=?", first.ID).Error; err != nil || first.Status != want {
+			t.Fatalf("只有新的发布版本可以重新入池: %s %+v %v", variant, first, err)
+		}
 	}
 }

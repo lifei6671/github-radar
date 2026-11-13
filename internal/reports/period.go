@@ -38,13 +38,29 @@ func ObservationDate(at int64) string {
 	return time.UnixMilli(at).In(beijing).Format(time.DateOnly)
 }
 
-// PublicationPolicy 统计周期的实际观测日，等下一期日报在北京时间 08:00 截稿。
+// LatestDueKey 返回截至北京时间 08:00 已收口的最近一期。
+func (k Kind) LatestDueKey(now time.Time) string {
+	anchor := now.In(beijing).Add(-8 * time.Hour)
+	day := time.Date(anchor.Year(), anchor.Month(), anchor.Day(), 0, 0, 0, 0, beijing)
+	switch k {
+	case Weekly:
+		day = day.AddDate(0, 0, -(int(day.Weekday())+6)%7)
+	case Monthly:
+		day = day.AddDate(0, 0, 1-day.Day())
+	}
+	return k.Key(day.AddDate(0, 0, -1))
+}
+
+// PublicationPolicy 统计已结束周期的实际观测日，次日北京时间 08:00 起允许出刊。
 func (k Kind) PublicationPolicy(key string, rules config.ReportPublication) (cutoff time.Time, requiredDays int) {
 	from, end, valid := k.Bounds(key)
-	if !valid || k == Daily {
+	if !valid {
 		return time.Time{}, 1
 	}
-	requiredDays = rules.WeeklyMinDays
+	requiredDays = 1
+	if k == Weekly {
+		requiredDays = rules.WeeklyMinDays
+	}
 	if k == Monthly {
 		days := int(end.Sub(from).Hours() / 24)
 		requiredDays = (days*rules.MonthlyMinCoverage + 99) / 100
@@ -54,7 +70,7 @@ func (k Kind) PublicationPolicy(key string, rules config.ReportPublication) (cut
 
 func (k Kind) PublicationStatus(key string, days int, now time.Time, rules config.ReportPublication) string {
 	cutoff, required := k.PublicationPolicy(key, rules)
-	if k == Daily || (!now.Before(cutoff) && days >= required) {
+	if !cutoff.IsZero() && !now.Before(cutoff) && days >= required {
 		return Published
 	}
 	return Preview

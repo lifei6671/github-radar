@@ -13,6 +13,13 @@ var gradeNames = []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.Gr
 type Repository struct {
 	ID              int64
 	Grade           string
+	State           string
+	Stars           int
+	Language        string
+	Followed        bool
+	LastSuccessAt   *int64
+	LastSignalAt    int64
+	PausedAt        int64
 	BelowGradeSince *int64
 	FirstNotFoundAt *int64
 	NextFetchAt     int64
@@ -23,6 +30,10 @@ type GradeChange struct {
 	Grade           string
 	BelowGradeSince *int64
 	NextFetchAt     *int64
+	Breakout        *Breakout
+	State           string
+	Reason          string
+	Evidence        ObservationEvidence
 }
 
 func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calculation, asOf int64) []GradeChange {
@@ -53,7 +64,7 @@ func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calc
 		desired := 3
 		delta := growth(row.Delta24h)
 		switch {
-		case exact(i) && (delta >= int64(cfg.HotGrowth) || (rank < cfg.TopGrowthRepos && delta > 0)):
+		case row.Breakout != nil || exact(i) && (delta >= int64(cfg.HotGrowth) || (rank < cfg.TopGrowthRepos && delta > 0)):
 			desired = 0
 		case exact(i) && delta >= int64(cfg.ActiveGrowth), row.CandidateBurst:
 			desired = 1
@@ -84,6 +95,9 @@ func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calc
 		if n := cmp.Compare(a.desired, b.desired); n != 0 {
 			return n
 		}
+		if n := cmp.Compare(exactInt(rows[b.index].Breakout != nil), exactInt(rows[a.index].Breakout != nil)); n != 0 {
+			return n
+		}
 		return cmp.Compare(score(rows[b.index].HotnessScore), score(rows[a.index].HotnessScore))
 	})
 	for _, item := range list {
@@ -103,6 +117,9 @@ func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calc
 			continue
 		}
 		change := GradeChange{RepoID: repo.ID, Grade: grade, BelowGradeSince: item.since}
+		if grade == consts.GradeS && repo.Grade != consts.GradeS {
+			change.Breakout = rows[item.index].Breakout
+		}
 		if level < slices.Index(gradeNames, repo.Grade) && repo.FirstNotFoundAt == nil {
 			next := min(asOf, repo.NextFetchAt)
 			change.NextFetchAt = &next

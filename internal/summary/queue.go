@@ -37,9 +37,10 @@ type Queue struct {
 }
 
 type payload struct {
-	Manual     bool `json:"manual,omitempty"`
-	Force      bool `json:"force,omitempty"`
-	TopicsOnly bool `json:"topicsOnly,omitempty"`
+	Manual          bool   `json:"manual,omitempty"`
+	Force           bool   `json:"force,omitempty"`
+	TopicsOnly      bool   `json:"topicsOnly,omitempty"`
+	ReadmeVerifySHA string `json:"readmeVerifySHA,omitempty"`
 }
 
 func jobTopicsOnly(job storage.Job) bool {
@@ -316,43 +317,53 @@ WHERE %[2]s='%[7]s' AND %[8]s IN (
 }
 
 func (q Queue) claim(ctx context.Context, now time.Time, withModel, withRepo bool) (*storage.Job, error) {
-	job, _, err := q.claimWork(ctx, now, withModel, withRepo, withModel)
+	job, _, err := q.claimWork(ctx, now, withModel, withRepo, withModel, withModel)
 	return job, err
 }
 
-func (q Queue) claimWork(ctx context.Context, now time.Time, withModel, withRepo, withSummary bool) (*storage.Job, bool, error) {
+func (q Queue) claimWork(ctx context.Context, now time.Time, withModel, withRepo, withSummary, withTranslation bool) (*storage.Job, bool, error) {
 	return q.Pacing.ClaimWithLocalFallback(q.DB.WithContext(ctx), now,
 		func(db *gorm.DB, deferred []string) (*storage.Job, error) {
-			return q.claimReady(db, now, withModel, withRepo, deferred, false)
+			return q.claimReady(db, now, withModel, withRepo, deferred, false, false)
 		}, func(db *gorm.DB, deferred []string) (*storage.Job, error) {
-			if !withRepo || !withSummary || q.AI.Summary.AutoDailyCalls == 0 || !slices.Contains(deferred, JobType) {
+			if !withRepo || q.AI.Summary.AutoDailyCalls == 0 {
 				return nil, nil
 			}
-			return q.claimReady(db, now, withModel, withRepo, nil, true)
+			themes := withSummary && slices.Contains(deferred, JobType)
+			translations := withTranslation && slices.Contains(deferred, TranslationJob)
+			if !themes && !translations {
+				return nil, nil
+			}
+			return q.claimReady(db, now, withModel, withRepo, nil, themes, translations)
 		})
 }
 
-func (q Queue) claimReady(db *gorm.DB, now time.Time, withModel, withRepo bool, deferred []string, localOnly bool) (*storage.Job, error) {
+func (q Queue) claimReady(db *gorm.DB, now time.Time, withModel, withRepo bool, deferred []string, localThemes, localTranslations bool) (*storage.Job, error) {
 	var job storage.Job
 	var localFilter string
 	var localArgs []any
-	if localOnly {
-		// 本地回填只使用当前有效的正文。额度用完时，仅允许复用本日已预留的调用。
+	if localThemes || localTranslations {
+		// 本地任务只使用当前有效的正文。额度用完时，仅允许复用本日已预留的调用。
 		start := now.UTC().Truncate(24 * time.Hour)
 		calls := db.Model(&storage.AICall{}).Where("origin = ? AND reserved_at >= ? AND reserved_at < ?",
 			consts.OriginAuto, start.UnixMilli(), start.Add(24*time.Hour).UnixMilli())
-		localFilter = ` AND type = ? AND repo_id IN (?) AND ((?) < ? OR EXISTS (?))`
-		localArgs = []any{JobType, cachedThemeRepos(db), calls.Session(&gorm.Session{}).Select("COUNT(*)"), q.AI.Summary.AutoDailyCalls,
+		localFilter = ` AND COALESCE(json_extract(payload_json,'$.manual'),0)=0
+AND ((? AND type = ? AND repo_id IN (?)) OR (? AND type = ? AND repo_id IN (?) AND ` + translationNeedsModel + `))
+AND ((?) < ? OR EXISTS (?))`
+		localArgs = []any{localThemes, JobType, cachedThemeRepos(db), localTranslations, TranslationJob, q.cachedTranslationRepos(db),
+			calls.Session(&gorm.Session{}).Select("COUNT(*)"), q.AI.Summary.AutoDailyCalls,
 			calls.Session(&gorm.Session{}).Select("1").Where("job_id = jobs.id AND status = ? AND provider = ?", consts.StatusReserved, ProviderKey(q.AI))}
 	}
-	args := []any{rand.Text(), now.Add(time.Duration(q.LeaseSeconds) * time.Second).UnixMilli(), now.UnixMilli(), JobType, TranslationJob, ReportJob, now.UnixMilli(), withRepo, ReportJob, withModel, JobType, now.UnixMilli(), ReportJob, storage.AutoAIResumeKey, deferred, JobType, TranslationJob, ReportJob, now.UnixMilli(), ReportJob}
+	args := []any{rand.Text(), now.Add(time.Duration(q.LeaseSeconds) * time.Second).UnixMilli(), now.UnixMilli(), JobType, TranslationJob, ReportJob, now.UnixMilli(), withRepo, ReportJob, withModel, JobType, TranslationJob, now.UnixMilli(), ReportJob, storage.AutoAIResumeKey, deferred, JobType, TranslationJob, ReportJob, now.UnixMilli(), ReportJob}
 	args = append(args, localArgs...)
-	args = append(args, JobType, JobType)
+	args = append(args, ReportJob, TranslationJob, TranslationJob, now.Add(-time.Hour).UnixMilli(), JobType, JobType)
+	// 已译完的发布复核优先收尾。积压超过一个来源预算窗口的译文也能逐步出队。
 	err := db.Raw(fmt.Sprintf(`
 UPDATE %[1]s SET %[2]s='%[3]s',%[4]s=%[4]s+1,%[5]s=?,%[6]s=?,%[7]s=?
 WHERE %[8]s=(SELECT %[8]s FROM %[1]s WHERE %[9]s IN (?,?,?) AND %[4]s<%[10]s AND %[11]s<=?
 AND (? OR %[9]s=?)
-AND (? OR (%[9]s=? AND COALESCE(json_extract(%[18]s,'$.manual'),0)=0))
+AND (? OR (%[9]s=? AND COALESCE(json_extract(%[18]s,'$.manual'),0)=0)
+ OR (%[9]s=? AND NOT `+translationNeedsModel+`))
 AND (%[2]s IN ('%[12]s','%[13]s') OR (%[2]s='%[3]s' AND %[6]s<=?))
 AND (%[9]s=? OR EXISTS(SELECT 1 FROM %[14]s r WHERE r.%[15]s=%[1]s.%[16]s AND r.%[17]s=0))
 AND (json_extract(%[1]s.%[18]s,'$.manual')=1 OR NOT EXISTS(
@@ -369,6 +380,9 @@ AND NOT EXISTS(SELECT 1 FROM %[1]s sibling WHERE (
  OR (%[1]s.%[9]s=? AND sibling.%[2]s='%[26]s'
   AND json_extract(sibling.%[18]s,'$.fingerprint')=json_extract(%[1]s.%[18]s,'$.fingerprint'))))%[28]s
 ORDER BY (%[27]s>=200) DESC,
+(%[9]s=?) DESC,
+(%[9]s=? AND NOT `+translationNeedsModel+`) DESC,
+(%[9]s=? AND created_at<=?) DESC,
 CASE WHEN %[9]s=? AND EXISTS (
  SELECT 1 FROM ai_summaries s LEFT JOIN repo_readme_documents d ON d.repo_id=s.repo_id
  LEFT JOIN summary_checks c ON c.repo_id=s.repo_id

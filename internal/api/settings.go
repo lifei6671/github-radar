@@ -16,11 +16,13 @@ import (
 
 func (a *collectionAPI) registerSettings(system *gin.RouterGroup) {
 	system.GET("/settings", a.getRuntime)
+	system.GET("/observation-replay", a.observationReplay)
 	system.PUT("/settings", a.putRuntime)
 	system.GET("/categories", a.getCategorySettings)
 	system.PUT("/categories", a.putCategorySettings)
 	system.GET("/discovery-rules", a.getDiscoveryRules)
 	system.PUT("/discovery-rules", a.putDiscoveryRules)
+	system.GET("/discovery-runs", a.discoveryRuns)
 	system.GET("/discovery-tabs", a.getDiscoveryTabSettings)
 	system.PUT("/discovery-tabs", a.putDiscoveryTabSettings)
 	system.GET("/project-themes", a.getProjectThemeSettings)

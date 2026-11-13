@@ -91,6 +91,17 @@ SELECT %[2]s,%[3]s,%[4]s FROM %[1]s WHERE %[5]s<? ORDER BY %[5]s LIMIT ?)`,
 	if err := cleanJobs(db, age(cfg.FinishedJobDays), age(cfg.DeadJobDays), cfg.BatchRows); err != nil {
 		return err
 	}
+	for {
+		ids := db.Model(&storage.DiscoveryRuleRun{}).Select("id").
+			Where("finished_at > 0 AND finished_at < ?", discovery).Order("finished_at").Limit(cfg.BatchRows)
+		result := db.Where("id IN (?)", ids).Delete(&storage.DiscoveryRuleRun{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected < int64(cfg.BatchRows) {
+			break
+		}
+	}
 	return cleanCandidates(db, age(cfg.CandidateDays), min(cfg.BatchRows, 100))
 }
 
@@ -103,6 +114,8 @@ func cleanJobs(db *gorm.DB, finished, dead int64, limit int) error {
 ((%[1]s IN ('%[2]s','%[3]s') AND %[4]s<?) OR (%[1]s='%[5]s' AND %[4]s<?))
 AND NOT EXISTS(SELECT 1 FROM %[6]s a WHERE a.%[7]s=%[8]s.%[9]s AND a.%[10]s IN ('%[11]s','%[12]s','%[13]s'))`,
 				storage.JobColumns.Status, consts.StatusSucceeded, consts.StatusCanceled, storage.JobColumns.UpdatedAt, consts.StatusDead, storage.AICallTable, storage.AICallColumns.JobID, storage.JobTable, storage.JobColumns.ID, storage.AICallColumns.Status, consts.StatusUnknown, consts.StatusSending, consts.StatusReserved), finished, dead).
+				Where("NOT EXISTS (?)", tx.Model(&storage.DiscoveryRuleRun{}).Select("1").
+					Where("discovery_rule_runs.id = jobs.discovery_run_id AND finished_at = 0")).
 				Order(storage.JobColumns.UpdatedAt+","+storage.JobColumns.ID).Limit(limit).Pluck(storage.JobColumns.ID, &ids).Error; err != nil || len(ids) == 0 {
 				return err
 			}
@@ -122,6 +135,7 @@ func cleanTopics(db *gorm.DB, cutoff int64, limit int) error {
 	for {
 		ids := db.Model(&storage.TopicCandidate{}).Select(t.ID).
 			Where(t.Status+"=? AND "+t.ReviewedAt+" IS NULL AND "+t.UpdatedAt+"<?", consts.StatusCandidate, cutoff).
+			Where("NOT EXISTS (?)", db.Model(&storage.TopicReviewHistory{}).Select("1").Where("topic_review_history.topic_id = topic_candidates.id")).
 			Order(t.UpdatedAt).Order(t.ID).Limit(limit)
 		res := db.Where(t.ID+" IN (?)", ids).Delete(&storage.TopicCandidate{})
 		if res.Error != nil || res.RowsAffected < int64(limit) {

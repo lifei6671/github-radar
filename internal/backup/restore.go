@@ -159,7 +159,11 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 	if err != nil {
 		return "", ErrDatabase
 	}
-	if _, err := (settings.Store{DB: db}).Initialize(ctx, m.cfg); err != nil {
+	store := settings.Store{DB: db}
+	if _, err := store.Initialize(ctx, m.cfg); err != nil {
+		return "", ErrDatabase
+	}
+	if err := store.InstallEarlyDiscovery(ctx, time.Now()); err != nil {
 		return "", ErrDatabase
 	}
 	if setup {
@@ -235,6 +239,10 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 func resetWork(tx *gorm.DB, at int64) error {
 	if err := tx.Model(&storage.Job{}).Where(storage.JobColumns.Status+" IN ?", []string{consts.StatusPending, consts.StatusRunning, consts.StatusFailed, consts.StatusUnknown}).
 		Updates(map[string]any{storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LastErrorCode: consts.CodeRestoreReset, storage.JobColumns.LeaseToken: nil, storage.JobColumns.LeaseUntil: nil, storage.JobColumns.UpdatedAt: at}).Error; err != nil {
+		return ErrDatabase
+	}
+	if err := tx.Model(&storage.DiscoveryRuleRun{}).Where("finished_at = 0").
+		Updates(map[string]any{"status": consts.StatusCanceled, "finished_at": at, "error_code": consts.CodeRestoreReset}).Error; err != nil {
 		return ErrDatabase
 	}
 	if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.Status+" IN ?", []string{consts.StatusReserved, consts.StatusSending, consts.StatusUnknown}).

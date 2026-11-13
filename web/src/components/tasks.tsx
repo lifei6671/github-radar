@@ -16,7 +16,7 @@ function ongoing(status: Job['status'] | undefined) {
   return status === 'pending' || status === 'running' || status === 'failed'
 }
 
-function useRepoTask(repoId: number, kind: 'refresh' | 'summary' | 'readme/translate', existing: number | null = null, repoUpdatedAt?: number) {
+function useRepoTask(repoId: number, kind: 'refresh' | 'summary' | 'readme/translate' | 'star-history', existing: number | null = null, repoUpdatedAt?: number) {
   const queryClient = useQueryClient()
   const [tracked, setTracked] = useState<number | null>(null)
   const [cached, setCached] = useState(false)
@@ -63,6 +63,7 @@ function useRepoTask(repoId: number, kind: 'refresh' | 'summary' | 'readme/trans
     notified.current = event
     void refreshRepo(queryClient, repoId)
     void queryClient.invalidateQueries({ queryKey: ['jobs'] })
+    if (kind === 'star-history') void queryClient.invalidateQueries({ queryKey: ['star-history', repoId] })
   }, [gone, jobId, kind, queryClient, repoId, status])
 
   const submit = useMutation({
@@ -103,6 +104,17 @@ function useRepoTask(repoId: number, kind: 'refresh' | 'summary' | 'readme/trans
     submit, retry, job, jobId, gone, status, cached,
     busy: submit.isPending || retry.isPending || Boolean(jobId && !gone && (job.isPending || ongoing(status))),
   }
+}
+
+// 回补的下一页在上一页结算时入队，刷新历史查询可接续展示最新任务。
+export function StarHistoryAction({ repoId, existing }: { repoId: number; existing?: number }) {
+  const task = useRepoTask(repoId, 'star-history', existing)
+  return <div className="task-area">
+    <ActionButton disabled={task.busy} pending={task.submit.isPending}
+      onClick={() => task.submit.mutate(false)}>回补 GitHub 历史</ActionButton>
+    {task.busy && <TaskStatus task={task} />}
+    {task.submit.error && <Notice error>{errorText(task.submit.error)}</Notice>}
+  </div>
 }
 
 type Task = ReturnType<typeof useRepoTask>

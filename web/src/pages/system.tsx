@@ -28,7 +28,7 @@ export function System() {
 }
 
 const resourceNames: Record<string, string> = {
-  core: 'GitHub Core', search: 'GitHub Search', repo_refresh: '仓库采样', readme_check: 'README 检查', github_secondary: '次级限流',
+  core: 'GitHub Core', search: 'GitHub Search', repo_refresh: '仓库采样', readme_check: 'README 检查', star_history: 'Star 历史', github_secondary: '次级限流',
 }
 
 type RateResource = Limits['items'][number]
@@ -153,6 +153,7 @@ function ObservedTime({ value }: { value?: string | null }) {
 const jobTypes: Record<string, string> = {
   refresh_repo: '仓库采样', discover_trending: 'Trending 发现', discover_search: 'Search 发现',
   discover_manual: '人工发现',
+  star_history: 'GitHub Star 历史',
   refresh_readme_summary: '中文摘要',
   translate_readme: 'README 翻译',
   compose_report: '报刊组稿',

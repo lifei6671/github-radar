@@ -15,6 +15,13 @@ var searchTokens = regexp.MustCompile(`(?:[^\s"]+|"(?:[^"\\]|\\.)*")+`)
 // SearchQuery 返回空查询时，现有规则与门槛的交集为空。
 func (p Payload) SearchQuery() (string, error) {
 	query := p.Query
+	if p.AgeWindow != "" {
+		for _, token := range searchTokens.FindAllString(query, -1) {
+			if name, _, ok := strings.Cut(token, ":"); ok && strings.EqualFold(strings.TrimLeft(name, "+-"), "created") {
+				return "", fmt.Errorf("启用滚动年龄窗口时，查询中不能再设置 created 限定词")
+			}
+		}
+	}
 	if p.StarFloor > 0 || p.StarRange {
 		floor, ceiling := p.StarFloor, math.MaxInt
 		if p.StarRange {

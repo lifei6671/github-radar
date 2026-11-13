@@ -7,24 +7,29 @@ import (
 )
 
 type Calculation struct {
-	RepoID             int64
-	Delta1h            *int64
-	Delta24h           *int64
-	Delta7d            *int64
-	Delta30d           *int64
-	RelativeGrowth     *float64
-	Acceleration       *float64
-	PersistenceScore   *float64
-	DailyConcentration *float64
-	TrendingFrequency  int
-	TrendingStreak     int
-	TrendingRank       *int
-	TrendingScore      *float64
-	HotnessScore       *float64
-	CandidateBurst     bool
-	DataQuality        string
-	CalculatedAt       int64
-	Windows            map[string]Window
+	RepoID              int64
+	Delta1h             *int64
+	Delta24h            *int64
+	Delta7d             *int64
+	Delta30d            *int64
+	RelativeGrowth      *float64
+	Acceleration        *float64
+	PersistenceScore    *float64
+	DailyConcentration  *float64
+	TrendingFrequency   int
+	TrendingStreak      int
+	TrendingRank        *int
+	TrendingScore       *float64
+	HotnessScore        *float64
+	CandidateBurst      bool
+	Breakout            *Breakout
+	DataQuality         string
+	CalculatedAt        int64
+	Windows             map[string]Window
+	ObservationDays     []Window
+	ObservationQuiet    bool
+	ObservationGrowth   Window
+	ObservationBreakout *Breakout
 }
 
 func ptr(value float64) *float64 { return &value }

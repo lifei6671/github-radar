@@ -34,6 +34,7 @@ type TrendingSource interface {
 type Engine struct {
 	Queue    port.Queue
 	GitHub   GitHubSource
+	History  StarHistorySource
 	Trending TrendingSource
 	Cfg      config.Config
 	Logger   *slog.Logger
@@ -202,7 +203,7 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 		}
 		return true, err
 	}
-	if job.Type != consts.JobRefreshRepo && !lifecycle.Stopping(ctx) {
+	if job.Type != consts.JobRefreshRepo && job.Type != consts.JobStarHistory && !lifecycle.Stopping(ctx) {
 		// 新发现的仓库立即安排首采，无需等待下一个五分钟扫描。
 		return true, e.Queue.Schedule(ctx, time.Now())
 	}
@@ -223,6 +224,8 @@ func (e *Engine) execute(ctx context.Context, job storage.Job) (port.Change, err
 		return e.discoverTrending(ctx, payload)
 	case consts.JobDiscoverManual:
 		return e.discoverManual(ctx, job, payload)
+	case consts.JobStarHistory:
+		return e.starHistory(ctx, job, payload)
 	default:
 		return nil, errors.New("未支持的采集任务")
 	}

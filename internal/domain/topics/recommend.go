@@ -1,7 +1,6 @@
 package topics
 
 import (
-	"math"
 	"slices"
 	"strings"
 	"time"
@@ -10,48 +9,59 @@ import (
 )
 
 type Candidate struct {
-	ID                int64
-	RepoID            int64
-	AngleKey          string
-	TitleZh           string
-	ReaderValue       string
-	SourceURL         string
-	SourceFingerprint *string
-	Reason            string
-	TopicScore        float64
-	HotnessScore      *float64
-	Growth24h         *int64
-	Status            string
-	Feedback          *string
-	ReviewedAt        *int64
-	CreatedAt         int64
-	UpdatedAt         int64
+	ID                  int64
+	RepoID              int64
+	AngleKey            string
+	TitleZh             string
+	ReaderValue         string
+	SourceURL           string
+	SourceFingerprint   *string
+	Reason              string
+	TopicScore          float64
+	HotnessScore        *float64
+	Growth24h           *int64
+	Status              string
+	Feedback            *string
+	ReviewedAt          *int64
+	CreatedAt           int64
+	UpdatedAt           int64
+	ScoreVersion        int
+	ScoreDetailsJSON    string
+	EditorialReviewJSON string
+	ReleaseKey          string
 }
 
 type Signals struct {
-	RepoID                     int64
-	FullName, HTMLURL          string
-	StarredByUser              bool
-	Description, LicenseSPDXID *string
-	DiscoveredAt               int64
-	GitHubPushedAt             *int64
-	Hotness, Persistence       *float64
-	Growth                     *int64
-	TrendingRank               *int
-	TitleZh, Summary           string
-	Features                   []string
-	Fingerprint, SourceURL     *string
+	RepoID                 int64
+	FullName, HTMLURL      string
+	StarredByUser          bool
+	Description            *string
+	DiscoveredAt           int64
+	GitHubPushedAt         *int64
+	Hotness, Persistence   *float64
+	Growth                 *int64
+	TrendingRank           *int
+	TitleZh                string
+	Features               []string
+	Audience               []string
+	Brief                  Brief
+	ReleaseKey             string
+	ReleaseObservedAt      int64
+	UnseenRelease          bool
+	GitHubCreatedAt        *int64
+	Fingerprint, SourceURL *string
+	ObservedFingerprint    *string
 }
 
 type option struct {
 	Signals
-	previous Candidate
-	score    float64
-	groups   [4]bool
+	previous   Candidate
+	assessment Assessment
+	groups     [4]bool
 }
 
 func Manual(row Signals, now time.Time) Candidate {
-	candidate := candidateFor(option{Signals: row, score: topicScore(row, now)}, 4, now.UnixMilli())
+	candidate := candidateFor(option{Signals: row, assessment: Assess(row, Review{}, now)}, 4, now.UnixMilli())
 	reviewedAt := now.UnixMilli()
 	candidate.ReviewedAt = &reviewedAt
 	return candidate
@@ -61,69 +71,82 @@ func Recommend(rows []Signals, byRepo map[int64]Candidate, limit, threshold int,
 	options := make([]option, 0, len(rows))
 	for _, row := range rows {
 		prev := byRepo[row.RepoID]
-		if prev.ID != 0 && prev.Status != consts.StatusCandidate && !materialChange(prev, row, threshold) {
+		reentry := ReentryReason(prev, row, threshold)
+		if prev.ID != 0 && prev.Status != consts.StatusCandidate && reentry == "" {
+			continue
+		}
+		// 有人工核验的待选项目保留核验时的证据版本，直到它离开候选或管理员显式重新评分。
+		if prev.ID != 0 && prev.Status == consts.StatusCandidate &&
+			slices.Contains([]string{"verified", "failed"}, prev.Review().Verification) {
 			continue
 		}
 		groups := [4]bool{row.Growth != nil && *row.Growth > 0, row.TrendingRank != nil,
 			row.Persistence != nil && *row.Persistence > 0, row.StarredByUser}
+		if !slices.Contains(groups[:], true) && reentry != "" {
+			groups[0] = true
+		}
+		if prev.ID == 0 && row.ReleaseKey != "" {
+			groups[0] = true
+		}
 		if !slices.Contains(groups[:], true) {
 			continue
 		}
-		options = append(options, option{row, prev, topicScore(row, now), groups})
+		review := prev.Review()
+		if prev.ID != 0 && prev.Status != consts.StatusCandidate {
+			review = Review{}
+		}
+		options = append(options, option{row, prev, Assess(row, review, now), groups})
 	}
 	picks := selectTopics(options, limit)
 	result := make([]Candidate, 0, len(picks))
 	for _, pick := range picks {
-		result = append(result, candidateFor(options[pick.index], pick.group, now.UnixMilli()))
+		row := options[pick.index]
+		candidate := candidateFor(row, pick.group, now.UnixMilli())
+		if row.previous.ID != 0 && row.previous.Status != consts.StatusCandidate {
+			candidate.Reason, candidate.EditorialReviewJSON = ReentryReason(row.previous, row.Signals, threshold), ""
+			candidate.CreatedAt, candidate.Feedback, candidate.ReviewedAt = now.UnixMilli(), nil, nil
+		} else if row.previous.ID == 0 && row.ReleaseKey != "" {
+			candidate.Reason = "记录了 GitHub 发布链接"
+		}
+		if risks := row.previous.Assessment().Brief.Risks; len(risks) > 0 {
+			// 即使新导读尚未生成，重入也保留已知风险及其对应的核验要求。
+			for _, risk := range risks {
+				if !slices.Contains(row.Brief.Risks, risk) {
+					row.Brief.Risks = append(row.Brief.Risks, risk)
+				}
+			}
+			slices.Sort(row.Brief.Risks)
+			row.assessment.Brief.Risks = row.Brief.Risks
+			row.assessment.Revision = EditorialRevision(row.Signals)
+			candidate.SetAssessment(row.assessment)
+		}
+		result = append(result, candidate)
 	}
 	return result
 }
 
-func materialChange(previous Candidate, row Signals, threshold int) bool {
+// ReentryReason 保留这次再次入池的具体依据。
+func ReentryReason(previous Candidate, row Signals, threshold int) string {
+	if previous.ID == 0 {
+		return ""
+	}
+	if row.UnseenRelease && row.ReleaseKey != "" && row.ReleaseKey != previous.ReleaseKey {
+		return "发现新的 GitHub 发布记录"
+	}
 	// 已处理项目需要已确认的 README 变动或精确净增的明显抬升。
 	if previous.SourceFingerprint != nil && row.Fingerprint != nil &&
 		strings.HasPrefix(*previous.SourceFingerprint, consts.ReadmeFingerprintPrefix) && strings.HasPrefix(*row.Fingerprint, consts.ReadmeFingerprintPrefix) &&
 		*row.Fingerprint != *previous.SourceFingerprint && readerValue(row) != previous.ReaderValue {
-		return true
+		return "README 与功能证据发生变化"
 	}
 	before := int64(0)
 	if previous.Growth24h != nil {
 		before = max(*previous.Growth24h, 0)
 	}
-	return row.Growth != nil && *row.Growth-before >= int64(threshold)
-}
-
-func topicScore(row Signals, now time.Time) float64 {
-	features := row.Features
-	// 评分基于可见证据的启发式信号，缺少实测时保持中性值。
-	value := 25.0 + float64(min(len(features), 5))*10
-	if row.StarredByUser {
-		value += 20
+	if row.Growth != nil && *row.Growth-before >= int64(threshold) {
+		return "24 小时精确净增明显抬升"
 	}
-	demo, repeat, evidence, novel := 25.0, 20.0, 20.0, 30.0
-	if row.SourceURL != nil {
-		demo += 25
-		repeat += 20
-		evidence += 35
-	}
-	if row.LicenseSPDXID != nil && *row.LicenseSPDXID != "" && *row.LicenseSPDXID != "NOASSERTION" {
-		repeat += 25
-	}
-	if row.Summary != "" {
-		demo += 20
-		evidence += 25
-	}
-	if row.Description != nil && strings.TrimSpace(*row.Description) != "" {
-		value += 15
-		evidence += 10
-	}
-	if row.DiscoveredAt >= now.AddDate(0, 0, -7).UnixMilli() {
-		novel += 35
-	}
-	if row.GitHubPushedAt != nil && *row.GitHubPushedAt >= now.AddDate(0, 0, -30).UnixMilli() {
-		novel += 25
-	}
-	return .35*min(value, 100) + .25*demo + .20*repeat + .10*novel + .10*evidence
+	return ""
 }
 
 type selection struct{ index, group int }
@@ -134,7 +157,7 @@ func selectTopics(rows []option, limit int) []selection {
 		order[i] = i
 	}
 	slices.SortFunc(order, func(a, b int) int {
-		left, right := combined(rows[a]), combined(rows[b])
+		left, right := rows[a].assessment.Total(), rows[b].assessment.Total()
 		if left > right {
 			return -1
 		}
@@ -176,20 +199,15 @@ func selectTopics(rows []option, limit int) []selection {
 	return picks
 }
 
-func combined(row option) float64 {
-	if row.Hotness == nil {
-		return row.score
-	}
-	hotness := *row.Hotness
-	return .4*hotness + .6*row.score
-}
-
 func candidateFor(row option, group int, now int64) Candidate {
 	candidate := row.previous
 	if candidate.ID == 0 {
 		candidate.RepoID, candidate.AngleKey, candidate.CreatedAt = row.RepoID, consts.TopicAngleProject, now
 	}
 	candidate.Status, candidate.UpdatedAt = consts.StatusCandidate, now
+	if row.previous.ID != 0 {
+		candidate.UpdatedAt = max(now, row.previous.UpdatedAt+1)
+	}
 	// 摘要待更新时保留上一组来源证据，后续重入判断需要比较同一版本的指纹和功能。
 	if row.Fingerprint != nil || candidate.SourceFingerprint == nil {
 		candidate.SourceFingerprint = row.Fingerprint
@@ -204,7 +222,10 @@ func candidateFor(row option, group int, now int64) Candidate {
 		candidate.ReaderValue = readerValue(row.Signals)
 	}
 	candidate.Reason = []string{"24 小时精确净增长", "近期进入 GitHub Trending", "近期有可确认的日增长", "管理员已关注", "人工加入选题池"}[group]
-	candidate.TopicScore = math.Round(row.score*100) / 100
+	if row.ReleaseKey != "" {
+		candidate.ReleaseKey = row.ReleaseKey
+	}
+	candidate.SetAssessment(row.assessment)
 	candidate.HotnessScore, candidate.Growth24h = row.Hotness, row.Growth
 	return candidate
 }

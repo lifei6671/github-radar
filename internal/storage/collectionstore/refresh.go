@@ -10,6 +10,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/collector/port"
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/domain/collection"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -38,12 +39,31 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 		values := map[string]any{storage.RepositoryColumns.LastCheckedAt: at, storage.RepositoryColumns.UpdatedAt: at}
 		if state.ConfirmedMissing(failureStatus, at) {
 			values[storage.RepositoryColumns.State] = consts.StatusUnavailable
+			if w.queue.Cfg.ObservationPool {
+				if err := storage.RecordObservation(tx, current, consts.StatusUnavailable, current.Grade, "github_unavailable", at, metrics.ObservationEvidence{Stars: current.Stars}); err != nil {
+					return err
+				}
+				values["observation_probe_due_at"] = 0
+			}
 		}
 		if state.FirstNotFoundAt == nil {
 			values[storage.RepositoryColumns.FirstNotFoundAt] = at
+			if w.queue.Cfg.ObservationPool && failureStatus == 404 && current.State != consts.StatusActive && state.CanMonitor() {
+				values["observation_probe_due_at"] = at + metrics.Hour
+			}
 		}
 		values[storage.RepositoryColumns.NextFetchAt] = observed.Add(time.Hour).UnixMilli()
-		return tx.Model(&current).Updates(values).Error
+		if err := tx.Model(&current).Updates(values).Error; err != nil {
+			return err
+		}
+		if p.ObservationProbe {
+			var next int64
+			if failureStatus == 404 && state.FirstNotFoundAt == nil {
+				next = at + metrics.Hour
+			}
+			return finishObservationProbe(tx, current.RepoID, p, next)
+		}
+		return nil
 	}
 
 	values := map[string]any{
@@ -67,7 +87,7 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 			if !updateCurrent {
 				return nil
 			}
-			if err := detachName(tx, baseline.RepoID, at); err != nil {
+			if err := w.queue.detachName(tx, current, at); err != nil {
 				return err
 			}
 			if hidden {
@@ -83,6 +103,12 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 		stars, forks = source.GetStargazersCount(), source.GetForksCount()
 		if current.State == consts.StatusUnavailable || current.State == consts.StatusAddressPending {
 			values[storage.RepositoryColumns.State] = consts.StatusPaused
+			if w.queue.Cfg.ObservationPool {
+				if err := storage.RecordObservation(tx, current, consts.StatusPaused, current.Grade, "identity_restored", at,
+					metrics.ObservationEvidence{Stars: stars}); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	sample := storage.RepoSnapshot{RepoID: current.RepoID, SampleSlot: collection.Slot(p.PlannedAt), ObservedAt: at, Stars: stars, Forks: forks}
@@ -96,7 +122,7 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 		var occupied storage.Repository
 		err := tx.Take(&occupied, storage.RepositoryColumns.FullName+" = ? COLLATE NOCASE AND "+storage.RepositoryColumns.NameIsCurrent+"=1 AND "+storage.RepositoryColumns.RepoID+"<>?", result.Repository.GetFullName(), current.RepoID).Error
 		if err == nil {
-			if err := detachName(tx, occupied.RepoID, at); err != nil {
+			if err := w.queue.detachName(tx, occupied, at); err != nil {
 				return err
 			}
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -105,6 +131,22 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 	}
 	if err := tx.Model(&current).Updates(values).Error; err != nil {
 		return err
+	}
+	if p.ObservationProbe {
+		var next int64
+		// 以实际首采时刻约定复采，排队或限流延迟不会改变 24 小时的比较起点。
+		if w.queue.Cfg.ObservationPool && !p.ObservationFollowup &&
+			(current.State != consts.StatusActive || current.Grade == consts.GradeC) {
+			next = at + metrics.Day
+		}
+		if err := finishObservationProbe(tx, current.RepoID, p, next); err != nil {
+			return err
+		}
+	} else if w.queue.Cfg.ObservationPool && state.FirstNotFoundAt != nil {
+		// 人工采样先恢复身份时，清理原探测的复核计划。
+		if err := tx.Model(&current).Update("observation_probe_due_at", 0).Error; err != nil {
+			return err
+		}
 	}
 	if err := tx.Take(&current, storage.RepositoryColumns.RepoID+" = ?", current.RepoID).Error; err != nil {
 		return err

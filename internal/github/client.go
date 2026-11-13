@@ -21,9 +21,10 @@ import (
 
 // Failure 为队列提供可持久化错误码和上游恢复时刻。
 type Failure struct {
-	Code   string
-	Status int
-	Until  int64
+	Code        string
+	Status      int
+	Until       int64
+	SearchTotal *int
 }
 
 func (f *Failure) Error() string {
@@ -121,8 +122,13 @@ func (c *Client) Search(ctx context.Context, query string, page int) (SearchPage
 	if err != nil {
 		return SearchPage{}, err
 	}
-	if response.StatusCode != http.StatusOK || result.Total == nil || result.GetIncompleteResults() {
-		return SearchPage{}, &Failure{Code: consts.CodeGitHubIncompleteSearch, Status: response.StatusCode}
+	const pageSize = 50
+	count := len(result.Repositories)
+	expected := min(pageSize, max(0, result.GetTotal()-(page-1)*pageSize))
+	if response.StatusCode != http.StatusOK || result.Total == nil || result.GetTotal() < 0 ||
+		result.Repositories == nil && result.GetTotal() > 0 || result.GetIncompleteResults() ||
+		result.GetTotal() <= 1000 && (count < expected || response.NextPage == 0 && result.GetTotal() > page*pageSize) {
+		return SearchPage{}, &Failure{Code: consts.CodeGitHubIncompleteSearch, Status: response.StatusCode, SearchTotal: result.Total}
 	}
 	return SearchPage{result.Repositories, result.GetTotal(), response.NextPage}, nil
 }

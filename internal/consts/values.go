@@ -35,6 +35,7 @@ const (
 	JobDiscoverSearch   = "discover_search"
 	JobDiscoverTrending = "discover_trending"
 	JobDiscoverManual   = "discover_manual"
+	JobStarHistory      = "star_history"
 	JobRefreshSummary   = "refresh_readme_summary"
 	JobTranslateReadme  = "translate_readme"
 	JobComposeReport    = "compose_report"

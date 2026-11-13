@@ -48,6 +48,7 @@ func read(tx *gorm.DB) (Snapshot, error) {
 	snapshot.Settings.Embedding = config.DefaultEmbedding()
 	snapshot.Settings.Recommendations = config.DefaultRecommendations()
 	snapshot.Settings.ReportPublication = config.DefaultReportPublication()
+	snapshot.Settings.Scheduler.MaxCooling = config.DefaultCoolingCapacity
 	snapshot.DiscoverySelection = defaultDiscoverySelection()
 	snapshot.DiscoveryRanking = defaultDiscoveryRanking()
 	if err := json.Unmarshal([]byte(row.ValueJSON), &snapshot); err != nil {

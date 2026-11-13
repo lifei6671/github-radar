@@ -64,6 +64,7 @@ type LatestMetric struct {
 	TrendingScore      *float64 `gorm:"column:trending_score"`
 	HotnessScore       *float64 `gorm:"column:hotness_score"`
 	CandidateBurst     bool     `gorm:"column:candidate_burst"`
+	BreakoutJSON       string   `gorm:"column:breakout_json"`
 	DataQuality        string   `gorm:"column:data_quality"`
 	WindowDetailsJSON  string   `gorm:"column:window_details_json"`
 	CalculatedAt       int64    `gorm:"column:calculated_at"`

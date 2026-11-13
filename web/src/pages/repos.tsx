@@ -268,6 +268,13 @@ export function Repos() {
         </AnimatedPills>
         {search}
       </div>
+      <div className="list-actions">
+        <label className="select-label"><span className="sr-only">爆发信号</span>
+          <select value={params.get('breakout') ?? ''} onChange={(event) => change('breakout', event.target.value)}>
+            <BreakoutOptions />
+          </select>
+        </label>
+      </div>
       {tag && <button type="button" className="badge badge-accent repo-tag-filter" aria-label={'清除标签筛选 ' + tag}
         onClick={() => change('tag', '')}><span>#{tag}</span><X size={14} aria-hidden /></button>}
       {categoryError}
@@ -290,7 +297,12 @@ function CategoryTabs({ items, selected, onSelect }: {
   </AnimatedPills>
 }
 
-const filterKeys = ['grade', 'language', 'state', 'tag', 'blocked']
+const filterKeys = ['grade', 'language', 'state', 'tag', 'blocked', 'breakout']
+
+function BreakoutOptions() {
+  return <><option value="">全部爆发状态</option><option value="local">本地 24h 净增确认</option>
+    <option value="github">GitHub 历史日 Star 待确认</option></>
+}
 
 function RepoFilterPopover({ params, activeCount, onApply }: {
   params: URLSearchParams; activeCount: number; onApply: (value: URLSearchParams) => void
@@ -380,6 +392,9 @@ function RepoFiltersForm({ id, left, params, onApply }: {
         </select></label>
         <label className="field">屏蔽状态<select value={draft.get('blocked') ?? ''} onChange={(e) => change('blocked', e.target.value)}>
           <option value="">全部</option><option value="true">已屏蔽</option><option value="false">未屏蔽</option>
+        </select></label>
+        <label className="field">爆发信号<select value={draft.get('breakout') ?? ''} onChange={(e) => change('breakout', e.target.value)}>
+          <BreakoutOptions />
         </select></label>
       </div>
       <div className="action-row">

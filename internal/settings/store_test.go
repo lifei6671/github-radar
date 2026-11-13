@@ -114,6 +114,35 @@ func testStore(t *testing.T) (Store, config.Config) {
 	return Store{DB: db}, cfg
 }
 
+func TestEarlyDiscoverySeedProtectsExistingEditors(t *testing.T) {
+	store, cfg := testStore(t)
+	before, err := store.Initialize(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := store.InstallEarlyDiscovery(t.Context(), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	revision, rules, err := store.DiscoveryRules(t.Context())
+	if err != nil || revision != before.Revision+1 {
+		t.Fatalf("安装应只提高一次修订号: %d %v", revision, err)
+	}
+	var seeded int
+	for _, rule := range rules {
+		if rule.AgeWindow != "" {
+			seeded++
+		}
+	}
+	if seeded != 5 {
+		t.Fatalf("应安装五条滚动规则: %d", seeded)
+	}
+	if _, _, err := store.SaveDiscoveryRules(t.Context(), before.Revision, rules); !errors.Is(err, ErrRevision) {
+		t.Fatalf("旧编辑器的整表保存应发生版本冲突: %v", err)
+	}
+}
+
 func TestImportPreservesExistingRulesAndExplicitEmptyLists(t *testing.T) {
 	store, cfg := testStore(t)
 	rule := storage.DiscoveryRule{
