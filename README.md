@@ -143,7 +143,7 @@ GitHub Topics 为空的活跃仓库会在同一模型预算内按调度补充主
 | `POST /api/v1/repos/:id/topic` | 从仓库详情加入选题池，重复加入保留已有审核状态 |
 | `PATCH /api/v1/topics/:id` | 提交 `{status,feedback}` 更新人工状态或反馈，`candidate` 可手动重新打开选题 |
 
-仓库详情返回中文摘要、来源质量、模型和生成时间。来源 SHA 及供应商、模型、提示词版本匹配时复用缓存，README 正文只在内存中处理。Markdown 提取和语言识别分别复用 [Goldmark](https://github.com/yuin/goldmark) 和 [Whatlanggo](https://github.com/abadojack/whatlanggo)。
+仓库详情返回中文摘要、来源质量、模型和生成时间。导读和非中文 README 的首批译文由同一次模型调用生成。后台保存当前公开 README 的限长快照和翻译进度，重启后可以继续翻译。Markdown 提取和语言识别分别复用 [Goldmark](https://github.com/yuin/goldmark) 和 [Whatlanggo](https://github.com/abadojack/whatlanggo)。
 
 选题默认在每天北京时间 08:30 后生成，覆盖精确增长、近期上榜、日增长和关注信号。`settings.recommendations` 管理时间、数量、重新入池门槛和普通选题保留天数。已处理项目在 README 与功能证据同时变化、精确 24h 净增明显抬升或人工重新打开时回到候选，保留人工反馈。
 

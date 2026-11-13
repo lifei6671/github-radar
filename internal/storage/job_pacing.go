@@ -43,10 +43,18 @@ func (l JobLane) waitingForBudget(rate RateLimit, now int64) bool {
 
 // Claim 将自动任务的开始时刻和原子领取放入同一事务。手动任务由调用方跳过调度间隔。
 func (p JobPacing) Claim(db *gorm.DB, now time.Time, take func(*gorm.DB, []string) (*Job, error)) (*Job, error) {
+	job, _, err := p.ClaimWithLocalFallback(db, now, take, nil)
+	return job, err
+}
+
+// ClaimWithLocalFallback 先领取正常任务，再尝试不消耗上游额度的本地任务。本地任务不更新上游开工间隔。
+func (p JobPacing) ClaimWithLocalFallback(db *gorm.DB, now time.Time, take, local func(*gorm.DB, []string) (*Job, error)) (*Job, bool, error) {
 	if len(p) == 0 {
-		return take(db, nil)
+		job, err := take(db, nil)
+		return job, false, err
 	}
 	var job *Job
+	var usedLocal bool
 	err := db.Transaction(func(tx *gorm.DB) error {
 		keys := make([]string, 0, len(p))
 		resources := make([]string, 0, len(p))
@@ -84,6 +92,11 @@ func (p JobPacing) Claim(db *gorm.DB, now time.Time, take func(*gorm.DB, []strin
 		}
 		var err error
 		job, err = take(tx, deferred)
+		if err == nil && job == nil && local != nil {
+			job, err = local(tx, deferred)
+			usedLocal = job != nil
+			return err
+		}
 		if err != nil || job == nil || job.IsManual() {
 			return err
 		}
@@ -99,7 +112,7 @@ func (p JobPacing) Claim(db *gorm.DB, now time.Time, take func(*gorm.DB, []strin
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return job, nil
+	return job, usedLocal, nil
 }

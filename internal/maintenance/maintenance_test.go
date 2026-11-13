@@ -283,3 +283,20 @@ func TestCleanupKeepsUnacknowledgedModelCallsAndReviewedTopics(t *testing.T) {
 		t.Fatal("过期普通选题应清理")
 	}
 }
+
+func TestCleanupKeepsCandidatesWithManualDiscoverySources(t *testing.T) {
+	db, _, now := fixture(t)
+	if err := db.Exec("UPDATE repositories SET state = 'candidate'").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(`INSERT INTO repo_discovery_events (repo_id, source_type, source_key, first_observed_at)
+		VALUES (1, 'manual', '', ?)`, now.AddDate(0, 0, -80).UnixMilli()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanCandidates(db, now.AddDate(0, 0, -30).UnixMilli(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if count(t, db, &storage.Repository{}, "repo_id = 1") != 1 || count(t, db, &storage.Repository{}, "repo_id = 2") != 0 {
+		t.Fatal("清理候选时应保留带有人工来源记录的仓库")
+	}
+}

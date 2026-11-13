@@ -221,6 +221,8 @@ func (e *Engine) execute(ctx context.Context, job storage.Job) (port.Change, err
 		return e.search(ctx, job, payload)
 	case consts.JobDiscoverTrending:
 		return e.discoverTrending(ctx, payload)
+	case consts.JobDiscoverManual:
+		return e.discoverManual(ctx, job, payload)
 	default:
 		return nil, errors.New("未支持的采集任务")
 	}

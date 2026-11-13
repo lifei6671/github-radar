@@ -12,10 +12,23 @@ import (
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
+// 仅为可直接复用已验证正文的主题回填放开 GitHub 排队限制。
+func cachedThemeRepos(db *gorm.DB) *gorm.DB {
+	return db.Model(&storage.Repository{}).Select("repositories.repo_id").
+		Joins("JOIN ai_summaries s ON s.repo_id = repositories.repo_id AND s.summary_status = ?", consts.StatusReady).
+		Joins("JOIN repo_readme_documents d ON d.repo_id = s.repo_id AND d.readme_sha = s.readme_sha").
+		Joins("JOIN summary_checks c ON c.repo_id = s.repo_id AND c.last_seen_readme_sha = d.readme_sha").
+		Where("d.complete = ? AND TRIM(d.chinese_html) <> ''", true).
+		Where(storage.PublicRepositoryCondition).
+		Where(storage.HasTopicThemesSQL+" AND NOT "+storage.HasNativeThemeSQL).
+		Where("NOT EXISTS (?)", db.Model(&storage.RepoAITopics{}).Select("1").
+			Where("repo_ai_topics.repo_id = repositories.repo_id AND repo_ai_topics.theme_catalog_key = "+storage.ThemeCatalogKeySQL))
+}
+
 // 有版本对应的已发布中文 README 时，旧项目补分类直接复用它。
 func cachedTopicSource(db *gorm.DB, repo storage.Repository, old storage.AISummary, check storage.SummaryCheck) (source, bool, error) {
 	var doc storage.RepoReadmeDocument
-	err := db.Where("repo_id=? AND readme_sha=? AND complete=1", repo.RepoID, old.ReadmeSHA).Find(&doc).Error
+	err := db.Select("repo_id", "readme_sha", "chinese_html").Where("repo_id=? AND readme_sha=? AND complete=1", repo.RepoID, old.ReadmeSHA).Find(&doc).Error
 	if err != nil || doc.RepoID == 0 || check.LastSeenReadmeSHA == nil || *check.LastSeenReadmeSHA != doc.ReadmeSHA {
 		return source{}, false, err
 	}
@@ -32,7 +45,7 @@ func cachedTopicSource(db *gorm.DB, repo storage.Repository, old storage.AISumma
 		description = strings.Join(strings.Fields(*repo.Description), " ")
 	}
 	return source{fullName: repo.FullName, fingerprint: old.SourceFingerprint, sha: doc.ReadmeSHA,
-		body: body, description: description, language: consts.LanguageChinese, githubTopics: repo.GitHubTopics()}, body != "", nil
+		body: body, description: description, language: consts.LanguageChinese, githubTopics: repo.GitHubTopics()}, true, nil
 }
 
 func cachedTopicSourceCurrent(tx *gorm.DB, repoID int64, input source) (bool, error) {

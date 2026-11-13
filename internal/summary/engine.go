@@ -23,6 +23,7 @@ import (
 type GitHubSource interface {
 	RepositoryByID(context.Context, int64, gh.Policy) (gh.RepositoryResult, error)
 	Readme(context.Context, string, string, string, int, gh.Policy) (gh.ReadmeResult, error)
+	ReadmeSHA(context.Context, string, string, string, gh.Policy) (string, error)
 }
 
 type Engine struct {
@@ -93,7 +94,7 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) Step(ctx context.Context) (bool, error) {
-	job, err := e.Queue.claim(ctx, time.Now(), e.Provider != nil || e.Translate != nil || e.WriteReport != nil, e.GitHub != nil)
+	job, localOnly, err := e.Queue.claimWork(ctx, time.Now(), e.Provider != nil || e.Translate != nil || e.WriteReport != nil, e.GitHub != nil, e.Provider != nil)
 	if err != nil || job == nil {
 		return false, err
 	}
@@ -116,7 +117,7 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 			}
 		}
 	}()
-	err = e.runJob(taskCtx, *job)
+	err = e.runJob(taskCtx, *job, localOnly)
 	cancel()
 	<-done
 	if final, release, draining := lifecycle.Settlement(ctx); draining {
@@ -128,7 +129,7 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 	return true, err
 }
 
-func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
+func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) error {
 	if job.Type == ReportJob {
 		return e.runReport(ctx, job)
 	}
@@ -208,7 +209,12 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 		}
 	}
 	if !usingCached {
-		input, unchanged, err = e.readSource(ctx, repo.RepoID, etag, policy)
+		if localOnly {
+			// 正文或主题词表在领取后变化时，交回常规队列重新验证来源。
+			now := time.Now()
+			return q.settle(ctx, job, outcome{status: consts.StatusPending, attempts: job.Attempts - 1, next: retryAt(job, now)})
+		}
+		input, unchanged, err = e.readSummarySource(ctx, job, etag, policy)
 	}
 	// README 返回 304 时仍需检查简介是否变化，变化后重新读取正文。
 	if err == nil && unchanged && withTopics && catalog.NeedsAI(input.githubTopics) &&
@@ -228,11 +234,26 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	}
 	if !usingCached {
 		check = sourceCheck(repo.RepoID, input, now, next)
-		if err := e.rememberReadme(ctx, job, input.readme); err != nil {
+		if err := e.rememberReadme(ctx, job, input.readme, input.fullName); err != nil {
 			return err
 		}
 	}
 	summaryMatches := q.matches(old, input.fingerprint)
+	if summaryMatches && old.SummaryStatus == consts.StatusStale && old.GeneratedAt >= job.CreatedAt && input.sha != "" {
+		// 上一轮已收到有效导读，只有发布复核未完成。继续验证同版材料，无需重调模型。
+		if _, err := e.verifyReadmeVersion(ctx, repo.RepoID, input.fullName, input.readme, policy); err != nil {
+			if !readmeAddressChanged(err) {
+				return e.sourceFailed(ctx, job, err)
+			}
+			return q.settle(ctx, job, staleSummarySource(job, input.sha, outcome{attempts: job.Attempts}))
+		}
+		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts, apply: func(tx *gorm.DB) error {
+			if err := saveObserved(tx, old, check, topicsFingerprint(input.fingerprint, input.description)); err != nil {
+				return err
+			}
+			return tx.Model(&old).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusReady).Error
+		}})
+	}
 	unchangedGuide := jobTopicsOnly(job) && old.SummaryStatus == consts.StatusReady && old.SourceFingerprint == input.fingerprint
 	makeSummary := !usingCached && !unchangedGuide && wantsSummary && (p.Force || !summaryMatches || !hasStructuredSummary(old))
 	fingerprint := topicsFingerprint(input.fingerprint, input.description)
@@ -259,9 +280,23 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	var segments []string
 	var translation storage.RepoReadmeTranslation
 	if makeSummary {
-		prompt, segments, translation, err = q.withReadmeTranslation(db, repo.RepoID, input, prompt)
+		segments, translation, err = q.firstReadmeBatch(db, repo.RepoID, input)
 		if err != nil {
 			return err
+		}
+		if len(segments) > 0 {
+			encoded, _ := json.Marshal(segments)
+			basePrompt, baseSource := input.prompt(q.AI.Summary.InputTokens-len(combinedTranslationInstruction)-len(encoded)-1, makeSummary, makeTopics)
+			if len(basePrompt)+len(systemPrompt)+len(combinedTranslationInstruction)+len(encoded)+1 > q.AI.Summary.InputTokens {
+				segments = nil
+			} else {
+				task, evidence, _ := strings.Cut(basePrompt, "\n")
+				prompt, sent = task+combinedTranslationInstruction+string(encoded)+"\n"+evidence, baseSource
+				if sent.body == "" && sent.description == "" {
+					// 首批片段也可作为导读依据，保留本轮请求的来源版本和质量。
+					sent.body = strings.Join(segments, "\n")
+				}
+			}
 		}
 	}
 	reservedAt := time.Now()
@@ -313,9 +348,15 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 		return e.finishFailure(ctx, job, call, result, duration, old, check, fingerprint)
 	}
 
-	// 供应商返回后重新确认真实来源，防止分析期间 README 被替换。
+	// 发布前通过文件元数据复核版本，并检查仓库身份和简介。
 	latest, same, verifyErr := input, true, error(nil)
-	if !usingCached {
+	if makeSummary && input.sha != "" {
+		var remote *sdk.Repository
+		remote, verifyErr = e.verifyReadmeVersion(ctx, repo.RepoID, input.fullName, input.readme, policy)
+		if verifyErr == nil {
+			latest.description = strings.Join(strings.Fields(remote.GetDescription()), " ")
+		}
+	} else if !usingCached {
 		latest, same, verifyErr = e.readSource(ctx, repo.RepoID, input.etag, policy)
 	}
 	changed := !same && verifyErr == nil && latest.fingerprint != input.fingerprint
@@ -344,18 +385,32 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 			attempts: job.Attempts, call: &call, model: result, duration: duration,
 			apply: withdrawRepository(verifyErr, repo.RepoID)})
 	}
+	if readmeAddressChanged(verifyErr) && makeSummary && input.sha != "" {
+		return e.settleAfterCall(ctx, job, staleSummarySource(job, input.sha, outcome{
+			attempts: job.Attempts, call: &call, model: result, duration: duration}))
+	}
 	if makeSummary && record.SummaryStatus == consts.StatusStale && old.RepoID != 0 && verifyErr == nil {
 		record = old
 		record.SummaryStatus = consts.StatusStale
 	}
 	status, code := consts.StatusSucceeded, ""
-	if (changed || (!makeSummary && topicsChanged)) && p.Manual {
+	var retryNext int64
+	attempts := job.Attempts
+	if (makeSummary && input.sha != "" && verifyErr != nil) || ((changed || (!makeSummary && topicsChanged)) && p.Manual) {
 		status, code = consts.StatusFailed, consts.CodeSummarySourceChanged
-		if job.Attempts >= job.MaxAttempts {
+		retryNext = retryAt(job, completed)
+		var upstream *gh.Failure
+		if errors.As(verifyErr, &upstream) && upstream.Until > 0 {
+			retryNext = max(retryNext, upstream.Until)
+			if upstream.Status == 0 {
+				attempts--
+			}
+		}
+		if attempts >= job.MaxAttempts {
 			status = consts.StatusDead
 		}
 	}
-	return e.settleAfterCall(ctx, job, outcome{status: status, code: code, attempts: job.Attempts, call: &call, model: result, duration: duration,
+	return e.settleAfterCall(ctx, job, outcome{status: status, code: code, next: retryNext, attempts: attempts, call: &call, model: result, duration: duration,
 		apply: func(tx *gorm.DB) error {
 			if usingCached {
 				current, err := cachedTopicSourceCurrent(tx, repo.RepoID, input)
@@ -368,7 +423,7 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 				}
 			}
 			if !same && verifyErr == nil {
-				if err := saveReadme(tx, repo.RepoID, latest.readme); err != nil {
+				if err := saveReadme(tx, repo.RepoID, latest.readme, latest.fullName, job.ID); err != nil {
 					return err
 				}
 			}
@@ -381,12 +436,15 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 					return err
 				}
 			}
-			if len(segments) > 0 && verifyErr == nil && !changed {
-				if err := saveCombinedTranslation(tx, translation, result.Content, segments); err != nil {
+			if len(segments) > 0 {
+				// 复核暂时失败时保存有效片段，待仓库重新确认后再发布正文。
+				if err := saveCombinedTranslation(tx, translation, result.Content, segments, verifyErr == nil); err != nil {
 					return err
 				}
-				if err := saveReadme(tx, repo.RepoID, input.readme); err != nil {
-					return err
+				if translation.Complete && verifyErr == nil {
+					if err := saveReadme(tx, repo.RepoID, input.readme, input.fullName, job.ID); err != nil {
+						return err
+					}
 				}
 			}
 			if topicsJSON != "" && verifyErr == nil && !topicsChanged {
@@ -397,6 +455,16 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 			}
 			return nil
 		}})
+}
+
+func staleSummarySource(job storage.Job, sha string, out outcome) outcome {
+	now := time.Now()
+	out.status, out.code, out.next = consts.StatusFailed, consts.CodeSummarySourceChanged, retryAt(job, now)
+	if job.Attempts >= job.MaxAttempts {
+		out.status = consts.StatusDead
+	}
+	out.apply = func(tx *gorm.DB) error { return invalidateReadme(tx, *job.RepoID, sha, now.UnixMilli()) }
+	return out
 }
 
 func sourceCheck(id int64, s source, now time.Time, next int64) storage.SummaryCheck {
@@ -500,9 +568,36 @@ func (e *Engine) readSource(ctx context.Context, id int64, etag string, p gh.Pol
 	if !strings.EqualFold(confirmed.GetFullName(), s.fullName) {
 		return source{}, false, &gh.Failure{Code: consts.CodeSummaryRepoAddressChanged}
 	}
-	s.description = strings.Join(strings.Fields(confirmed.GetDescription()), " ")
-	s.githubTopics = confirmed.GetTopics()
-	s.readme = readme
+	return describeReadme(confirmed, readme), false, nil
+}
+
+// 同一摘要任务重试时继续处理已保存的正文，新任务仍按原有规则检查 GitHub 版本。
+func (e *Engine) readSummarySource(ctx context.Context, job storage.Job, etag string, policy gh.Policy) (source, bool, error) {
+	var document storage.RepoReadmeDocument
+	if err := e.Queue.DB.WithContext(ctx).Find(&document, "repo_id = ? AND source_job_id = ?", *job.RepoID, job.ID).Error; err != nil {
+		return source{}, false, err
+	}
+	if snapshot, ok := savedReadme(document); ok && readmeFits(document, e.Queue.AI.Summary.ReadmeMaxBytes) {
+		remote, err := e.verifyReadmeRepository(ctx, *job.RepoID, document.SourceRepoName, policy)
+		if err == nil {
+			return describeReadme(remote, snapshot), false, nil
+		}
+		if !readmeAddressChanged(err) {
+			return source{}, false, err
+		}
+		etag = ""
+	}
+	return e.readSource(ctx, *job.RepoID, etag, policy)
+}
+
+func readmeFits(document storage.RepoReadmeDocument, limit int) bool {
+	return document.ReadmeBytes <= limit && (!document.Truncated || document.ReadmeBytes == limit)
+}
+
+// describeReadme 为下载结果和已验证的同版快照生成相同的分析输入。
+func describeReadme(remote *sdk.Repository, readme gh.ReadmeResult) source {
+	s := source{fullName: remote.GetFullName(), description: strings.Join(strings.Fields(remote.GetDescription()), " "),
+		githubTopics: remote.GetTopics(), readme: readme, quality: sufficient}
 	if readme.Missing {
 		s.fingerprint, s.quality = descriptionKey(s.description), insufficient
 	} else {
@@ -523,5 +618,5 @@ func (e *Engine) readSource(ctx context.Context, id int64, etag string, p gh.Pol
 		natural = s.description
 	}
 	s.language = language(natural)
-	return s, false, nil
+	return s
 }

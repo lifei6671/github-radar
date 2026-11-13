@@ -25,6 +25,8 @@ type Queue struct {
 	Pacing storage.JobPacing
 }
 
+var collectionJobs = []string{consts.JobRefreshRepo, consts.JobDiscoverTrending, consts.JobDiscoverSearch, consts.JobDiscoverManual}
+
 func (q Queue) enqueue(tx *gorm.DB, kind string, repoID *int64, key string, payload collection.Payload, priority int, now int64) (storage.Job, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -68,7 +70,7 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 			}
 		}
 		if err := tx.Model(&storage.Job{}).Where(storage.JobColumns.Type+" IN ? AND "+storage.JobColumns.Status+" = '"+consts.StatusRunning+"' AND "+storage.JobColumns.LeaseUntil+" <= ? AND "+storage.JobColumns.Attempts+" >= "+storage.JobColumns.MaxAttempts,
-			[]string{consts.JobRefreshRepo, consts.JobDiscoverTrending, consts.JobDiscoverSearch}, ms).
+			collectionJobs, ms).
 			Updates(map[string]any{storage.JobColumns.Status: consts.StatusDead, storage.JobColumns.LastErrorCode: consts.CodeLeaseExpired, storage.JobColumns.UpdatedAt: ms}).Error; err != nil {
 			return err
 		}
@@ -151,8 +153,9 @@ func (q Queue) claim(db *gorm.DB, now time.Time, blocked []string) (*storage.Job
 		Where(d.Enabled+"=?", true)
 	ms := now.UnixMilli()
 	next := db.Model(&storage.Job{}).Select(j.ID).
-		Where(j.Type+" IN ?", []string{consts.JobRefreshRepo, consts.JobDiscoverTrending, consts.JobDiscoverSearch}).
-		Where("(("+j.Type+"=? AND EXISTS (?)) OR ("+j.Type+"<>? AND EXISTS (?)))", consts.JobRefreshRepo, jobRepo, consts.JobRefreshRepo, jobRule).
+		Where(j.Type+" IN ?", collectionJobs).
+		Where("("+j.Type+"=? OR ("+j.Type+"=? AND EXISTS (?)) OR ("+j.Type+" IN ? AND EXISTS (?)))",
+			consts.JobDiscoverManual, consts.JobRefreshRepo, jobRepo, []string{consts.JobDiscoverTrending, consts.JobDiscoverSearch}, jobRule).
 		Where(j.Attempts+"<"+j.MaxAttempts).Where(j.AvailableAt+"<=?", ms).
 		Where("("+j.Status+" IN ? OR ("+j.Status+"=? AND "+j.LeaseUntil+"<=?))", []string{consts.StatusPending, consts.StatusFailed}, consts.StatusRunning, ms).
 		Order(j.Priority + " DESC").Order(j.AvailableAt).Order(j.ID).Limit(1)
@@ -229,7 +232,11 @@ func (q Queue) Fail(ctx context.Context, job storage.Job, cause error, now time.
 			}
 		}
 	}
-	if attempts >= job.MaxAttempts {
+	if job.Type == consts.JobDiscoverManual && errors.Is(cause, storage.ErrRepositoryBlocked) {
+		code, status = consts.CodeRepoBlocked, consts.StatusDead
+	}
+	if attempts >= job.MaxAttempts || job.Type == consts.JobDiscoverManual &&
+		(code == consts.CodeGitHubNotFound || code == consts.CodeGitHubGone) {
 		status = consts.StatusDead
 	}
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

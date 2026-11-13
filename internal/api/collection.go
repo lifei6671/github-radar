@@ -27,6 +27,8 @@ type collectionAPI struct {
 }
 
 func (a *collectionAPI) register(v1 *gin.RouterGroup) {
+	v1.POST("/repo-submissions", a.submitRepositories)
+	v1.GET("/repo-submissions/:requestId", a.repoSubmissionJobs)
 	v1.GET("/repos", a.loadCategories, a.repos)
 	v1.GET("/repos/by-name/:owner/:name", a.loadCategories, a.repo)
 	v1.GET("/repos/:id", a.loadCategories, a.repo)
@@ -235,6 +237,12 @@ func (a *collectionAPI) repo(c *gin.Context) {
 	} else {
 		// 管理端沿用发起手动任务的门槛，只返回可用状态。
 		body["summaryAvailable"] = !repo.Blocked && a.summaryAvailable(c)
+		events, err := discoveryEvents(db, repo.RepoID)
+		if err != nil {
+			a.fail(c, err)
+			return
+		}
+		body["discoveryEvents"] = events
 	}
 	for name, raw := range map[string]string{"features": summary.row.FeaturesJSON, "audience": summary.row.AudienceJSON} {
 		tags := []string{}
@@ -318,11 +326,18 @@ func (a *collectionAPI) follow(c *gin.Context) {
 }
 
 func jobView(job storage.Job) gin.H {
-	return gin.H{
+	view := gin.H{
 		"id": job.ID, "type": job.Type, "status": job.Status, "attempts": job.Attempts,
 		"maxAttempts": job.MaxAttempts, "errorCode": job.LastErrorCode,
 		"createdAt": iso(job.CreatedAt), "updatedAt": iso(job.UpdatedAt), "repoId": job.RepoID,
 	}
+	if job.Type == consts.JobDiscoverManual {
+		var payload collection.Payload
+		if json.Unmarshal([]byte(job.PayloadJSON), &payload) == nil {
+			view["submittedRepository"] = payload.Repository
+		}
+	}
+	return view
 }
 
 func (a *collectionAPI) job(c *gin.Context) {

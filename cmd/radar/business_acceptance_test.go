@@ -87,7 +87,9 @@ func (u *acceptanceUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		readme := "# Workflow Toolkit\n\n" + strings.Repeat("The toolkit organizes command-line jobs into groups. Developers can use it to run repeatable workflows and see the status of each step. The documentation contains sample configuration and explains how to start the local runner. ", 4) +
 			fmt.Sprintf("\n\nVersion %d. %s", version, acceptanceReadmeMarker)
 		_ = json.NewEncoder(w).Encode(map[string]any{"type": "file", "sha": fmt.Sprintf("%040x", version), "encoding": "base64",
-			"content": base64.StdEncoding.EncodeToString([]byte(readme)), "size": len(readme), "html_url": "https://github.com/fixture/radar-workflow/blob/main/README.md"})
+			"content": base64.StdEncoding.EncodeToString([]byte(readme)), "size": len(readme), "path": "README.md", "html_url": "https://github.com/fixture/radar-workflow/blob/main/README.md"})
+	case "/repos/fixture/radar-workflow/contents":
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"type": "file", "path": "README.md", "sha": fmt.Sprintf("%040x", u.readmeVersion.Load())}})
 	case "/v1/chat/completions":
 		var input struct{ Messages []struct{ Content string } }
 		if json.NewDecoder(r.Body).Decode(&input) != nil || len(input.Messages) != 2 {
@@ -334,13 +336,14 @@ func TestAcceptanceBusiness(t *testing.T) {
 		acceptanceBrowser(t, reopened, "业务链路")
 	}
 	reopened.stop()
+	// 限长 README 快照允许落库，模型和 GitHub 的配置密钥仍不得写入数据库。
 	for _, suffix := range []string{"", "-wal", "-journal"} {
 		data, err := os.ReadFile(database + suffix)
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		if bytes.Contains(data, []byte(acceptanceReadmeMarker)) || bytes.Contains(data, []byte(acceptanceGitHubToken)) || bytes.Contains(data, []byte(acceptanceAIKey)) {
-			t.Fatal("README 原文标识或 YAML 密钥落入数据库或事务文件")
+		if bytes.Contains(data, []byte(acceptanceGitHubToken)) || bytes.Contains(data, []byte(acceptanceAIKey)) {
+			t.Fatal("YAML 密钥落入数据库或事务文件")
 		}
 	}
 	t.Log("24h 精确 +250、小时与日趋势、聚合重跑、清理、人工反馈和无 AI 密钥降级通过")

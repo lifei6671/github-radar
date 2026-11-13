@@ -72,6 +72,7 @@ function published(repo: RepoDetail) {
   delete item.summaryJobId
   delete item.summaryModel
   delete item.summaryAvailable
+  delete item.discoveryEvents
   delete item.nameIsCurrent
   delete item.blocked
   return item
@@ -451,6 +452,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       Object.assign(repos[id - 1], { summaryZh, summaryPreview, titleZh, summaryStatus })
     },
     setAITopics: (id: number, topics: string[]) => { repos[id - 1].aiTopics = topics },
+    setDiscoveryEvents: (id: number, events: RepoDetail['discoveryEvents']) => { repos[id - 1].discoveryEvents = events },
     setSimilarRepos: (id: number, items: number[]) => { similarRepos.set(id, items) },
     setReadme: (id: number, readme: RepoReadme) => { readmes.set(id, readme) },
     expire: () => { authorized = false },

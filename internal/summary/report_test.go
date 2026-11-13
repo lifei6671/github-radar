@@ -62,6 +62,25 @@ func TestReadmeQueueSpreadsAutomaticStartsWithoutBlockingReportsOrManualJobs(t *
 	claim(now.Add(120*time.Second), auto.ID)
 }
 
+func TestFirstGuideForSampledRepoPrecedesRoutineBackfill(t *testing.T) {
+	e, _, _, _ := fixture(t)
+	q, now := e.Queue, time.Now()
+	if err := q.DB.Model(&storage.Repository{}).Where("repo_id = ?", 1).Update("last_success_at", now.UnixMilli()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.insert(q.DB, JobType, 2, "theme-backfill", payload{}, 120, now.Add(-time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	first, err := q.insert(q.DB, JobType, 1, "first-guide", payload{}, 100, now.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := q.claim(t.Context(), now, true, true)
+	if err != nil || claimed == nil || claimed.ID != first.ID {
+		t.Fatalf("已采样且缺导读的仓库应优先领取: got=%+v err=%v", claimed, err)
+	}
+}
+
 func TestReportJobsUseSavedEvidenceAndAccountForAI(t *testing.T) {
 	e, upstream, _, _ := fixture(t)
 	e.Provider = modelFixture(func(context.Context, string) ModelResult {

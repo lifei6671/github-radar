@@ -50,16 +50,21 @@ type RepoReadmeTranslation struct {
 
 func (RepoReadmeTranslation) TableName() string { return RepoReadmeTranslationTable }
 
-// RepoReadmeDocument 保存当前已验证版本的站内中文正文。空 SHA 表示确认缺失。
+// RepoReadmeDocument 保存当前已验证版本的中文正文和后台续译使用的有界原文。空 SHA 表示确认缺失。
 type RepoReadmeDocument struct {
-	RepoID      int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
-	ReadmeSHA   string `gorm:"column:readme_sha"`
-	ReadmeBytes int    `gorm:"column:readme_bytes"`
-	Language    string `gorm:"column:language"`
-	SourceURL   string `gorm:"column:source_url"`
-	ChineseHTML string `gorm:"column:chinese_html"`
-	Complete    bool   `gorm:"column:complete"`
-	Truncated   bool   `gorm:"column:truncated"`
+	RepoID         int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
+	ReadmeSHA      string `gorm:"column:readme_sha"`
+	ReadmeBytes    int    `gorm:"column:readme_bytes"`
+	Language       string `gorm:"column:language"`
+	SourceURL      string `gorm:"column:source_url"`
+	ChineseHTML    string `gorm:"column:chinese_html"`
+	Complete       bool   `gorm:"column:complete"`
+	Truncated      bool   `gorm:"column:truncated"`
+	SourceMarkdown []byte `gorm:"column:source_markdown" json:"-"`
+	SourceRepoName string `gorm:"column:source_repo_name" json:"-"`
+	SourceETag     string `gorm:"column:source_etag" json:"-"`
+	SourcePath     string `gorm:"column:source_path" json:"-"`
+	SourceJobID    int64  `gorm:"column:source_job_id" json:"-"`
 }
 
 func (RepoReadmeDocument) TableName() string { return RepoReadmeDocumentTable }

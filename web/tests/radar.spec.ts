@@ -828,6 +828,13 @@ test('仓库阅读页三栏、章节链接与时间范围在返回时保留来�
   const actions = page.getByRole('group', { name: '项目操作', exact: true })
   const sections = page.getByRole('navigation', { name: '仓库详情章节' })
   await expect(summary).toBeVisible()
+  await expect(summary.getByText('推荐理由', { exact: true })).toHaveCount(0)
+  await expect(aside.getByRole('heading', { name: '推荐理由' })).toBeVisible()
+  const repository = aside.getByRole('region', { name: 'GitHub 仓库' })
+  for (const label of ['语言', '级别', 'Star', 'Fork']) {
+    await expect(repository.getByText(label, { exact: true })).toBeVisible()
+  }
+  await expect(article.locator('.article-head .repo-tags')).toHaveCount(0)
   await page.setViewportSize({ width: 2560, height: 1274 })
   const [contentBox, backBox, actionsBox, chaptersBox, asideBox] = await Promise.all([
     article.boundingBox(), back.boundingBox(), actions.boundingBox(), sections.boundingBox(), aside.boundingBox(),
@@ -942,6 +949,28 @@ test('README 目录保留标题层级，支持跳转、滚动高亮和直接访�
   await expect(page.getByRole('navigation', { name: '仓库详情章节' }).getByRole('link', { name: 'README', exact: true }))
     .toHaveAttribute('aria-current', 'location')
   await expect(outline).toHaveCount(0)
+})
+
+test('长 README 目录随阅读位置只展开当前章节', async ({ page }) => {
+  const fixture = await mockRadar(page)
+  const chapters = Array.from({ length: 7 }, (_, index) =>
+    `<h2 id="chapter-${index}">章节 ${index}</h2>` + '<p>章节正文</p>'.repeat(25) +
+    `<h3 id="step-${index}">步骤 ${index}</h3>` + '<p>步骤正文</p>'.repeat(25))
+  // 单一 README 总标题下面的主章节仍可直接跳转。
+  fixture.setReadme(1, { state: 'ready', complete: true, truncated: false,
+    chineseHtml: '<h1 id="project">项目</h1>' + chapters.join('') })
+  await page.goto('/repos/vercel/ai')
+  const outline = page.getByRole('list', { name: 'README 目录' })
+  await expect(outline.getByRole('link')).toHaveCount(8)
+  await outline.getByRole('link', { name: '章节 1' }).click()
+  await expect(outline.getByRole('link', { name: '步骤 1' })).toBeVisible()
+  await expect(outline.getByRole('link', { name: '步骤 2' })).toHaveCount(0)
+  await page.getByRole('heading', { name: '步骤 2' }).evaluate((el) => el.scrollIntoView())
+  await expect(outline.getByRole('link', { name: '步骤 2' })).toHaveAttribute('aria-current', 'location')
+  await expect(outline.getByRole('link', { name: '步骤 1' })).toHaveCount(0)
+  await page.goto('/repos/vercel/ai?range=30d#readme-heading-step-3')
+  await expect(outline.getByRole('link', { name: '步骤 3' })).toHaveAttribute('aria-current', 'location')
+  await expect(outline.getByRole('link', { name: '步骤 2' })).toHaveCount(0)
 })
 
 test('选题池按入池日期切换版面，保留状态筛选和手机日期入口', async ({ page }) => {

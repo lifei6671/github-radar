@@ -9,7 +9,7 @@
 
 ## 1. 本期范围与简化决策
 
-每天生成一致性 SQLite 快照，Gzip 后上传 Cloudflare R2，默认保留最近 5 个自然日（可配 1～30 天）。后台支持修改配置、立即备份及一键恢复；新 VPS 支持从 /setup 恢复或初始化空库。README 原文不入库，备份只含业务数据和已保存摘要。
+每天生成一致性 SQLite 快照，Gzip 后上传 Cloudflare R2，默认保留最近 5 个自然日（可配 1～30 天）。后台支持修改配置、立即备份及一键恢复；新 VPS 支持从 /setup 恢复或初始化空库。备份包含当时数据库里限长的公开 README 快照、翻译进度和已保存摘要。历史备份按现有保留期淘汰。
 
 **一键恢复正常完成时 Go PID 不变。** 使用 modernc.org/sqlite 的 NewRestore/Backup API，将准备好的临时库写入现有数据库；SQLite 自己处理事务与 WAL。已有 sql.DB 和 DAO 引用保持有效，HTTP 服务继续提供进度查询。
 

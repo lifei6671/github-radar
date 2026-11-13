@@ -18,6 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -43,6 +44,7 @@ type sourceFixture struct {
 	etags                  []string
 	unsolicited304         bool
 	onRead                 func()
+	shaFailures            int
 }
 
 func (s *sourceFixture) RepositoryByID(_ context.Context, id int64, _ gh.Policy) (gh.RepositoryResult, error) {
@@ -65,7 +67,44 @@ func (s *sourceFixture) Readme(_ context.Context, _, _, etag string, _ int, _ gh
 	if etag == s.sha {
 		return gh.ReadmeResult{NotModified: true}, nil
 	}
-	return gh.ReadmeResult{SHA: s.sha, ETag: s.sha, URL: "https://github.com/owner/project/blob/main/README.md", Body: []byte(s.body)}, nil
+	return gh.ReadmeResult{SHA: s.sha, ETag: s.sha, URL: "https://github.com/owner/project/blob/main/README.md", Path: "README.md", Body: []byte(s.body)}, nil
+}
+
+func (s *sourceFixture) ReadmeSHA(context.Context, string, string, string, gh.Policy) (string, error) {
+	if s.shaFailures > 0 {
+		s.shaFailures--
+		return "", &gh.Failure{Code: consts.CodeGitHubNetwork}
+	}
+	if s.missing {
+		return "", nil
+	}
+	return s.sha, nil
+}
+
+func TestGuideRetriesVerificationWithoutModelOrReadmeDownload(t *testing.T) {
+	e, upstream, _, _ := fixture(t)
+	upstream.shaFailures = 2
+	calls := 0
+	e.Provider = modelFixture(func(context.Context, string) ModelResult {
+		calls++
+		return ModelResult{Content: modelAnswer(false)}
+	})
+	decision, err := e.Queue.Manual(t.Context(), 1, "retry-verification", true, true, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"stale", "stale", "ready"} {
+		if err := e.Queue.DB.Model(&storage.Job{}).Where("id = ?", decision.Job.ID).Update("available_at", 0).Error; err != nil {
+			t.Fatal(err)
+		}
+		step(t, e)
+		if guide := row[storage.AISummary](t, e.Queue.DB, "repo_id = ?", 1); guide.SummaryStatus != want {
+			t.Fatalf("发布状态应为 %s: %+v", want, guide)
+		}
+	}
+	if calls != 1 || len(upstream.etags) != 1 {
+		t.Fatalf("复核重试不应重新下载 README 或调用模型: model=%d downloads=%d", calls, len(upstream.etags))
+	}
 }
 
 type modelFixture func(context.Context, string) ModelResult
@@ -122,7 +161,7 @@ func modelAnswer(short bool) string {
 		Themes []string `json:"theme_slugs"`
 	}{answer{Language: "en", Title: json.RawMessage(`"本地脚本编排工具"`), Summary: value, Features: []string{"脚本分组", "状态输出", "脚本分组"},
 		RecommendationReason: json.RawMessage(`"维护多服务工作区的团队可以借鉴它的脚本分组方式，统一组织本地任务。"`),
-		Tags:                 []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{marker}}, []string{"workflow", "dev-tools"}, []string{}})
+		Tags:                 []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{"TRANSIENT_MODEL_FIELD_80FC"}}, []string{"workflow", "dev-tools"}, []string{}})
 	return string(raw)
 }
 
@@ -175,12 +214,36 @@ func TestThemeBackfillUsesREADMEAndResumesFromSQLite(t *testing.T) {
 		t.Fatal(err)
 	}
 	reads := len(upstream.etags)
+	// 耗尽 README 请求预算后，主题回填仍须通过正常的 Worker 领取流程完成。
+	e.Queue.Pacing = storage.JobPacing{{Key: "readme", Types: []string{JobType, TranslationJob},
+		Resource: gh.ReadmeCheckResource, Window: time.Hour, Budget: 120}}
+	rate := storage.RateLimit{Resource: gh.ReadmeCheckResource, LocalWindow: now.UnixMilli(), LocalRequests: 120}
+	if err := db.Create(&rate).Error; err != nil {
+		t.Fatal(err)
+	}
 	schedule(t, e)
+	// 唤醒缓存任务后填满今日自动额度，验证领取被额度拦住。
+	spent := storage.AICall{CallKey: "used-auto-budget", JobID: job.ID, Provider: ProviderKey(e.Queue.AI),
+		Origin: consts.OriginAuto, Status: consts.StatusSucceeded, ReservedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}
+	if err := db.Create(&spent).Error; err != nil {
+		t.Fatal(err)
+	}
+	limit := e.Queue.AI.Summary.AutoDailyCalls
+	e.Queue.AI.Summary.AutoDailyCalls = 1
+	if done, err := e.Step(t.Context()); err != nil || done {
+		t.Fatalf("AI 额度耗尽时不应领取缓存回填: done=%v error=%v", done, err)
+	}
+	e.Queue.AI.Summary.AutoDailyCalls = limit
 	step(t, e)
 	saved = row[storage.RepoAITopics](t, db, "repo_id=?", 1)
 	if calls != 2 || len(upstream.etags) != reads || saved.ThemeCatalogKey != "changed" || saved.TopicsJSON != `["mcp-server"]` {
 		t.Fatalf("回填应在原 GitHub 限流重试时间前完成: %+v, calls=%d reads=%v", saved, calls, upstream.etags)
 	}
+	var pacingWrites int64
+	if err := db.Model(&storage.MaintenanceState{}).Where("key = ?", "job.pacing.readme").Count(&pacingWrites).Error; err != nil || pacingWrites != 0 {
+		t.Fatalf("缓存回填不应重置 GitHub 任务开工间隔: count=%d error=%v", pacingWrites, err)
+	}
+	e.Queue.Pacing = nil
 	catalog, err := storage.ReadThemeCatalog(db)
 	if err != nil {
 		t.Fatal(err)
@@ -411,14 +474,13 @@ func TestSummaryCacheSourceChangeAndPrivacy(t *testing.T) {
 	if err := db.Exec("PRAGMA wal_checkpoint(TRUNCATE)").Error; err != nil {
 		t.Fatal(err)
 	}
-	for _, file := range []string{path, path + "-wal"} {
-		data, err := os.ReadFile(file)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Fatal(err)
-		}
-		if bytes.Contains(data, []byte(marker)) {
-			t.Fatalf("原文或瞬时模型字段写入 %s", filepath.Base(file))
-		}
+	document := row[storage.RepoReadmeDocument](t, db, "repo_id=1")
+	if string(document.SourceMarkdown) != source.body || document.ReadmeSHA != source.sha {
+		t.Fatal("快照未保存当前版本的 README")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(data, []byte("TRANSIENT_MODEL_FIELD_80FC")) {
+		t.Fatalf("模型的瞬时字段不能写入数据库: %v", err)
 	}
 	if strings.Contains(logs.String(), marker) {
 		t.Fatal("日志出现 README 原文")

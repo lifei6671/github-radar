@@ -35,6 +35,7 @@ type Writer interface {
 	SaveRefresh(Refresh) error
 	SaveSearch(Search) error
 	SaveTrending(Trending) error
+	SaveManualDiscovery(storage.Job, collection.Payload, *sdk.Repository, time.Time, time.Time) error
 }
 
 type Refresh struct {

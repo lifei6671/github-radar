@@ -34,6 +34,7 @@ const (
 	JobRefreshRepo      = "refresh_repo"
 	JobDiscoverSearch   = "discover_search"
 	JobDiscoverTrending = "discover_trending"
+	JobDiscoverManual   = "discover_manual"
 	JobRefreshSummary   = "refresh_readme_summary"
 	JobTranslateReadme  = "translate_readme"
 	JobComposeReport    = "compose_report"
@@ -45,6 +46,7 @@ const (
 const (
 	SourceSearch        = "search"
 	SourceTrending      = "trending"
+	SourceManual        = "manual"
 	TrendingAll         = "all"
 	TrendingAllDaily    = "all:daily"
 	PeriodDaily         = "daily"

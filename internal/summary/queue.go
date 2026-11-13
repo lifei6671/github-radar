@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -315,13 +316,38 @@ WHERE %[2]s='%[7]s' AND %[8]s IN (
 }
 
 func (q Queue) claim(ctx context.Context, now time.Time, withModel, withRepo bool) (*storage.Job, error) {
-	return q.Pacing.Claim(q.DB.WithContext(ctx), now, func(db *gorm.DB, deferred []string) (*storage.Job, error) {
-		return q.claimReady(db, now, withModel, withRepo, deferred)
-	})
+	job, _, err := q.claimWork(ctx, now, withModel, withRepo, withModel)
+	return job, err
 }
 
-func (q Queue) claimReady(db *gorm.DB, now time.Time, withModel, withRepo bool, deferred []string) (*storage.Job, error) {
+func (q Queue) claimWork(ctx context.Context, now time.Time, withModel, withRepo, withSummary bool) (*storage.Job, bool, error) {
+	return q.Pacing.ClaimWithLocalFallback(q.DB.WithContext(ctx), now,
+		func(db *gorm.DB, deferred []string) (*storage.Job, error) {
+			return q.claimReady(db, now, withModel, withRepo, deferred, false)
+		}, func(db *gorm.DB, deferred []string) (*storage.Job, error) {
+			if !withRepo || !withSummary || q.AI.Summary.AutoDailyCalls == 0 || !slices.Contains(deferred, JobType) {
+				return nil, nil
+			}
+			return q.claimReady(db, now, withModel, withRepo, nil, true)
+		})
+}
+
+func (q Queue) claimReady(db *gorm.DB, now time.Time, withModel, withRepo bool, deferred []string, localOnly bool) (*storage.Job, error) {
 	var job storage.Job
+	var localFilter string
+	var localArgs []any
+	if localOnly {
+		// 本地回填只使用当前有效的正文。额度用完时，仅允许复用本日已预留的调用。
+		start := now.UTC().Truncate(24 * time.Hour)
+		calls := db.Model(&storage.AICall{}).Where("origin = ? AND reserved_at >= ? AND reserved_at < ?",
+			consts.OriginAuto, start.UnixMilli(), start.Add(24*time.Hour).UnixMilli())
+		localFilter = ` AND type = ? AND repo_id IN (?) AND ((?) < ? OR EXISTS (?))`
+		localArgs = []any{JobType, cachedThemeRepos(db), calls.Session(&gorm.Session{}).Select("COUNT(*)"), q.AI.Summary.AutoDailyCalls,
+			calls.Session(&gorm.Session{}).Select("1").Where("job_id = jobs.id AND status = ? AND provider = ?", consts.StatusReserved, ProviderKey(q.AI))}
+	}
+	args := []any{rand.Text(), now.Add(time.Duration(q.LeaseSeconds) * time.Second).UnixMilli(), now.UnixMilli(), JobType, TranslationJob, ReportJob, now.UnixMilli(), withRepo, ReportJob, withModel, JobType, now.UnixMilli(), ReportJob, storage.AutoAIResumeKey, deferred, JobType, TranslationJob, ReportJob, now.UnixMilli(), ReportJob}
+	args = append(args, localArgs...)
+	args = append(args, JobType, JobType)
 	err := db.Raw(fmt.Sprintf(`
 UPDATE %[1]s SET %[2]s='%[3]s',%[4]s=%[4]s+1,%[5]s=?,%[6]s=?,%[7]s=?
 WHERE %[8]s=(SELECT %[8]s FROM %[1]s WHERE %[9]s IN (?,?,?) AND %[4]s<%[10]s AND %[11]s<=?
@@ -341,7 +367,7 @@ AND NOT EXISTS(SELECT 1 FROM %[1]s sibling WHERE (
  AND ((sibling.%[2]s='%[3]s' AND (sibling.%[6]s>? OR EXISTS(
   SELECT 1 FROM %[22]s a WHERE a.%[23]s=sibling.%[8]s AND a.%[24]s='%[25]s')))
  OR (%[1]s.%[9]s=? AND sibling.%[2]s='%[26]s'
-  AND json_extract(sibling.%[18]s,'$.fingerprint')=json_extract(%[1]s.%[18]s,'$.fingerprint'))))
+  AND json_extract(sibling.%[18]s,'$.fingerprint')=json_extract(%[1]s.%[18]s,'$.fingerprint'))))%[28]s
 ORDER BY (%[27]s>=200) DESC,
 CASE WHEN %[9]s=? AND EXISTS (
  SELECT 1 FROM ai_summaries s LEFT JOIN repo_readme_documents d ON d.repo_id=s.repo_id
@@ -349,9 +375,12 @@ CASE WHEN %[9]s=? AND EXISTS (
  WHERE s.repo_id=%[1]s.%[16]s AND s.summary_status='ready' AND d.repo_id IS NULL
  AND c.source_language='zh'
 ) THEN 1 ELSE 0 END DESC,
-%[27]s DESC,%[11]s,%[8]s LIMIT 1) RETURNING *`,
-		storage.JobTable, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.Attempts, storage.JobColumns.LeaseToken, storage.JobColumns.LeaseUntil, storage.JobColumns.UpdatedAt, storage.JobColumns.ID, storage.JobColumns.Type, storage.JobColumns.MaxAttempts, storage.JobColumns.AvailableAt, consts.StatusPending, consts.StatusFailed, storage.RepositoryTable, storage.RepositoryColumns.RepoID, storage.JobColumns.RepoID, storage.RepositoryColumns.Blocked, storage.JobColumns.PayloadJSON, storage.SystemSettingTable, storage.SystemSettingColumns.Key, storage.SystemSettingColumns.ValueJSON, storage.AICallTable, storage.AICallColumns.JobID, storage.AICallColumns.Status, consts.StatusSending, consts.StatusUnknown, storage.JobColumns.Priority),
-		rand.Text(), now.Add(time.Duration(q.LeaseSeconds)*time.Second).UnixMilli(), now.UnixMilli(), JobType, TranslationJob, ReportJob, now.UnixMilli(), withRepo, ReportJob, withModel, JobType, now.UnixMilli(), ReportJob, storage.AutoAIResumeKey, deferred, JobType, TranslationJob, ReportJob, now.UnixMilli(), ReportJob, JobType).Scan(&job).Error
+CASE WHEN %[9]s=? AND %[27]s=100 AND NOT EXISTS (
+ SELECT 1 FROM ai_summaries s WHERE s.repo_id=%[1]s.%[16]s AND s.summary_status='ready'
+) AND EXISTS (SELECT 1 FROM repositories r WHERE r.repo_id=%[1]s.%[16]s AND r.last_success_at IS NOT NULL)
+ THEN 130 ELSE %[27]s END DESC,%[11]s,%[8]s LIMIT 1) RETURNING *`,
+		storage.JobTable, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.Attempts, storage.JobColumns.LeaseToken, storage.JobColumns.LeaseUntil, storage.JobColumns.UpdatedAt, storage.JobColumns.ID, storage.JobColumns.Type, storage.JobColumns.MaxAttempts, storage.JobColumns.AvailableAt, consts.StatusPending, consts.StatusFailed, storage.RepositoryTable, storage.RepositoryColumns.RepoID, storage.JobColumns.RepoID, storage.RepositoryColumns.Blocked, storage.JobColumns.PayloadJSON, storage.SystemSettingTable, storage.SystemSettingColumns.Key, storage.SystemSettingColumns.ValueJSON, storage.AICallTable, storage.AICallColumns.JobID, storage.AICallColumns.Status, consts.StatusSending, consts.StatusUnknown, storage.JobColumns.Priority, localFilter),
+		args...).Scan(&job).Error
 	if err != nil || job.ID == 0 {
 		return nil, err
 	}
@@ -397,6 +426,9 @@ func (q Queue) recordFailure(tx *gorm.DB, repoID int64, code string, now time.Ti
 		}
 	}
 	next := now.Add(time.Duration(q.AI.Summary.HighCheckHours) * time.Hour).UnixMilli()
+	if code == consts.CodeSummarySourceChanged {
+		next = now.Add(time.Minute).UnixMilli()
+	}
 	row := storage.SummaryCheck{RepoID: repoID, LastErrorCode: &code, NextCheckAt: next}
 	return tx.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: storage.SummaryCheckColumns.RepoID}},

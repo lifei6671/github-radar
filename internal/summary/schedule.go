@@ -83,7 +83,8 @@ AND NOT EXISTS(SELECT 1 FROM %[21]s j WHERE j.%[22]s=e.%[4]s AND j.%[23]s=? AND 
 			storage.AISummaryColumns.ModelProvider, storage.AISummaryColumns.ModelName, storage.AISummaryColumns.PromptVersion,
 			storage.AISummaryColumns.SourceFingerprint, storage.SummaryCheckColumns.SourceFingerprint,
 			storage.JobTable, storage.JobColumns.RepoID, storage.JobColumns.Type, storage.JobColumns.Status)+unresolved+`)
-ORDER BY e.theme_backfill DESC,(d.repo_id IS NULL AND s.summary_status='ready') DESC,e.high_priority DESC,(NOT e.high_priority AND s.`+storage.AISummaryColumns.RepoID+` IS NOT NULL) DESC,
+ORDER BY (e.high_priority AND (s.repo_id IS NULL OR s.summary_status<>'ready')) DESC,
+ e.theme_backfill DESC,(d.repo_id IS NULL AND s.summary_status='ready') DESC,e.high_priority DESC,(NOT e.high_priority AND s.`+storage.AISummaryColumns.RepoID+` IS NOT NULL) DESC,
  e.`+storage.LatestMetricColumns.HotnessScore+` DESC,e.`+storage.RepositoryColumns.RepoID+` LIMIT 100`,
 			q.AI.Summary.HotRankLimit, now.Add(-24*time.Hour).UnixMilli(), q.AI.Summary.AutoDailyCalls, topicSlots, ms,
 			topicSlots, q.AI.Summary.AutoDailyCalls, ProviderKey(q.AI), q.AI.Model, q.AI.Summary.PromptVersion, JobType).Scan(&rows).Error

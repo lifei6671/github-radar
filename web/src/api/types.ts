@@ -94,11 +94,20 @@ export interface RepoDetail extends Repo {
   summaryGeneratedAt: string | null
   summaryModel?: string | null
   summaryAvailable?: boolean
+  discoveryEvents?: DiscoveryEvent[]
   sourceReadmeUrl: string | null
   readme: RepoReadme
   features: string[]
   audience: string[]
   aiTopics: string[]
+}
+
+export interface DiscoveryEvent {
+  sourceType: string
+  sourceKey: string
+  sourceUrl: string
+  firstObservedAt: string
+  note: string
 }
 
 export interface RepoReadme {
@@ -141,10 +150,12 @@ export interface Job {
   repoId: number | null
   repoFullName?: string | null
   repoNameIsCurrent?: boolean | null
+  submittedRepository?: string
   createdAt: string
   updatedAt: string
 }
 export interface JobAccepted { jobId: number; statusUrl: string }
+export interface RepoSubmissionItem { line: number; input: string; jobId?: number; errorCode?: string }
 export type SummaryResponse = JobAccepted | { cached: true; summaryStatus: 'ready' }
 
 export interface Topic {

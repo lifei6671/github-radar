@@ -23,6 +23,7 @@ const repoNotFound = new ApiError(404, { code: 'not_found' })
 const readmeHeadingSelector = 'h1, h2, h3, h4, h5, h6'
 const readmeHeadingPrefix = '#readme-heading-'
 const outlineViewport = '(min-width: 1280px)'
+const longOutlineSize = 12
 
 function subscribeOutlineViewport(update: () => void) {
   const media = window.matchMedia(outlineViewport)
@@ -39,21 +40,34 @@ function readmeOutline(html: string | undefined) {
   const template = document.createElement('template')
   template.innerHTML = html
   const headings = Array.from(template.content.querySelectorAll(readmeHeadingSelector))
-  const levels: number[] = []
+  const parents: { level: number; anchor: string }[] = []
   const anchors = new Set<string>()
   return headings.flatMap((heading, index) => {
     const label = heading.textContent.trim()
     if (!label) return []
     const level = Number(heading.tagName.slice(1))
-    while (levels.length && levels[levels.length - 1] >= level) levels.pop()
-    const depth = levels.length
-    levels.push(level)
+    while (parents.length && parents[parents.length - 1].level >= level) parents.pop()
+    const depth = parents.length
+    const parent = parents.at(-1)?.anchor
     const base = readmeHeadingPrefix + encodeURIComponent(heading.id || label)
     let anchor = base
     for (let suffix = 2; anchors.has(anchor); suffix++) anchor = base + '-' + suffix
     anchors.add(anchor)
-    return [{ anchor, label, depth, index }]
+    parents.push({ level, anchor })
+    return [{ anchor, label, depth, index, parent }]
   })
+}
+
+// 长目录常驻主节，沿当前锚点展开祖先路径，让同级章节仍可直接跳转。
+function visibleReadmeOutline(outline: ReturnType<typeof readmeOutline>, activeAnchor: string) {
+  if (outline.length <= longOutlineSize) return outline
+  const parents = new Map(outline.map(({ anchor, parent }) => [anchor, parent]))
+  const roots = outline.filter(({ parent }) => parent === undefined)
+  const expanded = new Set<string>()
+  // README 只有一个总标题时，也显示它下面的各章入口。
+  if (roots.length === 1) expanded.add(roots[0].anchor)
+  for (let anchor: string | undefined = activeAnchor; anchor; anchor = parents.get(anchor)) expanded.add(anchor)
+  return outline.filter(({ parent }) => parent === undefined || expanded.has(parent))
 }
 
 export function Detail() {
@@ -198,7 +212,7 @@ export function Detail() {
     const bounds = rail.getBoundingClientRect()
     if (item.top < bounds.top) rail.scrollTop += item.top - bounds.top
     else if (item.bottom > bounds.bottom) rail.scrollTop += item.bottom - bounds.bottom
-  }, [activeAnchor, desktopOutline])
+  }, [activeAnchor, desktopOutline, outline])
   if (invalidIdentity || wrongHistoricalName) return <Empty title="仓库地址无效" />
   if (detail.isPending || resolvingBookmark) return <Skeleton />
   if (withdrawn) return <PageError error={repoNotFound} retry={() => { void detail.refetch() }} />
@@ -216,6 +230,7 @@ export function Detail() {
   const names = new Map(categories.data?.items.map((item) => [item.slug, item.name]))
   const showSummaryStatus = admin && repo.summaryStatus !== 'missing'
   const visibleSections = sections.filter(([anchor]) => !repo.blocked || anchor !== '#readme')
+  const visibleOutline = desktopOutline ? visibleReadmeOutline(outline, activeAnchor) : []
   function chapterLink(anchor: string, label: string) {
     const parent = anchor === '#readme' && withinReadme
     return <Link key={anchor} to={{ search: location.search, hash: anchor }} state={location.state}
@@ -240,8 +255,8 @@ export function Detail() {
         {admin ? <AnimatedPills>{visibleSections.map(([anchor, label]) => chapterLink(anchor, label))}</AnimatedPills> :
           <div className="pills">{visibleSections.map(([anchor, label]) => <div key={anchor} className="reader-chapter">
             {chapterLink(anchor, label)}
-            {anchor === '#readme' && desktopOutline && outline.length > 0 && <ul className="readme-outline" aria-label="README 目录">
-              {outline.map(({ anchor, label, depth }) => <li key={anchor} style={{ '--heading-depth': depth } as CSSProperties}>
+            {anchor === '#readme' && visibleOutline.length > 0 && <ul className="readme-outline" aria-label="README 目录">
+              {visibleOutline.map(({ anchor, label, depth }) => <li key={anchor} style={{ '--heading-depth': depth } as CSSProperties}>
                 {chapterLink(anchor, label)}
               </li>)}
             </ul>}
@@ -250,18 +265,20 @@ export function Detail() {
     </div>
     <article ref={article} className="detail-article" aria-labelledby="repo-title">
       <header className="article-head">
-        <div className="repo-tags">
+        {admin && <div className="repo-tags">
           {repo.language && <span className="language"><span />{repo.language}</span>}<Badge>{repo.grade} 级</Badge>
           {repo.state !== 'active' && <Badge tone="warning">{repoState[repo.state]}</Badge>}
           {repo.blocked && <Badge tone="warning">已屏蔽</Badge>}
-        </div>
+        </div>}
         <h1 id="repo-title">{repo.fullName}</h1>
         {!admin && repo.titleZh && <p className="reader-subtitle">{repo.titleZh}</p>}
         <div className="detail-stats minor muted">
-          <span><Star size={14} aria-hidden /><strong className="numeric">{number(repo.stars)}</strong> Star</span>
-          <span><GitFork size={14} aria-hidden /><strong className="numeric">{number(repo.forks)}</strong> Fork</span>
-          <span className="reader-inline-date"><CalendarDays size={14} aria-hidden /><time dateTime={repo.discoveredAt}>{timestamp(repo.discoveredAt)}</time> 发现</span>
-          {repo.lastSuccessAt && <span className="reader-inline-date"><Clock3 size={14} aria-hidden /><time dateTime={repo.lastSuccessAt} title={timestamp(repo.lastSuccessAt)}>{relativeTime(repo.lastSuccessAt)}</time> 采样</span>}
+          {admin && <>
+            <span><Star size={14} aria-hidden /><strong className="numeric">{number(repo.stars)}</strong> Star</span>
+            <span><GitFork size={14} aria-hidden /><strong className="numeric">{number(repo.forks)}</strong> Fork</span>
+          </>}
+          <span><CalendarDays size={14} aria-hidden /><time dateTime={repo.discoveredAt}>{timestamp(repo.discoveredAt)}</time> 发现</span>
+          {repo.lastSuccessAt && <span><Clock3 size={14} aria-hidden /><time dateTime={repo.lastSuccessAt} title={timestamp(repo.lastSuccessAt)}>{relativeTime(repo.lastSuccessAt)}</time> 采样</span>}
         </div>
       </header>
       {detail.error && <Notice error>{errorText(detail.error)} 上次采样 {timestamp(repo.lastSuccessAt)}</Notice>}
@@ -272,7 +289,7 @@ export function Detail() {
             !repo.summaryZh && repo.description && <span className="minor muted">GitHub About</span>}
         </header>
         <p className="summary-body">{repo.summaryZh || repo.description || '暂无项目简介'}</p>
-        {repo.recommendationReason && <p className="recommendation-reason"><strong>推荐理由</strong>{repo.recommendationReason}</p>}
+        {admin && repo.recommendationReason && <p className="recommendation-reason"><strong>推荐理由</strong>{repo.recommendationReason}</p>}
         {repo.features.length > 0 && <div className="topic-links">
           {repo.features.map((tag) => <Badge key={tag}>{tag}</Badge>)}
         </div>}
@@ -296,6 +313,10 @@ export function Detail() {
 function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<string, string>; admin: boolean }) {
   const license = repo.license?.spdxId === 'NOASSERTION' ? '未识别许可' : repo.license?.name ?? repo.license?.spdxId ?? '未声明'
   return <aside className="detail-aside" aria-label="仓库信息栏">
+    {!admin && repo.recommendationReason && <section className="detail-side-card" aria-labelledby="repo-reason-title">
+      <h2 id="repo-reason-title">推荐理由</h2>
+      <p className="recommendation-reason">{repo.recommendationReason}</p>
+    </section>}
     {(admin || repo.hotnessScore !== null) && <section className="detail-side-card" aria-labelledby="repo-heat-title">
       <h2 id="repo-heat-title">热点信号</h2>
       <dl className="detail-side-facts">
@@ -309,7 +330,16 @@ function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<stri
       <h2 id="repo-source-title">GitHub 仓库</h2>
       {admin && <div className="detail-origin"><External href={repo.htmlUrl}>{repo.fullName}</External></div>}
       {repo.summaryZh && repo.description && <p className="minor muted">{repo.description}</p>}
-      <dl className="detail-side-facts"><div><dt>许可证</dt><dd>{license}</dd></div></dl>
+      <dl className="detail-side-facts">
+        {!admin && <>
+          {repo.language && <div><dt>语言</dt><dd>{repo.language}</dd></div>}
+          <div><dt>级别</dt><dd>{repo.grade} 级</dd></div>
+          <div><dt>Star</dt><dd className="numeric">{number(repo.stars)}</dd></div>
+          <div><dt>Fork</dt><dd className="numeric">{number(repo.forks)}</dd></div>
+          {repo.state !== 'active' && <div><dt>状态</dt><dd>{repoState[repo.state]}</dd></div>}
+        </>}
+        <div><dt>许可证</dt><dd>{license}</dd></div>
+      </dl>
       {repo.trendingEntries.length > 0 && <ul className="detail-source-list" aria-label="GitHub Trending 排名">
         {repo.trendingEntries.map((entry) => <li key={entry.sourceKey + ':' + entry.period}>
           <Link to={'/trending?' + new URLSearchParams({ view: 'official', source: entry.sourceKey + ':' + entry.period })}>
@@ -335,6 +365,17 @@ function DetailAside({ repo, names, admin }: { repo: RepoDetail; names: Map<stri
       <div className="topic-links">
         {repo.aiTopics.map((topic) => <span key={topic} className="context-chip">{topic}</span>)}
       </div>
+    </section>}
+    {admin && Boolean(repo.discoveryEvents?.length) && <section className="detail-side-card" aria-labelledby="repo-discovery-title">
+      <h2 id="repo-discovery-title">发现来源</h2>
+      <ul className="repo-discovery-events">
+        {repo.discoveryEvents?.map((event) => <li key={event.sourceType + ':' + event.sourceKey}>
+          <strong>{event.sourceType === 'manual' ? '人工提交' : event.sourceType}</strong>
+          <time className="minor muted" dateTime={event.firstObservedAt}>{timestamp(event.firstObservedAt)}</time>
+          {event.sourceUrl && <a href={event.sourceUrl} target="_blank" rel="noopener noreferrer">{event.sourceUrl}</a>}
+          {event.note && <p>{event.note}</p>}
+        </li>)}
+      </ul>
     </section>}
     {!repo.blocked && <SimilarProjects repoId={repo.id} />}
     {admin && <section className="detail-side-card" aria-labelledby="repo-record-title">

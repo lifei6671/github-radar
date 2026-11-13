@@ -3,9 +3,11 @@ package summary
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -36,7 +38,7 @@ func TestSummaryPublishesShortReadmeTranslationFromSameCall(t *testing.T) {
 	}
 	step(t, e)
 	saved := row[storage.AISummary](t, db, "repo_id=1")
-	if calls != 1 || saved.TitleZh == nil || *saved.TitleZh != "本地脚本编排工具" || saved.SummaryStatus != "ready" {
+	if calls != 1 || len(source.etags) != 1 || saved.TitleZh == nil || *saved.TitleZh != "本地脚本编排工具" || saved.SummaryStatus != "ready" {
 		t.Fatalf("单次请求应保存小标题和导读: calls=%d %+v", calls, saved)
 	}
 	view, err := CachedReadme(db, 1)
@@ -67,6 +69,13 @@ type localizedSourceFixture struct {
 func (s *localizedSourceFixture) LocalizedReadme(_ context.Context, _, _, file string, _ int, _ gh.Policy) (gh.ReadmeResult, error) {
 	s.paths = append(s.paths, file)
 	return s.readme, s.err
+}
+
+func (s *localizedSourceFixture) ReadmeSHA(ctx context.Context, owner, name, file string, p gh.Policy) (string, error) {
+	if s.readme.Path == file {
+		return s.readme.SHA, nil
+	}
+	return s.sourceFixture.ReadmeSHA(ctx, owner, name, file, p)
 }
 
 type unlinkedSourceFixture struct {
@@ -134,8 +143,8 @@ func TestLinkedChineseReadmeAvoidsModelTranslation(t *testing.T) {
 	if err != nil || !strings.Contains(view.ChineseHTML, "项目使用指南") || view.SourceURL != localized.readme.URL {
 		t.Fatalf("详情应直接展示仓库提供的中文版: %+v %v", view, err)
 	}
-	if strings.Join(localized.paths, ",") != "docs/README.zh-CN.md,docs/README.zh-CN.md" {
-		t.Fatalf("只有后台读取和复核才应请求 GitHub 的中文 README: %v", localized.paths)
+	if strings.Join(localized.paths, ",") != "docs/README.zh-CN.md" {
+		t.Fatalf("发布复核不应重复请求 GitHub 的中文 README: %v", localized.paths)
 	}
 	localized.err = &gh.Failure{Code: "github_invalid_readme", Status: 200}
 	checked, err := e.readReadme(t.Context(), storage.Repository{RepoID: 1, Grade: "A"}, false)
@@ -176,6 +185,38 @@ func TestReadmeTranslationIncludesNonLatinText(t *testing.T) {
 	view, err := CachedReadme(e.Queue.DB, 1)
 	if err != nil || !view.Complete || !strings.Contains(view.ChineseHTML, "本地开发任务") {
 		t.Fatalf("非拉丁文字的译文应当发布: %+v %v", view, err)
+	}
+}
+
+func TestTranslationDiscardsSnapshotWhenUpstreamVersionChanges(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	oldSHA := source.sha
+	source.body = "# Workflow toolkit\n\nThis tool organizes local development workflows."
+	e.Translate = func(_ context.Context, prompt string) ModelResult {
+		var input struct{ Segments []string }
+		if err := json.Unmarshal([]byte(prompt), &input); err != nil {
+			t.Fatal(err)
+		}
+		for i := range input.Segments {
+			input.Segments[i] = "这个工具用于组织本地开发工作流。"
+		}
+		raw, _ := json.Marshal(map[string][]string{"t": input.Segments})
+		source.sha = strings.Repeat("b", 40)
+		return ModelResult{Content: string(raw)}
+	}
+	decision, err := e.Queue.ManualTranslation(t.Context(), 1, "outdated-translation", true, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	step(t, e)
+	job := row[storage.Job](t, e.Queue.DB, "id = ?", decision.Job.ID)
+	view, err := CachedReadme(e.Queue.DB, 1)
+	if err != nil || view.Complete || job.Status != "canceled" || len(source.etags) != 1 {
+		t.Fatalf("发现源文件版本变化后应撤下旧快照且不重复下载: job=%+v view=%+v err=%v", job, view, err)
+	}
+	var count int64
+	if err := e.Queue.DB.Model(&storage.RepoReadmeDocument{}).Where("repo_id = ? AND readme_sha = ?", 1, oldSHA).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("旧快照仍存在: count=%d err=%v", count, err)
 	}
 }
 
@@ -230,7 +271,7 @@ func TestReadmeTranslationResumesAndPublishesMatchingSource(t *testing.T) {
 		step(t, e)
 	}
 	view, err := CachedReadme(db, 1)
-	if err != nil || !view.Complete || calls < 2 || !strings.Contains(view.ChineseHTML, "使用工作流工具") ||
+	if err != nil || !view.Complete || calls < 2 || len(source.etags) != 1 || !strings.Contains(view.ChineseHTML, "使用工作流工具") ||
 		!strings.Contains(view.ChineseHTML, "PRIVATE_SHELL_MARKER") ||
 		!strings.Contains(view.ChineseHTML, "https://github.com/owner/project/blob/main/docs/usage.md") ||
 		strings.Contains(view.ChineseHTML, "<script>") {
@@ -285,37 +326,76 @@ func refreshReadmeFixture(t *testing.T, e *Engine, id string) {
 	step(t, e)
 }
 
-func TestReadmeTranslationSchedulesOnceBeforeNewLowPriorityTopics(t *testing.T) {
-	e, source, _, _ := fixture(t)
+func TestLongReadmeContinuesCombinedCallAfterRestart(t *testing.T) {
+	e, source, _, dbPath := fixture(t)
 	db := e.Queue.DB
 	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Updates(map[string]any{
 		"full_name": "owner/project", "name": "project",
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
-	source.body += strings.Repeat("Install and configure the command-line runner for repeatable local workflows.\n\n", 12)
-	e.Provider = modelFixture(func(_ context.Context, prompt string) ModelResult {
-		if strings.Contains(prompt, combinedTranslationInstruction) {
-			t.Fatal("长 README 应使用分批翻译任务")
+	for i := 0; i < 48; i++ {
+		source.body += fmt.Sprintf("\n\nStep %d: Configure the command-line runner for repeatable local workflows.", i)
+	}
+	var seen []string
+	answerParts := func(segments []string) []string {
+		seen = append(seen, segments...)
+		out := make([]string, len(segments))
+		for i := range out {
+			out[i] = "工作流工具"
 		}
-		return ModelResult{Content: modelAnswer(false)}
+		return out
+	}
+	guideCalls := 0
+	e.Provider = modelFixture(func(_ context.Context, prompt string) ModelResult {
+		guideCalls++
+		_, tail, _ := strings.Cut(prompt, combinedTranslationInstruction)
+		line, _, _ := strings.Cut(tail, "\n")
+		var segments []string
+		if err := json.Unmarshal([]byte(line), &segments); err != nil || len(segments) == 0 {
+			t.Fatalf("长 README 的导读请求应携带首批片段: %v", err)
+		}
+		encoded, _ := json.Marshal(answerParts(segments))
+		return ModelResult{Content: strings.TrimSuffix(modelAnswer(false), "}") + `,"t":` + string(encoded) + `}`}
 	})
 	e.Translate = func(_ context.Context, prompt string) ModelResult {
 		var input struct{ Segments []string }
 		if err := json.Unmarshal([]byte(prompt), &input); err != nil {
 			t.Fatal(err)
 		}
-		out := make([]string, len(input.Segments))
-		for i := range out {
-			out[i] = "工作流工具"
-		}
-		data, _ := json.Marshal(map[string][]string{"t": out})
+		data, _ := json.Marshal(map[string][]string{"t": answerParts(input.Segments)})
 		return ModelResult{Content: string(data)}
 	}
 	if _, err := e.Queue.Manual(t.Context(), 1, "summary-for-translation", false, true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	step(t, e)
+	first := row[storage.RepoReadmeTranslation](t, db, "repo_id=1")
+	guide := row[storage.AISummary](t, db, "repo_id=1")
+	if first.Complete || guide.SummaryStatus != "ready" || guideCalls != 1 || len(source.etags) != 1 {
+		t.Fatalf("首批应发布导读、保留部分译文并且只下载一次: guide=%+v first=%+v", guide, first)
+	}
+	oldPool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oldPool.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pool, err := storage.OpenBootstrap(t.Context(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pool.Close() })
+	db, err = storage.OpenGORM(pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 新实例从同一磁盘数据库恢复，后续批次不会再次下载正文。
+	q := e.Queue
+	q.DB = db
+	e = &Engine{Queue: q, GitHub: source, Provider: e.Provider, Translate: e.Translate, Logger: e.Logger}
+	original := source.body
 	e.Queue.AI.Summary.AutoDailyCalls = 1
 	if err := db.Model(&storage.Repository{}).Where("repo_id IN (2,3)").Update("topics_json", "[]").Error; err != nil {
 		t.Fatal(err)
@@ -323,6 +403,7 @@ func TestReadmeTranslationSchedulesOnceBeforeNewLowPriorityTopics(t *testing.T) 
 	schedule(t, e)
 	schedule(t, e)
 	job := row[storage.Job](t, db, "repo_id=1 AND type=?", TranslationJob)
+	e.Queue.AI.Summary.AutoDailyCalls = 6
 	for range 6 {
 		step(t, e)
 		if row[storage.Job](t, db, "id=?", job.ID).Status == "succeeded" {
@@ -330,9 +411,22 @@ func TestReadmeTranslationSchedulesOnceBeforeNewLowPriorityTopics(t *testing.T) 
 		}
 	}
 	result := row[storage.RepoReadmeTranslation](t, db, "repo_id=1")
-	if !result.Complete || result.ReadmeSHA != source.sha {
+	if !result.Complete || result.ReadmeSHA != first.ReadmeSHA || guideCalls != 1 || len(source.etags) != 1 {
 		t.Fatalf("自动译文未生成: %+v", result)
 	}
+	parts := readmeParts(readmeBody([]byte(original)), unicode.IsLetter)
+	if len(parts) != len(seen) {
+		t.Fatalf("分批续译的片段数量不符: got=%d want=%d", len(seen), len(parts))
+	}
+	for i, part := range parts {
+		if seen[i] != part.text {
+			t.Fatalf("第 %d 个片段未从原始进度恢复", i)
+		}
+	}
+	if view, err := CachedReadme(db, 1); err != nil || !view.Complete || !strings.Contains(view.ChineseHTML, "工作流工具") {
+		t.Fatalf("续译后应发布中文正文: %+v %v", view, err)
+	}
+	e.Queue.AI.Summary.AutoDailyCalls = 1
 	schedule(t, e)
 	var jobs int64
 	if err := db.Model(&storage.Job{}).Where("repo_id=1 AND type=?", TranslationJob).Count(&jobs).Error; err != nil || jobs != 1 {

@@ -12,20 +12,24 @@ var ErrCapacity = errors.New("监控容量已满")
 
 // Payload 固化计划槽，跨窗口重试也不会重算槽。
 type Payload struct {
-	PlannedAt    int64  `json:"plannedAt"`
-	RuleID       int64  `json:"ruleId,omitempty"`
-	SourceKey    string `json:"sourceKey,omitempty"`
-	Query        string `json:"query,omitempty"`
-	Language     string `json:"language,omitempty"`
-	Period       string `json:"period,omitempty"`
-	Manual       bool   `json:"manual,omitempty"`
-	Page         int    `json:"page,omitempty"`
-	StarFloor    int    `json:"starFloor,omitempty"`
-	MinStars     int    `json:"minStars,omitempty"`
-	MaxStars     int    `json:"maxStars,omitempty"`
-	StarRange    bool   `json:"starRange,omitempty"`
-	CreatedFrom  int64  `json:"createdFrom,omitempty"`
-	CreatedUntil int64  `json:"createdUntil,omitempty"`
+	PlannedAt     int64  `json:"plannedAt"`
+	RuleID        int64  `json:"ruleId,omitempty"`
+	SourceKey     string `json:"sourceKey,omitempty"`
+	Query         string `json:"query,omitempty"`
+	Language      string `json:"language,omitempty"`
+	Period        string `json:"period,omitempty"`
+	Manual        bool   `json:"manual,omitempty"`
+	Repository    string `json:"repository,omitempty"`
+	SubmissionKey string `json:"submissionKey,omitempty"`
+	SourceURL     string `json:"sourceUrl,omitempty"`
+	Note          string `json:"note,omitempty"`
+	Page          int    `json:"page,omitempty"`
+	StarFloor     int    `json:"starFloor,omitempty"`
+	MinStars      int    `json:"minStars,omitempty"`
+	MaxStars      int    `json:"maxStars,omitempty"`
+	StarRange     bool   `json:"starRange,omitempty"`
+	CreatedFrom   int64  `json:"createdFrom,omitempty"`
+	CreatedUntil  int64  `json:"createdUntil,omitempty"`
 }
 
 func Slot(ms int64) int64 { return ms / 300000 * 300000 }

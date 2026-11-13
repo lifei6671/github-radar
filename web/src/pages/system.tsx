@@ -152,6 +152,7 @@ function ObservedTime({ value }: { value?: string | null }) {
 
 const jobTypes: Record<string, string> = {
   refresh_repo: '仓库采样', discover_trending: 'Trending 发现', discover_search: 'Search 发现',
+  discover_manual: '人工发现',
   refresh_readme_summary: '中文摘要',
   translate_readme: 'README 翻译',
   compose_report: '报刊组稿',
@@ -191,7 +192,8 @@ function JobFeed({ query, items, empty }: { query: ReturnType<typeof useSystemJo
         <strong>{jobTypes[job.type] ?? job.type}</strong><span className="minor muted numeric">#{job.id}</span>
         {job.repoId !== null && job.repoFullName && <Link className="admin-link" to={repoPath(job.repoFullName, true, job.repoNameIsCurrent === false ? job.repoId : undefined)}
           state={{ repoId: job.repoId }} title="查看关联仓库" aria-label={'查看任务 ' + job.id + ' 的仓库'}><ArrowUpRight size={14} /></Link>}
-      </div>{job.errorCode && <code className="minor tone-hot">{job.errorCode}</code>}</td>
+      </div>{job.submittedRepository && <div className="minor muted">{job.submittedRepository}</div>}
+        {job.errorCode && <code className="minor tone-hot">{job.errorCode}</code>}</td>
       <td><JobBadge status={job.status} />{job.type === 'compose_report' && job.status === 'unknown' &&
         <ReportRetry id={job.id} onQueued={() => { void query.refetch() }} />}</td>
       <td className="numeric">{job.attempts} / {job.maxAttempts}</td>

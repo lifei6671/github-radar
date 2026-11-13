@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode"
 
+	sdk "github.com/google/go-github/v88/github"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -294,7 +295,7 @@ type ReadmeView struct {
 // CachedReadme 只读后台已经准备的当前版本。
 func CachedReadme(db *gorm.DB, repoID int64) (ReadmeView, error) {
 	var row storage.RepoReadmeDocument
-	if err := db.Find(&row, "repo_id = ?", repoID).Error; err != nil {
+	if err := db.Select("repo_id", "readme_bytes", "language", "source_url", "chinese_html", "complete", "truncated").Find(&row, "repo_id = ?", repoID).Error; err != nil {
 		return ReadmeView{}, err
 	}
 	state := consts.StatusPending
@@ -308,14 +309,15 @@ func CachedReadme(db *gorm.DB, repoID int64) (ReadmeView, error) {
 		ChineseHTML: row.ChineseHTML, Complete: row.Complete, Truncated: row.Truncated}, nil
 }
 
-func saveReadme(tx *gorm.DB, repoID int64, source gh.ReadmeResult) error {
+func saveReadme(tx *gorm.DB, repoID int64, source gh.ReadmeResult, fullName string, jobID int64) error {
 	var visible int64
 	if err := tx.Model(&storage.Repository{}).Where(storage.PublicRepositoryCondition).
 		Where(storage.RepositoryColumns.RepoID+" = ?", repoID).Count(&visible).Error; err != nil || visible == 0 {
 		return err
 	}
 	row := storage.RepoReadmeDocument{RepoID: repoID, ReadmeSHA: source.SHA, ReadmeBytes: len(source.Body),
-		SourceURL: source.URL, Truncated: source.Truncated}
+		SourceURL: source.URL, Truncated: source.Truncated, SourceMarkdown: source.Body, SourceRepoName: fullName,
+		SourceETag: source.ETag, SourcePath: source.Path, SourceJobID: jobID}
 	if !source.Missing && len(source.Body) > 0 {
 		data := readmeBody(source.Body)
 		var original []byte
@@ -360,11 +362,72 @@ func saveReadme(tx *gorm.DB, repoID int64, source gh.ReadmeResult) error {
 		Update(cols.SummaryStatus, consts.StatusStale).Error
 }
 
-func (e *Engine) rememberReadme(ctx context.Context, job storage.Job, source gh.ReadmeResult) error {
+func (e *Engine) rememberReadme(ctx context.Context, job storage.Job, source gh.ReadmeResult, fullName string) error {
 	return e.Queue.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := owns(tx, job); err != nil {
 			return err
 		}
-		return saveReadme(tx, *job.RepoID, source)
+		return saveReadme(tx, *job.RepoID, source, fullName, job.ID)
 	})
+}
+
+// savedReadme 只恢复已验证且长度完整的快照，迁移前的旧记录由下次处理补齐。
+func savedReadme(document storage.RepoReadmeDocument) (gh.ReadmeResult, bool) {
+	valid := document.SourceRepoName != "" && document.ReadmeSHA != "" && document.ReadmeBytes > 0 &&
+		len(document.SourceMarkdown) == document.ReadmeBytes
+	return gh.ReadmeResult{Body: document.SourceMarkdown, SHA: document.ReadmeSHA, ETag: document.SourceETag,
+		URL: document.SourceURL, Path: document.SourcePath, Truncated: document.Truncated}, valid
+}
+
+// verifyReadmeRepository 复核发布资格和仓库地址，无需再次下载正文。
+func (e *Engine) verifyReadmeRepository(ctx context.Context, id int64, fullName string, policy gh.Policy) (*sdk.Repository, error) {
+	remote, err := e.publicRepo(ctx, id, policy)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(remote.GetFullName(), fullName) {
+		return nil, &gh.Failure{Code: consts.CodeGitHubReadmeSourceChanged}
+	}
+	return remote, nil
+}
+
+func readmeAddressChanged(err error) bool {
+	var failure *gh.Failure
+	return errors.As(err, &failure) && failure.Code == consts.CodeGitHubReadmeSourceChanged
+}
+
+// verifyReadmeVersion 在发布前核对文件 SHA 及仓库身份，避免正文更新或仓库转私时发布旧内容。
+func (e *Engine) verifyReadmeVersion(ctx context.Context, repoID int64, fullName string, snapshot gh.ReadmeResult, policy gh.Policy) (*sdk.Repository, error) {
+	owner, name, _ := strings.Cut(fullName, "/")
+	sha, shaErr := e.GitHub.ReadmeSHA(ctx, owner, name, snapshot.Path, policy)
+	remote, err := e.verifyReadmeRepository(ctx, repoID, fullName, policy)
+	if err != nil {
+		return nil, err
+	}
+	if shaErr != nil {
+		return nil, shaErr
+	}
+	if sha != snapshot.SHA {
+		return nil, &gh.Failure{Code: consts.CodeGitHubReadmeSourceChanged}
+	}
+	return remote, nil
+}
+
+// invalidateReadme 撤下已确认过期的快照和导读，清除条件请求基线并尽快重新检查来源。
+func invalidateReadme(tx *gorm.DB, repoID int64, sha string, now int64) error {
+	if err := tx.Delete(&storage.RepoReadmeDocument{}, "repo_id = ? AND readme_sha = ?", repoID, sha).Error; err != nil {
+		return err
+	}
+	if err := tx.Delete(&storage.RepoReadmeTranslation{}, "repo_id = ? AND readme_sha = ?", repoID, sha).Error; err != nil {
+		return err
+	}
+	if err := tx.Model(&storage.AISummary{}).Where("repo_id = ? AND readme_sha = ?", repoID, sha).
+		Update("summary_status", consts.StatusStale).Error; err != nil {
+		return err
+	}
+	if err := tx.Delete(&storage.RepoAITopics{}, "repo_id = ?", repoID).Error; err != nil {
+		return err
+	}
+	return tx.Model(&storage.SummaryCheck{}).Where("repo_id = ?", repoID).
+		Updates(map[string]any{"readme_etag": nil, "next_check_at": now}).Error
 }

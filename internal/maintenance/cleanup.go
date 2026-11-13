@@ -165,12 +165,13 @@ func cleanCandidates(db *gorm.DB, cutoff int64, limit int) error {
 		count := 0
 		err := db.Transaction(func(tx *gorm.DB) error {
 			var ids []int64
-			// 有未终结任务、近期采样或仍在最新完整榜单里的候选继续保留。
+			// 保留管理员提交待复核的候选，以及有活跃任务或近期观测的候选。
 			if err := tx.Model(&storage.Repository{}).Where(fmt.Sprintf(`%[1]s='%[2]s' AND %[3]s=0 AND %[4]s=0 AND %[5]s<?
 AND (%[6]s IS NULL OR %[6]s<?)
 AND NOT EXISTS(SELECT 1 FROM %[7]s j WHERE j.%[8]s=%[9]s.%[10]s AND j.%[11]s NOT IN ('%[12]s','%[13]s','%[14]s'))
 AND NOT EXISTS(SELECT 1 FROM %[15]s s WHERE s.%[16]s=%[9]s.%[10]s)
 AND NOT EXISTS(SELECT 1 FROM %[17]s t WHERE t.%[18]s=%[9]s.%[10]s)
+AND NOT EXISTS(SELECT 1 FROM repo_discovery_events d WHERE d.repo_id=%[9]s.%[10]s)
 AND NOT EXISTS(SELECT 1 FROM %[7]s j JOIN %[19]s a ON a.%[20]s=j.%[21]s
   WHERE j.%[8]s=%[9]s.%[10]s AND a.%[22]s IN ('%[23]s','%[24]s','%[25]s'))
 AND NOT EXISTS(SELECT 1 FROM %[26]s o JOIN %[27]s m ON m.%[28]s='%[29]s'||o.%[30]s||':'||o.%[31]s

@@ -11,6 +11,7 @@ import { Badge, Empty, InlineSearch, More, Notice, PageError, Skeleton } from '.
 import { AnimatedPills } from '../components/navigation-feedback'
 import { GrowthValue, RankedRepos, RepoBlockButton, RepoCard, RepoLink, Sparkline } from '../components/repo'
 import { RepoCollectionEmpty } from '../components/repo-collection'
+import { RepoSubmission } from '../components/repo-submission'
 import { PageTitle } from '../components/page-title'
 import { ThemeChronicle } from '../components/theme-chronicle'
 import { ThemeIcon } from '../components/theme-icon'
@@ -239,9 +240,10 @@ export function Repos() {
   const searchParams = params.toString()
 
   return <>
-    <header className={'page-head' + (tag ? ' repo-tag-heading' : '')}>
+    <header className={'page-head' + (admin ? ' admin-repo-heading' : tag ? ' repo-tag-heading' : '')}>
       <PageTitle title={admin ? '仓库管理' : tag ? '#' + tag : '全部项目'}
         subtitle={admin ? '搜索和筛选已收录仓库，管理重点监控与屏蔽。' : tag ? undefined : '浏览已收录的 GitHub 仓库，按分类查看或收藏。'} />
+      {admin && <RepoSubmission />}
     </header>
     {admin ? <section className="panel admin-panel" aria-label="仓库管理列表">
       <div className="admin-table-toolbar admin-repo-toolbar">
