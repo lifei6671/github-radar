@@ -13,6 +13,7 @@ type AISummary struct {
 	FeaturesJSON         string  `gorm:"column:features_json"`
 	AudienceJSON         string  `gorm:"column:audience_json"`
 	ValueTagsJSON        string  `gorm:"column:value_tags_json"`
+	ValueTagSlugsJSON    string  `gorm:"column:value_tag_slugs_json;default:'[]'"`
 	EditorialBriefJSON   string  `gorm:"column:editorial_brief_json"`
 	SourceReadmeURL      *string `gorm:"column:source_readme_url"`
 	ModelProvider        string  `gorm:"column:model_provider"`
@@ -26,6 +27,9 @@ func (AISummary) TableName() string { return AISummaryTable }
 
 // RepoAITopics 保存模型提取的主题词及其生成依据，空数组表示已分析但未提取到主题。
 type RepoAITopics struct {
+	TaxonomyJSON      string `gorm:"column:taxonomy_json;default:'{}'"`
+	TagVocabVersion   int    `gorm:"column:tag_vocab_version"`
+	PurposeVersion    int    `gorm:"column:purpose_version"`
 	ThemeSlugsJSON    string `gorm:"column:theme_slugs_json;default:'[]'"`
 	ThemeCatalogKey   string `gorm:"column:theme_catalog_key"`
 	RepoID            int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
@@ -53,19 +57,21 @@ func (RepoReadmeTranslation) TableName() string { return RepoReadmeTranslationTa
 
 // RepoReadmeDocument 保存当前已验证版本的中文正文和后台续译使用的有界原文。空 SHA 表示确认缺失。
 type RepoReadmeDocument struct {
-	RepoID         int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
-	ReadmeSHA      string `gorm:"column:readme_sha"`
-	ReadmeBytes    int    `gorm:"column:readme_bytes"`
-	Language       string `gorm:"column:language"`
-	SourceURL      string `gorm:"column:source_url"`
-	ChineseHTML    string `gorm:"column:chinese_html"`
-	Complete       bool   `gorm:"column:complete"`
-	Truncated      bool   `gorm:"column:truncated"`
-	SourceMarkdown []byte `gorm:"column:source_markdown" json:"-"`
-	SourceRepoName string `gorm:"column:source_repo_name" json:"-"`
-	SourceETag     string `gorm:"column:source_etag" json:"-"`
-	SourcePath     string `gorm:"column:source_path" json:"-"`
-	SourceJobID    int64  `gorm:"column:source_job_id" json:"-"`
+	RepoID          int64   `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
+	ReadmeSHA       string  `gorm:"column:readme_sha"`
+	ReadmeBytes     int     `gorm:"column:readme_bytes"`
+	Language        string  `gorm:"column:language"`
+	SourceURL       string  `gorm:"column:source_url"`
+	ChineseHTML     string  `gorm:"column:chinese_html"`
+	CleanedHTML     *string `gorm:"column:cleaned_html"`
+	CleanupVerified bool    `gorm:"column:cleanup_verified"`
+	Complete        bool    `gorm:"column:complete"`
+	Truncated       bool    `gorm:"column:truncated"`
+	SourceMarkdown  []byte  `gorm:"column:source_markdown" json:"-"`
+	SourceRepoName  string  `gorm:"column:source_repo_name" json:"-"`
+	SourceETag      string  `gorm:"column:source_etag" json:"-"`
+	SourcePath      string  `gorm:"column:source_path" json:"-"`
+	SourceJobID     int64   `gorm:"column:source_job_id" json:"-"`
 }
 
 func (RepoReadmeDocument) TableName() string { return RepoReadmeDocumentTable }
@@ -98,6 +104,7 @@ type AICall struct {
 	EstimatedCost     *float64 `gorm:"column:estimated_cost"`
 	DurationMS        *int64   `gorm:"column:duration_ms"`
 	ErrorCode         *string  `gorm:"column:error_code"`
+	OutputIssue       *string  `gorm:"column:output_issue;default:null"`
 }
 
 func (AICall) TableName() string { return AICallTable }

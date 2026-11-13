@@ -78,7 +78,7 @@ AIHOT 的原业务是“新闻/事件/多信源讨论”；github-radar 的核�
 | apps/web/app/features/feed/Timeline.tsx | 日期分组、时间线、增量列表 | **参考布局，重写数据绑定** | 按分类展示项目发现时间流，数据分页加载 |
 | apps/web/app/features/feed/Filters.tsx | 分类与筛选交互 | **保留交互模式，重写规则** | 主题、编程语言、增长窗口、等级、多选处理 |
 | apps/web/app/features/feed/HotTopics.tsx | 热点内容展示 | **参考可视布局** | 改为增长领跑仓库和主题热点 |
-| apps/web/app/features/hot/Sparkline.tsx | 空值断线、24h 小曲线 | **优先适配** | 使用 Star 净增或累计 Star 序列，保持 null 断线 |
+| apps/web/app/features/hot/Sparkline.tsx | 空值断线、24h 小曲线 | **优先适配** | 使用累计 Star，观测之间的缺测用虚线插值 |
 | apps/web/app/features/hot/Delta.tsx | 上升/下降/新增标签 | **参考交互，重写语义** | 指标明确写 24h 增量、排名变化，不混淆二者 |
 | apps/web/app/routes/home.tsx | 精选页排版 | **重写路由与数据逻辑** | 适配 /api/v1/repos、首页精选仓库 |
 | apps/web/app/routes/hot.tsx | 热点榜布局 | **重写路由与数据逻辑** | 按仓库增长和数据质量排序 |
@@ -192,7 +192,7 @@ AIHOT 的语义变量命名可参考，颜色值必须映射到 Radix UI Colors�
 
 - 可切换 24h 净增长、7d 净增长、热度综合分、最近上榜。
 - 显示每条数据对应的时间窗口和采样质量；增长不完整时降级显示。
-- Sparkline 使用采样/聚合时间点，缺测时折线断开，不能把缺失补 0。
+- Sparkline 实线连接连续观测，虚线对真实观测之间的缺测做线性插值；首尾缺测留空，不补 0。
 - 增长曲线中的“上升”明确表示增长速度/排名变化，不等于仓库 Star 绝对值上涨。
 - 以项目 repo_id 作为列表 key，不以排名作为实体 ID。
 
@@ -340,7 +340,7 @@ export interface ApiList<T> {
 
 Go HTTP DTO 需使用 JSON tags 与上方字段名称一致（lowerCamelCase）。实现时自动维护 OpenAPI 或 Go contract tests，以固定 JSON 快照测试防止字段漂移。
 
-增长质量来自每个窗口自己的端点，不能把热度综合 data_quality 复制到全部窗口。Trending 来源失败时可保留上次完整榜单，但必须展示 observedAt；最新成功榜单已无该仓库时移除该来源名次，不用历史最优排名冒充当前排名。Sparkline 统一展示累计 Star，不在不同卡片混用增量；24 个小时网格一致，缺测断线，不把 C 级一天一次采样画成连续小时走势。来源不足/截断与任务执行状态分别展示，合法短摘要可为 ready + insufficient_source。
+增长质量来自每个窗口自己的端点，不能把热度综合 data_quality 复制到全部窗口。Trending 来源失败时可保留上次完整榜单，但必须展示 observedAt；最新成功榜单已无该仓库时移除该来源名次，不用历史最优排名冒充当前排名。Sparkline 统一展示累计 Star，不在不同卡片混用增量；24 个小时网格一致，至少两个真实观测才绘图。虚线插值只用于展示，不回填采样、不参与增长或排名计算。来源不足/截断与任务执行状态分别展示，合法短摘要可为 ready + insufficient_source。
 
 TrendingResponse 的 batch=null 表示尚无成功抓取；成功空榜仍有 batch。失败时继续展示旧批次及其 observedAt，不用请求时间更新榜单时间；updatedAt 同 observedAt，无批次时为 null。period/sourceKey 参数与排序见主方案第 9 章。热度/评级默认每 15 分钟重算，UI 以成功计算结果为准，不把每次采样等同于评级已更新。
 

@@ -109,20 +109,32 @@ test('返回收藏时等可见性校验完成再恢复滚动', async ({ page }) 
   }
 })
 
-test('列表小趋势图跳过零散样本，连续走势保留缺测间隔', async ({ page }) => {
+test('列表小趋势图用虚线补中间缺测，保留首尾空白和真实样本', async ({ page }) => {
   const fixture = await mockRadar(page)
-  fixture.setSparkline(1, [2, 3, 16, 17])
+  // 覆盖单点不出图、隔开的孤立观测能插值、连续观测仍用实线。
+  fixture.setSparkline(1, [2])
   fixture.setSparkline(2, [1, 2, 3, 5, 6, 7, 21, 22])
+  fixture.setSparkline(3, [2, 16])
   await page.goto('/repos')
   const sparse = page.locator('.repo-card').filter({ has: page.getByRole('link', { name: 'vercel/ai', exact: true }) })
   const sufficient = page.locator('.repo-card').filter({ has: page.getByRole('link', { name: 'openai/codex', exact: true }) })
   await expect(sparse.locator('.repo-card-meta time')).toBeVisible()
   await expect(sparse.locator('.sparkline')).toHaveCount(0)
-  const graph = sufficient.getByRole('img', { name: /累计 Star 曲线，部分时段采样不足/ })
+  const graph = sufficient.getByRole('img', { name: /累计 Star 曲线，虚线为插值估算，部分时段采样不足/ })
   await expect(graph).toBeVisible()
   const path = await graph.locator('.sparkline-stroke').getAttribute('d')
-  expect(path?.match(/M/g)).toHaveLength(2)
-  expect(path?.match(/C/g)).toHaveLength(4)
+  expect(path?.match(/M/g)).toHaveLength(3)
+  expect(path?.match(/C/g)).toHaveLength(5)
+  const estimates = graph.locator('.sparkline-estimated')
+  await expect(estimates).toHaveAttribute('d', /^M[^M]+ L[^M]+ M[^M]+ L[^M]+$/)
+  const sparsePair = page.locator('.repo-card').filter({ has: page.getByRole('link', { name: 'pydantic/pydantic-ai', exact: true }) })
+  await expect(sparsePair.locator('.sparkline-stroke')).toHaveCount(0)
+  await expect(sparsePair.locator('.sparkline-estimated')).toBeVisible()
+  const line = await sparsePair.locator('.sparkline-estimated').evaluate((path: SVGPathElement) =>
+    [path.getPointAtLength(0).x, path.getPointAtLength(path.getTotalLength()).x])
+  // 第 2 和第 16 小时是两个真实端点，首尾不会填满 24 小时。
+  expect(line[0]).toBeCloseTo(5 + 2 / 23 * 94)
+  expect(line[1]).toBeCloseTo(5 + 16 / 23 * 94)
 })
 
 test('标签异步切换时保留旧列表，加载完显示标签标题和分类', async ({ page }) => {

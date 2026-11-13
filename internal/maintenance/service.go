@@ -45,7 +45,14 @@ func (s Service) RunMetrics(ctx context.Context) error {
 }
 
 func (s Service) compute(ctx context.Context, now time.Time, force bool) error {
-	if err := metrics.Compute(ctx, metricstore.Store{DB: s.DB}, s.Cfg, now, force); err != nil {
+	store := metricstore.Store{DB: s.DB}
+	err := metrics.Compute(ctx, store, s.Cfg, now, force)
+	if errors.Is(err, metricstore.ErrMonitoringChanged) {
+		// 采集期间的监控变动只重算一次，普通的采样写入不需要重算。
+		now = time.Now()
+		err = metrics.Compute(ctx, store, s.Cfg, now, force)
+	}
+	if err != nil {
 		return err
 	}
 	return discoverystore.Record(ctx, s.DB, now)

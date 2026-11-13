@@ -5,7 +5,9 @@ s3-r2-test.local.json
 **/*.local.yaml
 **/*.local.yml
 data/
-docs/
+docs/*
+!docs/taxonomy.go
+!docs/technical-taxonomy-v1.yaml
 *.exe
 web/node_modules/
 web/dist/

@@ -89,7 +89,7 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 		SummaryZh:            strings.Repeat("这个项目提供命令编排、状态追踪和可复用的配置示例。", 9) + "\n团队可以按需要接入已有的开发流程。",
 		FeaturesJSON:         `["工作流"]`,
 		RecommendationReason: new("工作流维护者可以参考它的自动化编排方式。"),
-		AudienceJSON:         "[]", ValueTagsJSON: `["自动化"]`, SourceReadmeURL: &sourceURL, SummaryStatus: "ready", ModelProvider: summary.ProviderKey(cfg.AI),
+		AudienceJSON:         "[]", ValueTagsJSON: `["旧自由标签"]`, ValueTagSlugsJSON: `["workflow"]`, SourceReadmeURL: &sourceURL, SummaryStatus: "ready", ModelProvider: summary.ProviderKey(cfg.AI),
 		ModelName: cfg.AI.Model, PromptVersion: cfg.AI.Summary.PromptVersion, GeneratedAt: now.UnixMilli()}
 	if err := db.Create(&row).Error; err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 此处验证已补齐主题词的摘要仍能走缓存。
-	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: "[]", SourceFingerprint: row.SourceFingerprint + "|description:test",
+	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: "[]", PurposeVersion: storage.TechnicalPurposeVersion, TagVocabVersion: storage.TagVocabularyVersion, SourceFingerprint: row.SourceFingerprint + "|description:test",
 		ModelProvider: row.ModelProvider, ModelName: row.ModelName, PromptVersion: row.PromptVersion, ThemeCatalogKey: "initial"}).Error; err != nil {
 		t.Fatal(err)
 	}

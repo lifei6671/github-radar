@@ -32,7 +32,14 @@ func (q Queue) scheduleStarHistory(tx *gorm.DB, now time.Time) error {
 		return nil
 	}
 	var ids []int64
-	if err := tx.Model(&storage.Repository{}).Where(storage.PublicRepositoryCondition).
+	candidates := tx.Model(&storage.Repository{}).Where(storage.PublicRepositoryCondition)
+	if !q.Cfg.LegacyMonitoring {
+		// 未验证的轻量候选只使用有限首采；官方历史查询优先留给有证据的仓库。
+		candidates = candidates.Where("repositories.starred_by_user = ? OR repositories.state = ? OR repositories.stars >= ? OR EXISTS (?)",
+			true, consts.StatusActive, 200, storage.StrongTrending(tx, now).Select("1").Where("o.repo_id = repositories.repo_id")).
+			Where("h.repo_id IS NULL OR h.checked_at <= ? OR repositories.starred_by_user = ?", now.Add(-7*24*time.Hour).UnixMilli(), true)
+	}
+	if err := candidates.
 		Joins("LEFT JOIN repo_star_history_status h ON h.repo_id = repositories.repo_id").
 		Where("(h.repo_id IS NULL OR h.checked_at <= ?)", now.Add(-24*time.Hour).UnixMilli()).
 		Where("NOT EXISTS (?)", busy.Session(&gorm.Session{}).Select("1").Where("jobs.repo_id = repositories.repo_id")).

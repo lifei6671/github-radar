@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
@@ -117,6 +118,8 @@ func (a *collectionAPI) retrySummary(c *gin.Context) {
 
 func (a *collectionAPI) summaryError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, summary.ErrBudgetExhausted):
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": consts.CodeAIBudgetExhausted})
 	case errors.Is(err, summary.ErrUnavailable):
 		c.JSON(http.StatusServiceUnavailable, gin.H{"code": consts.CodeSummaryUnavailable})
 	case errors.Is(err, summary.ErrRepoUnavailable):
@@ -129,10 +132,12 @@ func (a *collectionAPI) summaryError(c *gin.Context, err error) {
 }
 
 type summaryView struct {
-	row      storage.AISummary
-	aiTopics []string
-	jobID    *int64
-	status   string
+	classificationNeedsReview bool
+	row                       storage.AISummary
+	aiTopics                  []string
+	tags                      []string
+	jobID                     *int64
+	status                    string
 }
 
 func (v summaryView) state() string {
@@ -171,11 +176,10 @@ func (v summaryView) readyForPublication() bool {
 }
 
 func (v summaryView) valueTags() []string {
-	var tags []string
-	if err := json.Unmarshal([]byte(v.row.ValueTagsJSON), &tags); err != nil || tags == nil {
+	if v.tags == nil {
 		return []string{}
 	}
-	return tags
+	return v.tags
 }
 
 // summaryViews 批量读取摘要、AI Topics 和当前任务，避免列表逐仓库查询。
@@ -192,18 +196,37 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 	if err := db.Where(storage.AISummaryColumns.RepoID+" IN ?", ids).Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	for _, row := range rows {
-		views[row.RepoID] = summaryView{row: row}
+	if len(rows) > 0 {
+		vocabulary, err := storage.ReadTechnicalTags(db)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			views[row.RepoID] = summaryView{row: row, tags: vocabulary.Labels(row.ValueTagSlugsJSON)}
+		}
 	}
 	if len(ids) > 0 {
 		var rows []storage.RepoAITopics
-		if err := db.Where(storage.RepoAITopicsColumns.RepoID+" IN ?", ids).Find(&rows).Error; err != nil {
+		query := db.Where(storage.RepoAITopicsColumns.RepoID+" IN ?", ids)
+		if !includeJobs {
+			query = query.Where(storage.CurrentPurposeSQL)
+		}
+		if err := query.Find(&rows).Error; err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
 			v := views[row.RepoID]
-			if err := json.Unmarshal([]byte(row.TopicsJSON), &v.aiTopics); err != nil {
-				return nil, err
+			if row.PurposeVersion == storage.TechnicalPurposeVersion {
+				if err := json.Unmarshal([]byte(row.TopicsJSON), &v.aiTopics); err != nil {
+					return nil, err
+				}
+			}
+			if includeJobs && row.TaxonomyJSON != "" {
+				var classification struct{ NeedsReview bool }
+				if err := json.Unmarshal([]byte(row.TaxonomyJSON), &classification); err != nil {
+					return nil, err
+				}
+				v.classificationNeedsReview = classification.NeedsReview
 			}
 			views[row.RepoID] = v
 		}
@@ -259,8 +282,7 @@ func (a *collectionAPI) aiLimits(c *gin.Context, db *gorm.DB, now time.Time) (gi
 	var rows []usage
 	day := now.UTC().Truncate(24 * time.Hour)
 	reset := day.Add(24 * time.Hour)
-	if err := db.Model(&storage.AICall{}).Select(storage.AICallColumns.Origin+",COUNT(*) AS calls").
-		Where(storage.AICallColumns.ReservedAt+">=? AND "+storage.AICallColumns.ReservedAt+"<?", day.UnixMilli(), reset.UnixMilli()).Group(storage.AICallColumns.Origin).Scan(&rows).Error; err != nil {
+	if err := aibudget.Day(db, now).Select("origin, COUNT(*) AS calls").Group("origin").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	counts := make(map[string]int64)

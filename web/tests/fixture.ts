@@ -78,9 +78,16 @@ function published(repo: RepoDetail) {
   return item
 }
 
+function canShowOnTrending(repo: RepoDetail) {
+  return !repo.blocked && repo.nameIsCurrent !== false && ['active', 'candidate', 'paused'].includes(repo.state)
+}
+
+function hasReadySummary(repo: RepoDetail) {
+  return Boolean(repo.summaryZh?.trim()) && repo.summaryStatus !== 'stale'
+}
+
 function canPublish(repo: RepoDetail) {
-  return !repo.blocked && repo.nameIsCurrent !== false && ['active', 'candidate', 'paused'].includes(repo.state) &&
-    repo.lastSuccessAt !== null && Boolean(repo.summaryZh?.trim()) && repo.summaryStatus !== 'stale'
+  return canShowOnTrending(repo) && repo.lastSuccessAt !== null && hasReadySummary(repo)
 }
 
 export function barrier() {
@@ -243,19 +250,30 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       return reply(route, { items: repos.filter((repo) => canPublish(repo) && ids.includes(repo.id)).map(({ id }) => id) })
     }
     if (path === '/trending/sources') return reply(route, {
-      items: ['all:daily', 'all:weekly', 'all:monthly', 'language:rust:weekly'].map((sourceKey) => ({ sourceKey })),
+      items: ['all:daily', 'all:weekly', 'all:monthly', 'language:rust:weekly', 'language:go:weekly'].map((sourceKey) => ({ sourceKey })),
     })
     if (path === '/trending') {
       const sourceKey = query.get('sourceKey') ?? 'all'
       const period = query.get('period') ?? 'daily'
-      const items = sourceKey === 'language:rust' && period === 'weekly'
+      if (period !== 'daily' && period !== 'weekly' && period !== 'monthly') return reply(route, { code: 'invalid_trending_source' }, 400)
+      // Go 榜与 Rust 榜有同一项目，但两榜名次不同。
+      const items: RepoDetail[] = sourceKey === 'language:rust' && period === 'weekly'
         ? repos.slice(0, 5).map((repo, index) => ({
           ...repo, language: index === 4 ? 'Jupyter Notebook' : 'Rust', stars: index === 3 ? 780 : repo.stars,
           trendingEntries: [{ sourceKey, period: 'weekly' as const, rank: index + 1, observedAt: at }],
         }))
-        : repos.slice(0, 3)
+        : sourceKey === 'language:go' && period === 'weekly'
+        ? [{ ...repos[4], trendingEntries: [{ sourceKey, period, rank: 2, observedAt: at }] }]
+        : repos.slice(0, 3).map<RepoDetail>((repo, index) => ({
+          ...repo, trendingEntries: [{ sourceKey, period, rank: index + 3, observedAt: at }],
+        }))
+      // 官方榜单不等待导读，已就绪的详情才使用站内链接。
+      const visible = publicRead ? items.filter(canShowOnTrending).map((repo) => ({
+        ...published(hasReadySummary(repo) ? repo : { ...repo, summaryPreview: null, titleZh: null }),
+        detailAvailable: canPublish(repo),
+      })) : items
       return reply(route, { sourceKey, period, updatedAt: at,
-        batch: { observedSlot: 1, observedAt: at }, items: publicRead ? items.filter(canPublish).map(published) : items })
+        batch: { observedSlot: 1, observedAt: at }, items: visible })
     }
     if (path.startsWith('/repos/by-name/')) {
       const name = decodeURIComponent(path.slice('/repos/by-name/'.length)).toLowerCase()

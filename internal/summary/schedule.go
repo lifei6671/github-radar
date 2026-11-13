@@ -3,11 +3,11 @@ package summary
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -21,6 +21,9 @@ AND t.` + storage.TopicCandidateColumns.Status + ` IN ('` + consts.StatusCandida
 
 // Schedule 将初次发现和到期的来源检查写入队列，已有未决任务由原 Worker 处理。
 func (q Queue) Schedule(ctx context.Context, now time.Time) error {
+	if !q.AI.Summary.LegacyAdmission {
+		return q.scheduleAdmitted(ctx, now)
+	}
 	ms := now.UnixMilli()
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		paused, err := storage.BooleanSetting(ctx, tx, storage.AutoAIResumeKey)
@@ -29,13 +32,10 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 		}
 		// 补齐主题词使用剩余自动额度，避免为低优先级仓库堆积等待额度的任务。
 		var topicSlots int
-		start := now.UTC().Truncate(24 * time.Hour)
-		var calls int64
-		if err := tx.Model(&storage.AICall{}).Where("origin = ? AND reserved_at >= ? AND reserved_at < ?",
-			consts.OriginAuto, start.UnixMilli(), start.Add(24*time.Hour).UnixMilli()).Count(&calls).Error; err != nil {
+		remaining, err := aibudget.ForConfig(q.DB, q.AI.Summary).Remaining(tx, "", now)
+		if err != nil {
 			return err
 		}
-		remaining := max(0, q.AI.Summary.AutoDailyCalls-int(calls))
 		if remaining > 0 {
 			if err := q.scheduleCachedTranslations(tx, ms, remaining); err != nil {
 				return err
@@ -59,15 +59,14 @@ SELECT max(0, ? - (SELECT count(*) FROM %[1]s WHERE %[2]s IN (?,?) AND %[3]s<200
 			HasSummary    bool
 			ThemeBackfill bool
 		}
-		nativeMatch := strings.ReplaceAll(storage.HasNativeThemeSQL, "repositories.topics_json", "r.topics_json")
 		err = tx.Raw(`
 WITH hot AS (`+topReposSQL+`),
 eligible AS (
   SELECT r.`+storage.RepositoryColumns.RepoID+`,m.`+storage.LatestMetricColumns.HotnessScore+`,
-    (json_array_length(r.topics_json)=0 OR (`+storage.HasTopicThemesSQL+` AND NOT `+nativeMatch+`)) AS needs_topics,
+    (json_array_length(r.topics_json)=0) AS needs_topics,
     (EXISTS (SELECT 1 FROM ai_summaries a WHERE a.repo_id=r.repo_id AND a.summary_status='ready')
-     AND `+storage.HasTopicThemesSQL+` AND NOT `+nativeMatch+`
-     AND NOT EXISTS (SELECT 1 FROM repo_ai_topics a WHERE a.repo_id=r.repo_id AND a.theme_catalog_key=`+storage.ThemeCatalogKeySQL+`)) AS theme_backfill,
+     AND NOT EXISTS (SELECT 1 FROM repo_ai_topics a WHERE a.repo_id=r.repo_id
+       AND a.`+storage.CurrentTagVocabularySQL+` AND a.theme_catalog_key=`+storage.ThemeCatalogKeySQL+`)) AS theme_backfill,
     (r.`+storage.RepositoryColumns.Grade+` IN ('`+consts.GradeS+`','`+consts.GradeA+`') OR r.`+storage.RepositoryColumns.StarredByUser+`=1 OR r.`+storage.RepositoryColumns.RepoID+` IN (SELECT `+storage.LatestMetricColumns.RepoID+` FROM hot)
      OR EXISTS(`+recentTopicSQL+fmt.Sprintf(`)) AS high_priority
   FROM %[1]s r LEFT JOIN %[2]s m ON m.%[3]s=r.%[4]s
@@ -166,11 +165,11 @@ WITH backfill AS (
  SELECT jobs.id, (d.repo_id IS NOT NULL AND c.last_seen_readme_sha=d.readme_sha) AS cached
  FROM jobs JOIN repositories ON repositories.repo_id=jobs.repo_id
  JOIN ai_summaries s ON s.repo_id=jobs.repo_id AND s.summary_status='ready'
- LEFT JOIN repo_readme_documents d ON d.repo_id=s.repo_id AND d.readme_sha=s.readme_sha AND d.complete=1
+ LEFT JOIN repo_readme_documents d ON d.repo_id=s.repo_id AND d.readme_sha=s.readme_sha AND d.source_repo_name=repositories.full_name
+   AND d.readme_bytes > 0 AND LENGTH(d.source_markdown)=d.readme_bytes
  LEFT JOIN summary_checks c ON c.repo_id=s.repo_id
- WHERE jobs.type=? AND jobs.status IN ('pending','failed') AND jobs.priority<200 AND `+storage.HasTopicThemesSQL+`
- AND `+storage.PublicRepositoryCondition+` AND NOT `+storage.HasNativeThemeSQL+`
- AND NOT EXISTS (SELECT 1 FROM repo_ai_topics a WHERE a.repo_id=jobs.repo_id AND a.theme_catalog_key=`+storage.ThemeCatalogKeySQL+`)
+ WHERE jobs.type=? AND jobs.status IN ('pending','failed') AND jobs.priority<200 AND `+storage.PublicRepositoryCondition+`
+ AND NOT EXISTS (SELECT 1 FROM repo_ai_topics a WHERE a.repo_id=jobs.repo_id AND a.`+storage.CurrentTagVocabularySQL+` AND a.theme_catalog_key=`+storage.ThemeCatalogKeySQL+`)
 )
 UPDATE jobs SET priority=max(priority,120),
  available_at=CASE WHEN last_error_code=? AND id IN (SELECT id FROM backfill WHERE cached)
@@ -181,6 +180,10 @@ WHERE id IN (SELECT id FROM backfill)
 }
 
 func (q Queue) eligible(ctx context.Context, repo storage.Repository, now time.Time) (bool, error) {
+	if !q.AI.Summary.LegacyAdmission {
+		d, _, err := storage.AIDecision(q.DB.WithContext(ctx), repo, "summary", false, now)
+		return q.AI.Summary.AutoDailyCalls > 0 && d.State == "pass", err
+	}
 	if repo.State != consts.StatusActive || q.AI.Summary.AutoDailyCalls == 0 {
 		return false, nil
 	}

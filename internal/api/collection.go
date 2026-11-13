@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,7 @@ func (a *collectionAPI) register(v1 *gin.RouterGroup) {
 	v1.GET("/system/jobs", a.jobs)
 	v1.GET("/system/limits", a.limits)
 	v1.GET("/system/storage", a.storageStatus)
+	v1.GET("/system/admission", a.admissionAudit)
 	v1.POST("/system/maintenance/run", a.requestMaintenance)
 }
 
@@ -65,6 +67,21 @@ func (a *collectionAPI) loadCategories(c *gin.Context) {
 		a.fail(c, err)
 		c.Abort()
 		return
+	}
+	// 扩展匹配规则而不改管理员保存的分类，卡片、计数和筛选共享兼容口径。
+	for i := range items {
+		for _, id := range items[i].AnyTopics {
+			items[i].AnyTopics = append(items[i].AnyTopics, storage.CompatibleCapabilityIDs(id)...)
+			if id == "cli" {
+				// 旧分类仍可覆盖真正以终端开发为主的能力，形态本身不参与分类。
+				items[i].AnyTopics = append(items[i].AnyTopics, "cli-tools")
+			}
+			if id == "developer-tools" {
+				items[i].AnyTopics = append(items[i].AnyTopics, "plugin-catalog")
+			}
+		}
+		slices.Sort(items[i].AnyTopics)
+		items[i].AnyTopics = slices.Compact(items[i].AnyTopics)
 	}
 	c.Set(categoriesKey, append(items, config.Category{Slug: consts.CategoryOther, Name: "其他"}))
 	c.Next()
@@ -84,16 +101,12 @@ func optionalISO(ms *int64) *string {
 	return &value
 }
 
-// 分类优先使用 GitHub Topics。仅当原生主题为空时才读取 AI Topics。
-var effectiveTopicsSQL = `CASE WHEN json_array_length(` + storage.RepositoryTable + `.` + storage.RepositoryColumns.TopicsJSON + `)>0 THEN ` + storage.RepositoryTable + `.` + storage.RepositoryColumns.TopicsJSON + `
-ELSE COALESCE((SELECT ` + storage.RepoAITopicsColumns.TopicsJSON + ` FROM ` + storage.RepoAITopicsTable + ` t WHERE t.` + storage.RepoAITopicsColumns.RepoID + `=` + storage.RepositoryTable + `.` + storage.RepositoryColumns.RepoID + `), '[]') END`
+// 筛选、计数和卡片只采用通过技术用途审核的主题词。
+var effectiveTopicsSQL = `COALESCE((SELECT t.topics_json FROM repo_ai_topics t
+WHERE t.repo_id = repositories.repo_id AND t.` + storage.CurrentPurposeSQL + `), '[]')`
 
 // card 组合仓库元数据及本轮成功发布的增长和热度。
 func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries map[int64][]gin.H, view metricView, summary summaryView) gin.H {
-	topics := repo.GitHubTopics()
-	if len(topics) == 0 {
-		topics = summary.aiTopics
-	}
 	trending := entries[repo.RepoID]
 	if trending == nil {
 		trending = []gin.H{}
@@ -109,7 +122,7 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 	body := gin.H{
 		"id": repo.RepoID, "fullName": repo.FullName, "htmlUrl": repo.HTMLURL,
 		"description": repo.Description, "titleZh": summary.title(), "language": repo.PrimaryLanguage,
-		"categories": config.Classify(categoriesFor(c), topics), "state": repo.State,
+		"categories": config.Classify(categoriesFor(c), summary.aiTopics), "state": repo.State,
 		"stars": repo.Stars, "forks": repo.Forks, "grade": repo.Grade,
 		"growth24h": view.window(consts.Window24h), "growth7d": view.window(consts.Window7d),
 		"hotnessScore": view.row.HotnessScore, "hotnessRank": view.rank, "trendingEntries": trending,
@@ -223,23 +236,16 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		body["summaryGeneratedAt"] = iso(summary.row.GeneratedAt)
 	}
 	body["summarySourceLanguage"] = textPtr(summary.row.SourceLanguage)
-	body["aiTopics"] = []string{}
-	if len(summary.aiTopics) > 0 {
-		var matched bool
-		if err := db.Model(&storage.Repository{}).Select(storage.HasNativeThemeSQL).
-			Where("repositories.repo_id=?", repo.RepoID).Scan(&matched).Error; err != nil {
-			a.fail(c, err)
-			return
-		}
-		if !matched {
-			body["aiTopics"] = summary.aiTopics
-		}
+	body["aiTopics"] = summary.aiTopics
+	if summary.aiTopics == nil {
+		body["aiTopics"] = []string{}
 	}
 	if c.GetBool(publicReadKey) {
 		delete(body, "summaryModel")
 	} else {
 		// 管理端沿用发起手动任务的门槛，只返回可用状态。
 		body["summaryAvailable"] = !repo.Blocked && a.summaryAvailable(c)
+		body["classificationNeedsReview"] = summary.classificationNeedsReview
 		events, err := discoveryEvents(db, repo.RepoID)
 		if err != nil {
 			a.fail(c, err)
@@ -359,7 +365,19 @@ func (a *collectionAPI) job(c *gin.Context) {
 		a.fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, jobView(job))
+	view := jobView(job)
+	if job.LastErrorCode != nil && *job.LastErrorCode == consts.CodeInvalidOutput {
+		// 从调用台账读取最后一次校验原因，保留任务原有的错误码契约。
+		var call storage.AICall
+		if err := a.db.WithContext(c.Request.Context()).Select("output_issue").
+			Where("job_id = ? AND error_code = ?", job.ID, consts.CodeInvalidOutput).
+			Order("updated_at DESC, call_key DESC").Limit(1).Find(&call).Error; err != nil {
+			a.fail(c, err)
+			return
+		}
+		view["outputIssue"] = call.OutputIssue
+	}
+	c.JSON(http.StatusOK, view)
 }
 
 func pageLimit(c *gin.Context) (int, bool) {
@@ -523,8 +541,11 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		storage.Repository
 		BatchRank     int
 		PublicVisible bool
+		DetailReady   bool
 	}
-	if err := db.Model(&storage.Repository{}).Select(storage.RepositoryTable+".*, t."+storage.TrendingObservationColumns.Rank+" AS batch_rank, ("+publicRepoCondition+") AS public_visible").
+	public := c.GetBool(publicReadKey)
+	// 官方榜单沿用 GitHub 的名次，站内详情则沿用导读发布门槛。
+	if err := db.Model(&storage.Repository{}).Select(storage.RepositoryTable+".*, t."+storage.TrendingObservationColumns.Rank+" AS batch_rank, ("+storage.PublicRepositoryCondition+") AS public_visible, ("+publicRepoCondition+") AS detail_ready").
 		Joins("JOIN "+storage.TrendingObservationTable+" t ON t."+storage.TrendingObservationColumns.RepoID+" = "+storage.RepositoryTable+"."+storage.RepositoryColumns.RepoID).
 		Where("t."+storage.TrendingObservationColumns.SourceKey+"=? AND t."+storage.TrendingObservationColumns.Window+"=? AND t."+storage.TrendingObservationColumns.ObservedSlot+"=?", source, period, batch.ObservedSlot).
 		Order("t." + storage.TrendingObservationColumns.Rank + ", " + storage.RepositoryTable + "." + storage.RepositoryColumns.RepoID).Find(&members).Error; err != nil {
@@ -542,11 +563,13 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		return
 	}
 	repos := make([]storage.Repository, 0, len(members))
+	detailReady := make(map[int64]bool, len(members))
 	// 目标来源的名次固定使用已选择批次，期间发布新榜单也不会混用槽。
 	for _, member := range members {
-		if c.GetBool(publicReadKey) && !member.PublicVisible {
+		if public && !member.PublicVisible {
 			continue
 		}
+		detailReady[member.RepoID] = member.DetailReady
 		repos = append(repos, member.Repository)
 		var retained []gin.H
 		for _, entry := range entries[member.RepoID] {
@@ -563,7 +586,7 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		a.fail(c, err)
 		return
 	}
-	summaries, err := summaryViews(db, repos, !c.GetBool(publicReadKey))
+	summaries, err := summaryViews(db, repos, !public)
 	if err != nil {
 		a.fail(c, err)
 		return
@@ -571,10 +594,16 @@ func (a *collectionAPI) trending(c *gin.Context) {
 	items := make([]gin.H, 0, len(repos))
 	for _, repo := range repos {
 		summary := summaries[repo.RepoID]
-		if c.GetBool(publicReadKey) && !summary.readyForPublication() {
-			continue
+		ready := summary.readyForPublication()
+		if public && !ready {
+			// 榜单先展示 GitHub 简介，过期或空导读也不参与展示。
+			summary.row.SummaryZh, summary.row.TitleZh = "", nil
 		}
-		items = append(items, a.card(c, repo, entries, views[repo.RepoID], summary))
+		item := a.card(c, repo, entries, views[repo.RepoID], summary)
+		if public {
+			item["detailAvailable"] = detailReady[repo.RepoID] && ready
+		}
+		items = append(items, item)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"sourceKey": source, "period": period, "batch": gin.H{"observedSlot": batch.ObservedSlot, "observedAt": iso(batch.ObservedAt)},

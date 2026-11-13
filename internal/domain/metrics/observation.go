@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 )
 
 const (
@@ -33,9 +34,10 @@ type ObservationEvidence struct {
 
 // ObservationPolicy 使用有效快照划分观察档位。来源信号只负责保留或安排复核。
 type ObservationPolicy struct {
-	Capacity  [4]int
-	Total     int
-	Intervals [4]int64
+	Capacity     [4]int
+	Total        int
+	Intervals    [4]int64
+	AgeAdmission bool
 }
 
 type observationChoice struct {
@@ -50,6 +52,9 @@ func AllocateObservation(policy ObservationPolicy, repos []Repository, rows []Ca
 	cohorts := observationCohorts(repos, rows)
 	for i, repo := range repos {
 		level, reason, evidence, strength := observationTarget(repo, rows[i], cohorts, asOf)
+		if policy.AgeAdmission {
+			level, reason, strength = ageObservation(repo, rows[i], evidence, asOf, level, reason, strength)
+		}
 		choices = append(choices, observationChoice{i, level, strength, reason, evidence})
 	}
 	slices.SortFunc(choices, func(a, b observationChoice) int {
@@ -59,6 +64,17 @@ func AllocateObservation(policy ObservationPolicy, repos []Repository, rows []Ca
 		}
 		if n := cmp.Compare(a.level, b.level); n != 0 {
 			return n
+		}
+		if policy.AgeAdmission && a.level == b.level {
+			if n := cmp.Compare(exactInt(b.reason == "age_boundary_grace"), exactInt(a.reason == "age_boundary_grace")); n != 0 {
+				return n
+			}
+			// 常规累计 Star 资格只竞争空位，避免首轮一口气替换已有低频项目。
+			if a.strength <= 1 && b.strength <= 1 {
+				if n := cmp.Compare(exactInt(right.State == consts.StatusActive), exactInt(left.State == consts.StatusActive)); n != 0 {
+					return n
+				}
+			}
 		}
 		if n := cmp.Compare(b.strength, a.strength); n != 0 {
 			return n
@@ -79,6 +95,7 @@ func AllocateObservation(policy ObservationPolicy, repos []Repository, rows []Ca
 	})
 
 	var changes []GradeChange
+	policyDemotions := 0
 	for _, item := range choices {
 		repo := repos[item.index]
 		level, reason, evidence := item.level, item.reason, item.evidence
@@ -101,6 +118,14 @@ func AllocateObservation(policy ObservationPolicy, repos []Repository, rows []Ca
 			}
 			if level != item.level {
 				reason = "capacity"
+			}
+		}
+		// 仅分批退出已存在的安静仓库；显式容量缩减仍立即生效。
+		if policy.AgeAdmission && repo.State == consts.StatusActive && level >= len(gradeNames) && reason == "quiet_14d" {
+			if policyDemotions >= 40 && policy.Total > 0 && policy.Capacity[3] > 0 {
+				level, reason = 3, "demotion_batch_deferred"
+			} else {
+				policyDemotions++
 			}
 		}
 		state, grade := repo.State, repo.Grade
@@ -130,6 +155,79 @@ func AllocateObservation(policy ObservationPolicy, repos []Repository, rows []Ca
 		changes = append(changes, change)
 	}
 	return changes
+}
+
+// ageObservation 在增长分档之外允许常规监控；已有项目通过原有连续观测规则逐档降频。
+func ageObservation(repo Repository, row Calculation, evidence ObservationEvidence, asOf int64, level int, reason string, strength int) (int, string, int) {
+	now := time.UnixMilli(asOf)
+	in := admission.Input{ID: repo.ID, Stars: repo.Stars, CreatedAt: repo.CreatedAt, PushedAt: repo.PushedAt,
+		Public: repo.FirstNotFoundAt == nil, Followed: repo.Followed,
+		Evidence: admission.Evidence{Exact24h: evidence.Exact24h, Trending: repo.TrustedTrendingAt, BurstAt: repo.OfficialBurstAt}}
+	if repo.OfficialBurstAt != 0 {
+		in.Evidence.Source = BreakoutGitHub
+	}
+	if evidence.WindowStartAt != nil && evidence.WindowEndAt != nil {
+		in.Evidence.StartAt, in.Evidence.EndAt = *evidence.WindowStartAt, *evidence.WindowEndAt
+	}
+	if evidence.Breakout != nil {
+		in.Evidence.BurstAt, in.Evidence.Source = evidence.Breakout.At, evidence.Breakout.Source
+	}
+	if reason == "breakout" || reason == "manual_follow" || !in.Public {
+		return level, reason, strength
+	}
+	d := admission.Monitoring(in, now)
+	if repo.State != consts.StatusActive {
+		// 暂停项目只有新的榜单或实际增长证据才能复热，避免静态门槛导致反复进出。
+		if repo.PausedAt > 0 && d.Priority > 20 &&
+			max(in.Evidence.EndAt, in.Evidence.Trending, in.Evidence.BurstAt) <= repo.PausedAt {
+			return len(gradeNames), "awaiting_new_signal", 0
+		}
+		switch d.Priority {
+		case 100:
+			if in.Evidence.FreshGrowth(now) < 100 && in.Evidence.Source == BreakoutGitHub && in.Evidence.Trending == 0 {
+				// 官方每日新增可获得普通监控竞争资格，S 档仍由真实净增或强榜单决定。
+				return 2, "official_burst", 2
+			}
+			return 0, d.Reason, 3
+		case 80:
+			return 1, d.Reason, 2
+		case 40:
+			return 2, d.Reason, 2
+		case 20:
+			if repo.State == consts.StatusCandidate || repo.PausedAt == 0 || repo.PausedReason == "capacity" {
+				return 3, d.Reason, 1
+			}
+		}
+		return len(gradeNames), d.Reason, 0
+	}
+	if d.Priority >= 80 && d.Reason == "verified_burst" {
+		return min(level, 1), d.Reason, 2
+	}
+	if d.Priority == 20 && level >= len(gradeNames) {
+		return 3, d.Reason, 1
+	}
+	if d.State != admission.Pass {
+		if _, grace := admission.CrossAgeGrace(in, now); grace {
+			return max(0, slices.Index(gradeNames, repo.Grade)), "age_boundary_grace", 1
+		}
+		if repo.PreserveAvailability && level >= len(gradeNames) {
+			return 3, "preserve_editorial_access", 1
+		}
+		if reason == "quiet_14d" {
+			if repo.Grade == consts.GradeB {
+				return 3, "quiet_cooling", 1
+			}
+			if repo.Grade == consts.GradeC && repo.LastDowngradeAt > asOf-3*Day {
+				return 3, "cooling_dwell", 1
+			}
+		}
+		// 缺少可信样本时先降到低频并收集证据，不把缺测解释成零增长。
+		if current := slices.Index(gradeNames, repo.Grade); current >= 0 && level < len(gradeNames) &&
+			level > current+1 && (reason == "slowed_48h" || row.ObservationQuiet) {
+			return current + 1, reason, strength
+		}
+	}
+	return level, reason, strength
 }
 
 func observationTarget(repo Repository, row Calculation, cohorts map[observationCohort][]int64, asOf int64) (int, string, ObservationEvidence, int) {

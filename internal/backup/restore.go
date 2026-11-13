@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
@@ -84,6 +85,11 @@ func (m *Manager) restore(id, key string, cfg Settings, setup, probe bool) error
 
 	m.update(id, func(op *Operation) { op.Phase = consts.PhaseCopy })
 	copyCtx, cancel := context.WithTimeout(m.root, 5*time.Minute)
+	if err := m.preserveBudget(copyCtx, path); err != nil {
+		cancel()
+		m.openBusiness(nil)
+		return err
+	}
 	walPath := m.cfg.Storage.Path + "-wal"
 	wal := fileSize(walPath)
 	copyErr := nativeRestore(copyCtx, m.pool, path, func() { wal = max(wal, fileSize(walPath)) })
@@ -114,6 +120,41 @@ func (m *Manager) restore(id, key string, cfg Settings, setup, probe bool) error
 	}
 	m.openBusiness(&state)
 	return Fault(consts.CodeRestoreCopyFailed)
+}
+
+// preserveBudget 在业务排空后合并近期发送与未决请求。恢复旧备份不能重新开放已消耗的当日额度。
+func (m *Manager) preserveBudget(ctx context.Context, path string) error {
+	var rows []storage.AIBudgetReservation
+	cutoff := time.Now().UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour).UnixMilli()
+	if err := m.db.WithContext(ctx).Where("sending_at >= ? OR status IN ?", cutoff,
+		[]string{consts.StatusSending, consts.StatusUnknown}).Find(&rows).Error; err != nil {
+		return ErrDatabase
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	pool, err := storage.OpenBootstrap(ctx, path)
+	if err != nil {
+		return ErrDatabase
+	}
+	defer pool.Close()
+	db, err := storage.OpenGORM(pool)
+	if err != nil {
+		return ErrDatabase
+	}
+	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		for i := range rows {
+			if rows[i].Status == consts.StatusSending {
+				rows[i].Status = consts.StatusUnknown
+			}
+		}
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "reservation_key"}}, UpdateAll: true,
+		}).CreateInBatches(&rows, 100).Error
+	}); err != nil {
+		return ErrDatabase
+	}
+	return nil
 }
 
 // prepareRestore 只修改 staging 中的数据库，验证完成后关闭它的连接池。
@@ -237,7 +278,19 @@ func (m *Manager) prepareRestore(ctx context.Context, id, key, dir string, cfg S
 }
 
 func resetWork(tx *gorm.DB, at int64) error {
+	if err := tx.Model(&storage.AIBudgetReservation{}).Where("status = ?", consts.StatusSending).
+		Updates(map[string]any{"status": consts.StatusUnknown, "settled_at": at}).Error; err != nil {
+		return ErrDatabase
+	}
+	aiKinds := []string{consts.JobRefreshSummary, consts.JobTranslateReadme, consts.JobComposeReport}
+	uncertain := tx.Model(&storage.AICall{}).Select("job_id").Where("status IN ?", []string{consts.StatusSending, consts.StatusUnknown})
+	if err := tx.Model(&storage.Job{}).Where("type IN ? AND (status = ? OR id IN (?))", aiKinds, consts.StatusUnknown, uncertain).
+		Updates(map[string]any{"status": consts.StatusUnknown, "last_error_code": consts.CodeAIDeliveryUnknown,
+			"lease_token": nil, "lease_until": nil, "updated_at": at}).Error; err != nil {
+		return ErrDatabase
+	}
 	if err := tx.Model(&storage.Job{}).Where(storage.JobColumns.Status+" IN ?", []string{consts.StatusPending, consts.StatusRunning, consts.StatusFailed, consts.StatusUnknown}).
+		Where("type NOT IN ? OR status <> ?", aiKinds, consts.StatusUnknown).
 		Updates(map[string]any{storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LastErrorCode: consts.CodeRestoreReset, storage.JobColumns.LeaseToken: nil, storage.JobColumns.LeaseUntil: nil, storage.JobColumns.UpdatedAt: at}).Error; err != nil {
 		return ErrDatabase
 	}
@@ -245,7 +298,13 @@ func resetWork(tx *gorm.DB, at int64) error {
 		Updates(map[string]any{"status": consts.StatusCanceled, "finished_at": at, "error_code": consts.CodeRestoreReset}).Error; err != nil {
 		return ErrDatabase
 	}
+	aiJobs := tx.Model(&storage.Job{}).Select("id").Where("type IN ? AND status = ?", aiKinds, consts.StatusUnknown)
+	if err := tx.Model(&storage.AICall{}).Where("status = ? AND job_id IN (?)", consts.StatusSending, aiJobs).
+		Updates(map[string]any{"status": consts.StatusUnknown, "error_code": consts.CodeAIDeliveryUnknown, "updated_at": at}).Error; err != nil {
+		return ErrDatabase
+	}
 	if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.Status+" IN ?", []string{consts.StatusReserved, consts.StatusSending, consts.StatusUnknown}).
+		Where("status = ? OR job_id NOT IN (?)", consts.StatusReserved, aiJobs).
 		Updates(map[string]any{storage.AICallColumns.Status: consts.StatusFailed, storage.AICallColumns.ErrorCode: consts.CodeRestoreResetUnknown, storage.AICallColumns.UpdatedAt: at}).Error; err != nil {
 		return ErrDatabase
 	}

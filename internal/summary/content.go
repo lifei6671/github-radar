@@ -37,11 +37,13 @@ type source struct {
 	sha, etag, url, fingerprint, language, quality, body, description string
 	githubTopics                                                      []string
 	themePrompt                                                       string
+	technicalTags                                                     storage.TechnicalTags
+	formsSent                                                         bool
 	readme                                                            gh.ReadmeResult
 }
 
 var bareURL = regexp.MustCompile(`https?://[^\s<>]+`)
-var nonProjectHeading = regexp.MustCompile(`^(table of contents|contents|目录|目錄|内容索引|directory (structure|tree)|folder structure|目录结构|目錄結構|目录树|文件夹结构|(our )?sponsors?|sponsorship|donat(e|ions?)|赞助(商|者|我们|信息)?|贊助(商|者)?|捐赠|捐贈|advertisements?|推广|广告|廣告)$`)
+var nonProjectHeading = regexp.MustCompile(`^(table of contents|contents|quick links|useful links|目录|目錄|内容索引|快速链接|快捷链接|directory (structure|tree)|folder structure|目录结构|目錄結構|目录树|文件夹结构|(our )?sponsors?|sponsorship|donat(e|ions?)|赞助(商|者|我们|信息)?|贊助(商|者)?|捐赠|捐贈|advertisements?|推广|广告|廣告)$`)
 
 func nonProjectSection(heading *ast.Heading, data []byte) bool {
 	label := strings.ToLower(strings.TrimFunc(string(heading.Text(data)), func(r rune) bool {
@@ -187,7 +189,28 @@ func (s source) prompt(budget int, summary, topics, editorial bool) (string, sou
 	}
 	prefix := "\n公开仓库：" + limitText(s.fullName, 160) + "\n检测语言：" + s.language + "\n"
 	if topics {
+		// 在资料之前明确本轮分类输出字段，避免长 README 使模型遗漏协议。
+		prefix += "分类必填 primary_technology、primary_quote、mcp_role、theme_slugs、value_tags。\n"
 		prefix += s.themePrompt
+		if len(s.githubTopics) > 0 {
+			prefix += "GitHub Topics（参考）：\n" + limitText(strings.Join(s.githubTopics, ", "), 384) + "\n"
+		}
+		if budget >= 8192 {
+			_, _, forms, _ := storage.TaxonomyMetadata()
+			if len(forms) > 0 {
+				prefix += "产品形态（仅填 forms）："
+				for _, form := range forms {
+					prefix += form.ID + ":" + form.Name + "；"
+				}
+				prefix += "\n"
+				s.formsSent = true
+			}
+		}
+		// 输入较小时，在保留证据的前提下只发送完整词条，并用同一子集校验。
+		left := max(0, budget-len(systemPrompt)-len(task)-instructionBytes-len(prefix)-128)
+		glossary, included := technicalTagPrompt(s.technicalTags, min(budget/3, left/2), s.description+"\n"+limitText(s.body, 12_000))
+		prefix += glossary
+		s.technicalTags = included
 	}
 	const descriptionLabel, readmeLabel = "仓库 Description：\n", "仓库 README：\n"
 	available := max(0, budget-len(systemPrompt)-len(task)-instructionBytes-len(prefix)-128)
@@ -231,36 +254,6 @@ type answer struct {
 	Evidence             []string        `json:"evidence"`
 	Uncertainty          []string        `json:"uncertainty"`
 	EditorialBrief       json.RawMessage `json:"editorial_brief"`
-}
-
-var topicSlug = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
-
-// AI Topics 采用 GitHub 的主题词格式，去重后直接匹配后台的 anyTopics。
-func resultTopics(raw string) (string, bool) {
-	var a struct {
-		Topics []string `json:"topics"`
-	}
-	if json.Unmarshal([]byte(raw), &a) != nil || a.Topics == nil {
-		return "", false
-	}
-	topics := make([]string, 0, 5)
-	seen := make(map[string]bool)
-	for _, value := range a.Topics {
-		topic := strings.ToLower(strings.TrimSpace(value))
-		if len(topic) > 50 || !topicSlug.MatchString(topic) || seen[topic] {
-			continue
-		}
-		topics = append(topics, topic)
-		seen[topic] = true
-		if len(topics) == 5 {
-			break
-		}
-	}
-	if len(a.Topics) > 0 && len(topics) == 0 {
-		return "", false
-	}
-	data, _ := json.Marshal(topics)
-	return string(data), true
 }
 
 // resultSummary 校验中文、长度和引用类别，只返回允许持久化的短文本和标签。
@@ -319,7 +312,7 @@ func resultSummary(raw string, s source, repoID int64, provider, model string, v
 		RepoID: repoID, ReadmeSHA: optional(s.sha), SourceFingerprint: s.fingerprint, SourceQuality: quality,
 		SourceLanguage: s.language, TitleZh: &title, SummaryZh: a.Summary, RecommendationReason: &reason,
 		FeaturesJSON: tags(a.Features), AudienceJSON: tags(a.Audience),
-		ValueTagsJSON: tags(a.Tags), SourceReadmeURL: optional(s.url), ModelProvider: provider, ModelName: model,
+		ValueTagsJSON: "[]", SourceReadmeURL: optional(s.url), ModelProvider: provider, ModelName: model,
 		EditorialBriefJSON: editorialBrief(a.EditorialBrief),
 		PromptVersion:      version, SummaryStatus: consts.StatusReady, GeneratedAt: now,
 	}, true

@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"math"
 	"net/url"
 	"strings"
 
@@ -17,6 +18,8 @@ type Embedding struct {
 	BatchSize       int     `json:"batchSize"`
 	IntervalMinutes int     `json:"intervalMinutes"`
 	MinSimilarity   float64 `json:"minSimilarity"`
+	// InputCostPerM 用于统一账本的向量估价。
+	InputCostPerM float64 `json:"inputCostPerMillion,omitempty"`
 }
 
 func DefaultEmbedding() Embedding {
@@ -24,6 +27,9 @@ func DefaultEmbedding() Embedding {
 }
 
 func (cfg Embedding) validate() error {
+	if !(cfg.InputCostPerM >= 0) || math.IsInf(cfg.InputCostPerM, 0) {
+		return errors.New("Embedding 模型计价无效")
+	}
 	if cfg.BatchSize < 1 || cfg.BatchSize > 20 || cfg.IntervalMinutes < 1 || cfg.IntervalMinutes > 1440 {
 		return errors.New("相似项目每轮处理量须为 1 至 20，扫描间隔须为 1 至 1440 分钟")
 	}

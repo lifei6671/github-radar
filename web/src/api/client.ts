@@ -130,6 +130,7 @@ const messages: Record<string, string> = {
   monitoring_capacity_full: '重点监控容量已满，请移出一个仓库或调整容量。',
   repo_blocked: '此仓库已屏蔽，请先解除屏蔽。',
   settings_conflict: '配置已被其他操作更新，当前编辑已保留。',
+  settings_database_busy: '后台正在写入数据库，表单已保留，请稍后重新保存。',
   possible_charge_not_accepted: '请确认再次调用可能产生费用。',
   not_found: '记录不存在或已过保留期。',
   invalid_response: '服务返回了无法读取的数据。',

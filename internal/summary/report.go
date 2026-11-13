@@ -10,7 +10,9 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 	"github.com/lifei6671/github-radar/internal/reports"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/storage/reportstore"
@@ -35,6 +37,10 @@ func (q Queue) ScheduleReports(ctx context.Context, now time.Time) error {
 		return nil
 	}
 	db := q.DB.WithContext(ctx)
+	slots, err := aibudget.ForConfig(q.DB, q.AI.Summary).Remaining(db, admission.Maintenance, now)
+	if err != nil || slots == 0 {
+		return err
+	}
 	paused, err := storage.BooleanSetting(ctx, db, storage.AutoAIResumeKey)
 	if err != nil || paused {
 		return err
@@ -85,7 +91,7 @@ func (q Queue) ScheduleReports(ctx context.Context, now time.Time) error {
 			}
 			jobs = append(jobs, job)
 		}
-		if len(jobs)+len(resumed) == 9 {
+		if len(jobs)+len(resumed) == min(9, slots) {
 			break
 		}
 	}
@@ -144,14 +150,24 @@ func (e *Engine) runReport(ctx context.Context, job storage.Job) error {
 	if err != nil {
 		return err
 	}
-	if err := q.sending(ctx, job, call); err != nil {
-		return err
+	// 在登记发送的同一事务复核报告引用，避免把刚屏蔽的仓库发送给模型。
+	ids := make([]int64, 0, len(sent))
+	for _, item := range sent {
+		ids = append(ids, item.ID)
 	}
-	model := e.WriteReport(ctx, prompt)
+	sendCtx, err := q.startSending(ctx, job, call, string(p.Kind)+":"+p.Key+":"+p.Fingerprint, "report", ids)
+	if err != nil {
+		return q.sendingFailure(ctx, job, call, err)
+	}
+	model := e.WriteReport(sendCtx, prompt)
 	finished := time.Now()
 	edition, _, valid := reports.ParseEditorial(model.Content, sent)
 	if model.Code == "" && (!valid || (p.PublicationStatus() == reports.Preview && !edition.SafePreview())) {
 		model.Code, model.Retry = consts.CodeInvalidOutput, true
+		model.OutputIssue = "report_validation_failed"
+		if valid {
+			model.OutputIssue = "report_preview_validation_failed"
+		}
 	}
 	if model.Code != "" {
 		return e.finishFailure(ctx, job, call, model, finished.Sub(start), storage.AISummary{}, storage.SummaryCheck{}, "")

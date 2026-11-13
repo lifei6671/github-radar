@@ -91,6 +91,13 @@ SELECT %[2]s,%[3]s,%[4]s FROM %[1]s WHERE %[5]s<? ORDER BY %[5]s LIMIT ?)`,
 	if err := cleanJobs(db, age(cfg.FinishedJobDays), age(cfg.DeadJobDays), cfg.BatchRows); err != nil {
 		return err
 	}
+	// 独立保留 90 天可结算用量；未决状态保留，直到有确定结论。
+	if err := cleanBudget(db, age(90), cfg.BatchRows); err != nil {
+		return err
+	}
+	if err := db.Where("day < ?", dayAge(45).Format(time.DateOnly)).Delete(&storage.AdmissionDaily{}).Error; err != nil {
+		return err
+	}
 	for {
 		ids := db.Model(&storage.DiscoveryRuleRun{}).Select("id").
 			Where("finished_at > 0 AND finished_at < ?", discovery).Order("finished_at").Limit(cfg.BatchRows)
@@ -103,6 +110,19 @@ SELECT %[2]s,%[3]s,%[4]s FROM %[1]s WHERE %[5]s<? ORDER BY %[5]s LIMIT ?)`,
 		}
 	}
 	return cleanCandidates(db, age(cfg.CandidateDays), min(cfg.BatchRows, 100))
+}
+
+// cleanBudget 仅清理结算完成或明确未发送的历史条目。
+func cleanBudget(db *gorm.DB, cutoff int64, limit int) error {
+	for {
+		keys := db.Model(&storage.AIBudgetReservation{}).Select("reservation_key").
+			Where("reserved_at < ? AND status IN ?", cutoff, []string{consts.StatusSucceeded, consts.StatusFailed, "unused"}).
+			Order("reserved_at").Limit(limit)
+		result := db.Where("reservation_key IN (?)", keys).Delete(&storage.AIBudgetReservation{})
+		if result.Error != nil || result.RowsAffected < int64(limit) {
+			return result.Error
+		}
+	}
 }
 
 // cleanJobs 先删终态台账，再删关联任务。未决调用保留到人工确认。
@@ -191,6 +211,8 @@ AND NOT EXISTS(SELECT 1 FROM %[7]s j JOIN %[19]s a ON a.%[20]s=j.%[21]s
 AND NOT EXISTS(SELECT 1 FROM %[26]s o JOIN %[27]s m ON m.%[28]s='%[29]s'||o.%[30]s||':'||o.%[31]s
  WHERE o.%[32]s=%[9]s.%[10]s AND json_extract(m.%[33]s,'$.observedSlot')=o.%[34]s)`,
 				storage.RepositoryColumns.State, consts.StatusCandidate, storage.RepositoryColumns.Blocked, storage.RepositoryColumns.StarredByUser, storage.RepositoryColumns.LastDiscoveredAt, storage.RepositoryColumns.LastSuccessAt, storage.JobTable, storage.JobColumns.RepoID, storage.RepositoryTable, storage.RepositoryColumns.RepoID, storage.JobColumns.Status, consts.StatusSucceeded, consts.StatusCanceled, consts.StatusDead, storage.AISummaryTable, storage.AISummaryColumns.RepoID, storage.TopicCandidateTable, storage.TopicCandidateColumns.RepoID, storage.AICallTable, storage.AICallColumns.JobID, storage.JobColumns.ID, storage.AICallColumns.Status, consts.StatusUnknown, consts.StatusSending, consts.StatusReserved, storage.TrendingObservationTable, storage.MaintenanceStateTable, storage.MaintenanceStateColumns.Key, consts.TrendingStatePrefix, storage.TrendingObservationColumns.SourceKey, storage.TrendingObservationColumns.Window, storage.TrendingObservationColumns.RepoID, storage.MaintenanceStateColumns.Value, storage.TrendingObservationColumns.ObservedSlot), cutoff, cutoff).
+				Where("NOT EXISTS (?)", tx.Table("daily_report_items").Select("1").Where("repo_id = repositories.repo_id")).
+				Where("NOT EXISTS (?)", tx.Table("discovery_rotation").Select("1").Where("repo_id = repositories.repo_id")).
 				Order(storage.RepositoryColumns.LastDiscoveredAt+","+storage.RepositoryColumns.RepoID).Limit(limit).Pluck(storage.RepositoryColumns.RepoID, &ids).Error; err != nil {
 				return err
 			}

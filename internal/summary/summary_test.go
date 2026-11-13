@@ -148,6 +148,8 @@ func fixture(t *testing.T) (*Engine, *sourceFixture, *bytes.Buffer, string) {
 	source := &sourceFixture{sha: strings.Repeat("a", 40), body: readmeText + "\n" + marker,
 		description: "A project for organizing local workflows."}
 	logs := &bytes.Buffer{}
+	// 既有用例覆盖旧分档与主题补齐的兼容路径，新准入使用独立的真实证据用例。
+	cfg.AI.Summary.LegacyAdmission = true
 	q := Queue{DB: db, AI: cfg.AI, LeaseSeconds: 30}
 	return &Engine{Queue: q, GitHub: source, Logger: slog.New(slog.NewJSONHandler(logs, nil))}, source, logs, cfg.Storage.Path
 }
@@ -161,11 +163,13 @@ func modelAnswer(short bool) string {
 	}
 	raw, _ := json.Marshal(struct {
 		answer
-		Topics []string `json:"topics"`
-		Themes []string `json:"theme_slugs"`
+		Primary string   `json:"primary_technology"`
+		Role    string   `json:"mcp_role"`
+		Themes  []string `json:"theme_slugs"`
+		Quote   string   `json:"primary_quote"`
 	}{answer{Language: "en", Title: json.RawMessage(`"本地脚本编排工具"`), Summary: value, Features: []string{"脚本分组", "状态输出", "脚本分组"},
 		RecommendationReason: json.RawMessage(`"维护多服务工作区的团队可以借鉴它的脚本分组方式，统一组织本地任务。"`),
-		Tags:                 []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{"TRANSIENT_MODEL_FIELD_80FC"}}, []string{"workflow", "dev-tools"}, []string{}})
+		Tags:                 []string{"workflow-automation"}, Evidence: []string{evidence}, Uncertainty: []string{"TRANSIENT_MODEL_FIELD_80FC"}}, "workflow-automation", "none", []string{}, "organize command-line tasks"})
 	return string(raw)
 }
 
@@ -173,7 +177,7 @@ func TestThemeBackfillUsesREADMEAndResumesFromSQLite(t *testing.T) {
 	e, upstream, _, _ := fixture(t)
 	db := e.Queue.DB
 	upstream.topics = []string{"unrelated"}
-	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Update("topics_json", `["unrelated"]`).Error; err != nil {
+	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Updates(map[string]any{"topics_json": `["unrelated"]`, "full_name": "owner/project", "name": "project"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	calls := 0
@@ -186,12 +190,13 @@ func TestThemeBackfillUsesREADMEAndResumesFromSQLite(t *testing.T) {
 			if !strings.HasPrefix(prompt, "任务：摘要和主题词") {
 				t.Fatalf("导读和主题应使用同一请求: %q", prompt)
 			}
-			return ModelResult{Content: strings.Replace(modelAnswer(false), `"theme_slugs":[]`, `"theme_slugs":["mcp-servers","invented"]`, 1)}
+			raw := strings.Replace(modelAnswer(false), `"theme_slugs":[]`, `"theme_slugs":["mcp-servers","invented"]`, 1)
+			return ModelResult{Content: strings.Replace(raw, `"primary_technology":"workflow-automation","mcp_role":"none"`, `"primary_technology":"mcp-server","mcp_role":"server"`, 1)}
 		}
-		if !strings.HasPrefix(prompt, "任务：主题词") || !strings.Contains(prompt, "已落库的 MCP 项目说明") {
-			t.Fatalf("已有项目应复用已保存的中文 README: %q", prompt)
+		if !strings.HasPrefix(prompt, "任务：主题词") || !strings.Contains(prompt, "organize command-line tasks") || strings.Contains(prompt, "仅在译文中出现") {
+			t.Fatalf("已有项目应复用原文，不能拿译文做技术引文: %q", prompt)
 		}
-		return ModelResult{Content: `{"topics":["mcp-server"],"theme_slugs":["mcp-servers"]}`}
+		return ModelResult{Content: `{"mcp_role":"server","primary_technology":"mcp-server","primary_quote":"organize command-line tasks","theme_slugs":["mcp-servers"],"value_tags":["tool-calling"]}`}
 	})
 	if _, err := e.Queue.Manual(t.Context(), 1, "generate-with-topics", true, true, time.Now()); err != nil {
 		t.Fatal(err)
@@ -202,7 +207,7 @@ func TestThemeBackfillUsesREADMEAndResumesFromSQLite(t *testing.T) {
 		t.Fatalf("仅能保存词表内标识: %+v", saved)
 	}
 	if err := db.Exec("UPDATE repo_readme_documents SET complete=1,chinese_html=? WHERE repo_id=1",
-		"<p>已落库的 MCP 项目说明。项目提供 MCP 服务端。</p>").Error; err != nil {
+		"<p>仅在译文中出现。</p>").Error; err != nil {
 		t.Fatal(err)
 	}
 	setting := storage.SystemSetting{Key: storage.ThemeCatalogKey, ValueJSON: `"changed"`}
@@ -230,6 +235,11 @@ func TestThemeBackfillUsesREADMEAndResumesFromSQLite(t *testing.T) {
 	spent := storage.AICall{CallKey: "used-auto-budget", JobID: job.ID, Provider: ProviderKey(e.Queue.AI),
 		Origin: consts.OriginAuto, Status: consts.StatusSucceeded, ReservedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}
 	if err := db.Create(&spent).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&storage.AIBudgetReservation{ReservationKey: spent.CallKey, Origin: spent.Origin,
+		Lane: "maintenance", Operation: "summary", Provider: spent.Provider, Status: spent.Status,
+		ReservedAt: spent.ReservedAt, SendingAt: &spent.ReservedAt}).Error; err != nil {
 		t.Fatal(err)
 	}
 	limit := e.Queue.AI.Summary.AutoDailyCalls
@@ -296,7 +306,7 @@ func TestThemeBackfillUsesREADMEAndResumesFromSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Queue.sending(t.Context(), *running, call); err != nil {
+	if _, err := e.Queue.sending(t.Context(), *running, call); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(running).Update("lease_until", now.Add(-time.Second).UnixMilli()).Error; err != nil {
@@ -519,7 +529,7 @@ func TestUnknownCallRecoveryAndAcknowledgement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := q.sending(t.Context(), *job, call); err != nil {
+	if _, err := q.sending(t.Context(), *job, call); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&storage.Job{}).Where("id=?", job.ID).Update("lease_until", now.Add(-time.Second).UnixMilli()).Error; err != nil {
@@ -598,6 +608,56 @@ func TestBudgetAndInvalidOutputRepair(t *testing.T) {
 	}
 }
 
+// TestTaxonomyNoMatchRetainsPublishedClassification 验证空判断只结算一次，错误引文仍保留具体原因。
+func TestTaxonomyNoMatchRetainsPublishedClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, issue string
+		purpose               int
+	}{
+		{"已有审核分类", `{"primary_technology":null,"mcp_role":"none","theme_slugs":[]}`, "", storage.TechnicalPurposeVersion},
+		{"历史主题词不升格", `{"primary_technology":null,"mcp_role":"none","theme_slugs":[]}`, "", 0},
+		{"真实失败", `{"primary_technology":"plugin-catalog","primary_quote":"invented source","mcp_role":"none","theme_slugs":[]}`, "taxonomy_unverified_quote", storage.TechnicalPurposeVersion},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _, _, _ := fixture(t)
+			db := e.Queue.DB
+			e.Provider = modelFixture(func(context.Context, string) ModelResult { return ModelResult{Content: modelAnswer(false)} })
+			schedule(t, e)
+			step(t, e)
+			old := row[storage.RepoAITopics](t, db, "repo_id=1")
+			guide := row[storage.AISummary](t, db, "repo_id=1")
+			if err := db.Model(&old).Updates(map[string]any{"tag_vocab_version": 0, "purpose_version": tc.purpose}).Error; err != nil {
+				t.Fatal(err)
+			}
+			e.Provider = modelFixture(func(context.Context, string) ModelResult { return ModelResult{Content: tc.response} })
+			d, err := e.Queue.Manual(t.Context(), 1, "taxonomy-validation", false, true, time.Now())
+			if err != nil || d.Job.ID == 0 {
+				t.Fatalf("回填入队失败: %+v %v", d, err)
+			}
+			step(t, e)
+			job := row[storage.Job](t, db, "id=?", d.Job.ID)
+			call := row[storage.AICall](t, db, "job_id=?", job.ID)
+			current := row[storage.RepoAITopics](t, db, "repo_id=1")
+			if current.TopicsJSON != old.TopicsJSON || current.PurposeVersion != tc.purpose || row[storage.AISummary](t, db, "repo_id=1").ValueTagSlugsJSON != guide.ValueTagSlugsJSON {
+				t.Fatal("原分类或卡片标签被替换")
+			}
+			if tc.issue != "" {
+				if job.Status != "failed" || call.ErrorCode == nil || *call.ErrorCode != "invalid_output" || call.OutputIssue == nil || *call.OutputIssue != tc.issue {
+					t.Fatalf("实际错误原因未入账: %+v %+v", job, call)
+				}
+				return
+			}
+			var review taxonomyResult
+			if err := json.Unmarshal([]byte(current.TaxonomyJSON), &review); err != nil || !review.NeedsReview || review.Primary != "" || job.Status != "succeeded" || call.OutputIssue != nil {
+				t.Fatalf("合法留空未结算为待复核: %+v %+v %v", review, job, err)
+			}
+			if d, err := e.Queue.Manual(t.Context(), 1, "same-source", false, true, time.Now()); err != nil || !d.Cached {
+				t.Fatalf("同一来源不应重新请求模型: %+v %v", d, err)
+			}
+		})
+	}
+}
+
 func TestChineseAndDescriptionFallback(t *testing.T) {
 	e, source, _, _ := fixture(t)
 	source.topics = []string{"workflow"}
@@ -660,13 +720,13 @@ func TestAITopicsBackfillAndAboutRefresh(t *testing.T) {
 		if !strings.HasPrefix(prompt, "任务：主题词\n") {
 			t.Fatal("已有有效摘要时只需生成主题词")
 		}
-		return ModelResult{Content: `{"topics":[" MCP ","mcp","dev-tools","无效主题","not a slug"],"theme_slugs":[]}`}
+		return ModelResult{Content: `{"primary_technology":"cli-tools","primary_quote":"organize command-line tasks","mcp_role":"none","theme_slugs":[],"value_tags":["workflow-automation"]}`}
 	})
 	schedule(t, e)
 	step(t, e)
 	original := row[storage.AISummary](t, db, "repo_id=1")
 	topics := row[storage.RepoAITopics](t, db, "repo_id=1")
-	if topics.TopicsJSON != `["workflow","dev-tools"]` || topics.ModelName != e.Queue.AI.Model {
+	if topics.TopicsJSON != `["workflow-automation"]` || topics.ModelName != e.Queue.AI.Model {
 		t.Fatalf("首次主题词保存有误: %+v", topics)
 	}
 	// 模拟升级前只有摘要的仓库，已有摘要缓存仍能复用。
@@ -679,7 +739,7 @@ func TestAITopicsBackfillAndAboutRefresh(t *testing.T) {
 	}
 	step(t, e)
 	topics = row[storage.RepoAITopics](t, db, "repo_id=1")
-	if topics.TopicsJSON != `["mcp","dev-tools"]` {
+	if topics.TopicsJSON != `["cli-tools"]` {
 		t.Fatalf("主题词标准化有误: %+v", topics)
 	}
 	source.description = "A tool for developers to build a workflow automation server."
@@ -729,7 +789,7 @@ func TestAITopicsForChineseRepository(t *testing.T) {
 		if calls == 1 {
 			return ModelResult{Content: `{"topics":["自动化工具"]}`}
 		}
-		return ModelResult{Content: `{"topics":[],"theme_slugs":[]}`}
+		return ModelResult{Content: `{"primary_technology":"","mcp_role":"none","theme_slugs":[],"value_tags":[]}`}
 	})
 	schedule(t, e)
 	step(t, e)

@@ -50,7 +50,7 @@ function readmeOutline(html: string | undefined) {
     while (parents.length && parents[parents.length - 1].level >= level) parents.pop()
     const depth = parents.length
     const parent = parents.at(-1)?.anchor
-    const base = readmeHeadingPrefix + encodeURIComponent(heading.id || label)
+    const base = readmeHeadingPrefix + encodeURIComponent(heading.id.replace(/^readme-body-/, '') || label)
     let anchor = base
     for (let suffix = 2; anchors.has(anchor); suffix++) anchor = base + '-' + suffix
     anchors.add(anchor)
@@ -147,7 +147,9 @@ export function Detail() {
     const heading = outline.find(({ anchor }) => anchor === hash)
     const target = heading
       ? content.querySelector('.readme-body')?.querySelectorAll(readmeHeadingSelector)[heading.index]
-      : sections.some(([anchor]) => anchor === hash) ? content.querySelector('section' + hash) : undefined
+      : hash.startsWith('#readme-body-')
+        ? Array.from(content.querySelectorAll<HTMLElement>('.readme-body [id]')).find(({ id }) => '#' + encodeURI(id) === hash)
+        : sections.some(([anchor]) => anchor === hash) ? content.querySelector('section' + hash) : undefined
     if (!target) return
     target.scrollIntoView()
     anchoredPosition.current = { hash, y: window.scrollY }
@@ -485,6 +487,6 @@ function TrendSection({ repo, range, trend, admin }: { repo: RepoDetail; range: 
       <span>{resolutionLabel[trend.data.resolution]}</span>
       {hasPoints && <time dateTime={trend.data.updatedAt}>观测于 {timestamp(trend.data.updatedAt)}</time>}
     </div>}
-    {!repo.blocked && <StarHistoryPanel key={repo.id} id={repo.id} admin={admin} />}
+    {admin && !repo.blocked && <StarHistoryPanel key={repo.id} id={repo.id} />}
   </section>
 }

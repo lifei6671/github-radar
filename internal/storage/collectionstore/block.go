@@ -54,6 +54,10 @@ func (q Queue) SetBlocked(ctx context.Context, id int64, blocked bool, now time.
 			storage.JobColumns.RepoID+"=? AND "+storage.JobColumns.Type+" IN ? AND "+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusRunning+"','"+consts.StatusFailed+"')", id,
 			[]string{consts.JobRefreshRepo, consts.JobRefreshSummary, consts.JobTranslateReadme, consts.JobStarHistory})
 		// 请求已经发出的 AI 台账保留为待确认，解除屏蔽后仍需人工确认可能的计费。
+		if err := storage.MarkBudgetUnknown(tx, tx.Model(&storage.AICall{}).Select("call_key").
+			Where("job_id IN (?) AND status = ?", unfinished, consts.StatusSending), at); err != nil {
+			return err
+		}
 		if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.JobID+" IN (?) AND "+storage.AICallColumns.Status+"='"+consts.StatusSending+"'", unfinished).
 			Updates(map[string]any{storage.AICallColumns.Status: consts.StatusUnknown, storage.AICallColumns.ErrorCode: consts.CodeAIDeliveryUnknown, storage.AICallColumns.UpdatedAt: at}).Error; err != nil {
 			return err

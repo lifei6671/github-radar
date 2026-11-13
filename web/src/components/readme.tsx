@@ -13,7 +13,7 @@ export function RepoReading({ repo, admin }: { repo: RepoDetail; admin: boolean 
     {data?.chineseHtml && data.truncated && <Notice>站内仅展示部分 README，可到 GitHub 查看全文。</Notice>}
     {/* HTML 由服务端 Markdown 安全渲染器生成。 */}
     {data?.chineseHtml && <div className="readme-body" dangerouslySetInnerHTML={{ __html: data.chineseHtml }} />}
-    {admin && data?.state === 'pending' && data.language && data.language !== 'zh' &&
+    {admin && data?.state === 'pending' && data.language &&
       <TranslationAction repoId={repo.id} available={repo.summaryAvailable === true} existing={data.translationJobId} />}
   </section>
 }

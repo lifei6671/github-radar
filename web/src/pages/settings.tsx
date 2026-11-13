@@ -7,7 +7,7 @@ import { createPortal } from 'react-dom'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError, errorText } from '../api/client'
 import { resetPublicRepoLists } from '../api/queries'
-import type { CategorySetting, DiscoveryRanking, DiscoveryTabSettings, ListSettings, ProjectThemeGroup, ProjectThemeSetting, RuleSetting, RuntimeSettings, SettingFields, SettingValue } from '../api/types'
+import type { CategorySetting, DiscoveryRanking, DiscoveryTabSettings, ListSettings, ProjectThemeGroup, ProjectThemeSetting, RuleSetting, RuntimeSettings, SettingFields, SettingValue, TechnicalTagSetting, TechnicalTagSettings } from '../api/types'
 import { AdminMetrics, AdminPanel } from '../components/admin'
 import { ThemeIcon } from '../components/theme-icon'
 import { ThemeIconPicker } from '../components/theme-icon-picker'
@@ -21,6 +21,7 @@ type Snapshot = { revision: number }
 const configScopes = {
   '/system/settings': 'runtime',
   '/system/categories': 'categories',
+  '/system/technical-tags': 'technical-tags',
   '/system/discovery-rules': 'rules',
   '/system/discovery-tabs': 'discovery-tabs',
   '/system/project-themes': 'project-themes',
@@ -33,6 +34,11 @@ function useConfig<T extends Snapshot>(path: ConfigPath) {
 }
 
 function refreshSettings(queryClient: ReturnType<typeof useQueryClient>, path: ConfigPath) {
+  if (path === '/system/technical-tags') {
+    // 改名和删除直接影响已生成的卡片、筛选和详情。
+    void resetPublicRepoLists(queryClient)
+    for (const key of ['repo', 'topics']) void queryClient.invalidateQueries({ queryKey: [key] })
+  }
   if (path === '/system/settings') {
     for (const key of ['limits', 'repo', 'readme', 'similar-repos', 'topics', 'backup-status']) {
       void queryClient.invalidateQueries({ queryKey: [key] })
@@ -346,7 +352,7 @@ type Directory<T> = {
   cells: (item: T) => ReactNode[]
   metrics: (items: T[]) => { label: string; value: string }[]
   initial: T
-  fields: (item: T, edit: (next: T) => void) => ReactNode
+  fields: (item: T, edit: (next: T) => void, creating?: boolean) => ReactNode
   status: (item: T) => ReactNode
   filter?: { label: string; options: { value: string; label: string }[]; match: (item: T, filter: string) => boolean }
   enabled?: (item: T) => boolean
@@ -420,7 +426,7 @@ function SettingsDirectory<T>({ directory }: { directory: Directory<T> }) {
         if (item === null) return <Notice>保存后移除此{directory.noun}。</Notice>
         if (item === undefined) return <p className="muted">请返回列表重新选择。</p>
         return <>
-          <div className="admin-fields">{directory.fields(item, edit)}</div>
+          <div className="admin-fields">{directory.fields(item, edit, creating)}</div>
           {!creating && original(server) && <button type="button" className="button tone-hot admin-remove"
             onClick={() => edit(null)}>移除{directory.noun}</button>}
         </>
@@ -595,6 +601,39 @@ const rules: Directory<RuleSetting> = {
 
 export function CategoryEditor() {
   return <SettingsDirectory directory={categories} />
+}
+
+// 技术词表复用后台目录的增删改、搜索和修订号冲突处理。
+function technicalTags(domains: TechnicalTagSettings['domains']): Directory<TechnicalTagSetting> {
+  const names = new Map(domains.map(({ id, name }) => [id, name]))
+  return {
+  path: '/system/technical-tags', title: '技术词表', noun: '标签',
+  identity: (item) => item.slug, name: (item) => item.name, caption: (item) => item.slug,
+  search: (item) => [item.slug, item.name, names.get(item.domain), item.definition, ...item.aliases].join(' '),
+  columns: ['技术领域', '定义', '别名'], cells: (item) => [names.get(item.domain), item.definition, item.aliases.join('、')],
+  filter: { label: '技术领域', options: domains.map(({ id, name }) => ({ value: id, label: name })), match: (item, domain) => item.domain === domain },
+  metrics: (items) => [{ label: '技术标签', value: number(items.length) }],
+  initial: { slug: '', name: '', aliases: [], domain: '', definition: '' },
+  normalize: (item) => ({ ...item, slug: item.slug.trim().toLowerCase(), name: item.name.trim(), definition: item.definition.trim(), aliases: item.aliases.map((value) => value.trim()).filter(Boolean) }),
+  fields: (item, edit, creating) => <>
+    <label className="field">标签名称<input required maxLength={48} value={item.name} onChange={(e) => edit({ ...item, name: e.target.value })} /></label>
+    <label className="field">标签标识<input required readOnly={!creating} maxLength={48} pattern="[a-z0-9]+(?:\x2d[a-z0-9]+)*" value={item.slug}
+      onChange={(e) => edit({ ...item, slug: e.target.value })} /></label>
+    <label className="field">技术领域<select value={item.domain} onChange={(e) => edit({ ...item, domain: e.target.value })}>
+      <option value="">未分组</option>
+      {domains.map(({ id, name }) => <option key={id} value={id}>{name}</option>)}
+    </select></label>
+    <label className="field admin-field-wide">定义<input maxLength={140} value={item.definition} onChange={(e) => edit({ ...item, definition: e.target.value })} /></label>
+    <label className="field admin-field-wide">别名<input placeholder="用逗号分隔" value={item.aliases.join(',')}
+      onChange={(e) => edit({ ...item, aliases: e.target.value.split(/[,，]/) })} /></label>
+  </>,
+  status: () => null,
+  }
+}
+
+export function TechnicalTagEditor() {
+  const query = useConfig<TechnicalTagSettings>('/system/technical-tags')
+  return <SettingsDirectory directory={technicalTags(query.data?.domains ?? [])} />
 }
 
 function projectThemes(groups: ProjectThemeGroup[]): Directory<ProjectThemeSetting> {

@@ -96,26 +96,40 @@ func (u *acceptanceUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if strings.Contains(input.Messages[0].Content, "选择值得在站内展示的原文块编号") {
+			var blocks []struct{ ID int }
+			if json.Unmarshal([]byte(input.Messages[1].Content), &blocks) != nil || len(blocks) == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			keep := make([]int, 0, len(blocks))
+			for _, block := range blocks {
+				keep = append(keep, block.ID)
+			}
+			answer, _ := json.Marshal(map[string][]int{"keep": keep})
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(answer)}}}})
+			return
+		}
 		if strings.Contains(input.Messages[0].Content, "开源技术文档译者") {
-			var data struct{ Segments []string }
+			var data struct{ Segments map[string]string }
 			if json.Unmarshal([]byte(input.Messages[1].Content), &data) != nil || len(data.Segments) == 0 {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			u.translateCalls.Add(1)
-			translated := make([]string, len(data.Segments))
-			for i := range translated {
+			translated := make(map[string]string, len(data.Segments))
+			for i := range data.Segments {
 				translated[i] = "用于组织本地开发任务的工作流工具。"
 			}
-			answer, _ := json.Marshal(map[string][]string{"t": translated})
+			answer, _ := json.Marshal(map[string]map[string]string{"t": translated})
 			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(answer)}}}})
 			return
 		}
 		call := u.modelCalls.Add(1)
 		answer, _ := json.Marshal(map[string]any{"source_language": "en",
 			"summary_zh": fmt.Sprintf("第%d版。", call) + "这个项目用于组织本地开发工作流，团队可以配置命令分组、重复运行任务并查看每个步骤的状态。仓库文档提供了完整的本地配置示例和启动方式，便于在开发工作区中复用相同的任务步骤。",
-			"features":   []string{"脚本分组", "状态输出"}, "audience": []string{"开发团队"}, "value_tags": []string{"自动化"},
-			"topics": []string{"workflow", "task-runner"}, "theme_slugs": []string{},
+			"features":   []string{"脚本分组", "状态输出"}, "audience": []string{"开发团队"}, "value_tags": []string{"workflow-automation"},
+			"primary_technology": nil, "mcp_role": "none", "theme_slugs": []string{},
 			"evidence": []string{"仓库 README"}, "uncertainty": []string{}})
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(answer)}}},
 			"usage": map[string]int{"prompt_tokens": 140, "completion_tokens": 260}})

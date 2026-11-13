@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test'
-import { dragSetting, login, mockRadar, session } from './fixture'
+import { barrier, dragSetting, login, mockRadar, session } from './fixture'
 
 test('仓库详情展示相似项目，点击后进入公开详情，空列表不展示卡片', async ({ page }) => {
   const fixture = await mockRadar(page)
@@ -448,7 +448,7 @@ test('GitHub Trending 按语言和时间范围筛选，榜单元数据与累计 
   const range = filters.getByRole('button', { name: /^时间范围/ })
   const ranges = filters.getByRole('group', { name: '时间范围', exact: true })
   const languages = filters.getByRole('group', { name: '编程语言', exact: true })
-  await expect(language).toContainText('不限')
+  await expect(language).toContainText('不限语言')
   await expect(range).toContainText('日榜')
   await range.click()
   await expect(ranges.getByRole('button', { name: '日榜' })).toHaveAttribute('aria-pressed', 'true')
@@ -504,16 +504,85 @@ test('GitHub Trending 按语言和时间范围筛选，榜单元数据与累计 
     expect(dimensions.overflow).toBe(false)
   }
   await language.click()
-  await languages.getByRole('button', { name: '不限' }).click()
+  await languages.getByRole('button', { name: '不限语言', exact: true }).click()
   await expect(range).toContainText('周榜')
   await expect.poll(() => fixture.requests.includes('GET /trending?sourceKey=all&period=weekly')).toBeTruthy()
   await page.reload()
-  await expect(language).toContainText('不限')
+  await expect(language).toContainText('不限语言')
   await expect(range).toContainText('周榜')
   await page.goBack()
   await expect(language).toContainText('Rust')
   await page.goBack()
   await expect(range).toContainText('月榜')
+})
+
+test('GitHub Trending 保留未生成导读的项目、原始名次和 GitHub 简介', async ({ page }) => {
+  const fixture = await mockRadar(page)
+  // 同时覆盖前三名卡片与后续排名列表的回退内容。
+  fixture.setSummaryMissing(1)
+  fixture.setSummaryMissing(4)
+  await page.goto('/trending?view=official')
+  const language = page.getByRole('button', { name: /^编程语言/ })
+  await language.click()
+  await page.getByRole('button', { name: 'Rust', exact: true }).click()
+  const podium = page.getByRole('region', { name: '榜单前三' })
+  const rows = page.locator('.rank-list-row')
+  await expect(podium.locator('.podium-card')).toHaveCount(3)
+  await expect(rows).toHaveCount(2)
+  const first = podium.getByRole('link', { name: 'vercel/ai' })
+  const fourth = rows.first().getByRole('link', { name: 'modelcontextprotocol/servers' })
+  await expect(first).toHaveAttribute('href', 'https://github.com/vercel/ai')
+  await expect(first).toHaveAttribute('target', '_blank')
+  await expect(fourth).toHaveAttribute('href', 'https://github.com/modelcontextprotocol/servers')
+  await expect(rows.first()).toContainText('GitHub Trending #4')
+  await expect(podium.locator('.podium-card[data-rank="1"] .repo-summary')).toHaveText('用于构建 AI 应用的 TypeScript 工具包')
+  await expect(rows.first().locator('.repo-summary')).toHaveText('Model Context Protocol 服务端实现集合')
+  await expect(podium.getByRole('link', { name: 'openai/codex' })).toHaveAttribute('href', '/repos/openai/codex')
+})
+
+test('GitHub Trending 不限语言展示同周期各语言榜的补充项目且不重复', async ({ page }) => {
+  await mockRadar(page)
+  await page.goto('/trending?view=official&source=all:weekly')
+  const supplemental = page.getByRole('region', { name: '各语言榜补充项目' })
+  const board = page.locator('.ranked-repos')
+  await expect(board.locator('.repo-name')).toHaveText(['vercel/ai', 'openai/codex', 'pydantic/pydantic-ai'])
+  await expect(board.locator('.rank-entry-footer .badge, .rank-list-row .badge')).toHaveText([
+    'GitHub Trending #3', 'GitHub Trending #4', 'GitHub Trending #5',
+  ])
+  // 重叠项目只出现一次，补充项目展示它最靠前的来源名次。
+  await expect(supplemental.locator('.repo-name')).toHaveText(['astral-sh/ruff', 'modelcontextprotocol/servers'])
+  await expect(supplemental.locator('.badge')).toHaveText(['Go 榜 #2', 'Rust 榜 #4'])
+  await expect(page.getByRole('link', { name: 'vercel/ai', exact: true })).toHaveCount(1)
+  await page.getByRole('button', { name: /^时间范围/ }).click()
+  await page.getByRole('button', { name: '日榜', exact: true }).click()
+  await expect(supplemental).toHaveCount(0)
+  await expect(board.locator('.repo-name')).toHaveCount(3)
+})
+
+test('GitHub Trending 个别语言榜加载失败时保留已加载的榜单', async ({ page }) => {
+  await mockRadar(page)
+  const retry = barrier()
+  // 模拟 Rust 榜暂时不可用，重试等待期间也保留全站榜。
+  let unavailable = true
+  await page.route('**/api/v1/public/trending?sourceKey=language%3Arust&period=weekly', async (route) => {
+    if (unavailable) return route.fulfill({ status: 503, json: { code: 'unavailable' } })
+    await retry.promise
+    await route.fallback()
+  })
+  await page.goto('/trending?view=official&source=all:weekly')
+  await expect(page.locator('.ranked-repos .repo-name')).toHaveCount(3)
+  const error = page.getByRole('alert').filter({ hasText: '部分榜单加载失败' })
+  await expect(error).toBeVisible()
+  unavailable = false
+  try {
+    await error.getByRole('button', { name: '重试' }).click()
+    await expect(page.getByRole('status', { name: '正在加载', exact: true })).toBeVisible()
+    await expect(page.locator('.ranked-repos .repo-name')).toHaveCount(3)
+  } finally {
+    retry.resolve()
+  }
+  await expect(page.getByRole('region', { name: '各语言榜补充项目' }).locator('.repo-name')).toHaveCount(2)
+  await expect(error).toHaveCount(0)
 })
 
 test('发现页复用分类标签，搜索沿用当前分类', async ({ page }) => {
@@ -603,6 +672,7 @@ test('主题标签、项目收藏和榜单排名使用对应的仓库数据', as
   await expect(page.getByText('待排名项目')).toHaveCount(0)
   await expect(page.getByRole('link', { name: 'astral-sh/ruff' })).toHaveCount(0)
   await expect(cards.nth(0).locator('.sparkline-stroke')).toHaveAttribute('d', /M.+C.+M.+C/)
+  await expect(cards.nth(0).locator('.sparkline-estimated')).toHaveAttribute('stroke-dasharray', '3 3')
   await expect(cards.nth(0).locator('.sparkline linearGradient')).toHaveCount(1)
   await expect(cards.nth(0).locator('.sparkline circle')).toHaveCount(1)
   const metricEdges = await rest.locator('.rank-value').evaluateAll((elements) =>
@@ -1075,7 +1145,8 @@ test('运行状态用采集额度和最近任务填充，并保留运行维护�
   const sidebar = page.getByRole('navigation', { name: '主导航' })
   const tabs = page.getByRole('main').getByRole('navigation', { name: '运行管理' })
   await expect(sidebar.getByRole('link')).toHaveText(['仓库管理', '重点监控', '选题池', '运行状态'])
-  await expect(tabs.getByRole('link')).toHaveText(['概览', '任务', '运行配置', '分类映射', '发现规则', '发现页标签', '专题管理', '备份与恢复'])
+  // 运行管理导航包含新增的技术词表入口。
+  await expect(tabs.getByRole('link')).toHaveText(['概览', '任务', '运行配置', '分类映射', '技术词表', '发现规则', '发现页标签', '专题管理', '备份与恢复'])
   await expect(tabs.getByRole('link', { name: '概览' })).toHaveAttribute('aria-current', 'page')
   const contentBox = await page.locator('main .content').boundingBox()
   const metricsBox = await overview.boundingBox()
@@ -1259,7 +1330,8 @@ test('运行状态标签顶部稳定，配置锚点和正文双向同步', async
   await expect(panel.locator('.runtime-section-card')).toHaveCount(4)
   await expect(panel.getByText(/^修订 \d+$/)).toHaveCount(0)
   await expect(panel.getByLabel('OpenAI 兼容 API Base URL')).toBeVisible()
-  await expect(panel.getByLabel('Search 每分钟请求上限')).toHaveAccessibleDescription(/决定搜索来源的采集速率/)
+  // 额度说明应明确区分本地搜索预算和 GitHub 官方额度。
+  await expect(panel.getByLabel('Search 每分钟请求上限')).toHaveAccessibleDescription(/本站设置的每分钟仓库搜索预算。GitHub 官方额度按响应头单独检查。/)
   await expect(panel.getByText(/仅支持 OpenAI 兼容供应商/)).toBeVisible()
   const save = page.getByRole('button', { name: '保存配置' })
   await expect(panel).toHaveCSS('width', '880px')

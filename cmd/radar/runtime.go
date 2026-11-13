@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/api"
 	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
@@ -99,7 +100,7 @@ func (r *runtimeController) prepare(values config.Runtime) (*runtimeGroup, error
 		return nil, nil
 	}
 	var queryVectors *embedding.QueryVectors
-	if cfg.Embedding == current.Config.Embedding {
+	if cfg.Embedding == current.Config.Embedding && cfg.AI.Summary == current.Config.AI.Summary {
 		queryVectors = current.QueryVectors
 	}
 	return newRuntimeGroup(r.store.DB, cfg, r.logger, queryVectors)
@@ -153,7 +154,7 @@ func newRuntimeGroup(db *gorm.DB, cfg config.Config, logger *slog.Logger, queryV
 		{Key: "reports", Types: []string{summary.ReportJob}, Gap: 2 * time.Second},
 	}
 	summarizer := &summary.Engine{
-		Queue:  summary.Queue{DB: db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds, Pacing: pacing},
+		Queue:  summary.Queue{DB: db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds, Pacing: pacing, Logger: logger},
 		Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute,
 	}
 	if client != nil {
@@ -164,11 +165,13 @@ func newRuntimeGroup(db *gorm.DB, cfg config.Config, logger *slog.Logger, queryV
 		summarizer.WriteReport = chat.WriteReport
 		if client != nil {
 			summarizer.Provider, summarizer.Translate = chat, chat.Translate
+			summarizer.CleanReadme = chat.CleanReadme
 		}
 	}
 	key := strings.TrimSpace(os.Getenv(cfg.Embedding.APIKeyEnv))
+	budget := aibudget.ForConfig(db, cfg.AI.Summary)
 	if queryVectors == nil {
-		queryVectors = embedding.NewQueryVectors(cfg.Embedding, key)
+		queryVectors = embedding.NewQueryVectors(cfg.Embedding, key, budget)
 	}
 	group := &runtimeGroup{
 		services:  api.RuntimeServices{Config: cfg, Readmes: summarizer, QueryVectors: queryVectors},
@@ -178,8 +181,9 @@ func newRuntimeGroup(db *gorm.DB, cfg config.Config, logger *slog.Logger, queryV
 		group.maintainer.PlanReports = summarizer.Queue.ScheduleReports
 	}
 	if cfg.Embedding.Enabled && key != "" {
-		model := embedding.NewProvider(cfg.Embedding, key)
-		group.embedding = &embedding.Worker{DB: db, Config: cfg.Embedding, Embed: model.Embed, Readme: summarizer.EmbeddingReadme, Logger: logger}
+		model := embedding.NewProvider(cfg.Embedding, key, budget)
+		group.embedding = &embedding.Worker{DB: db, Config: cfg.Embedding, Embed: model.Embed, Readme: summarizer.EmbeddingReadme,
+			Logger: logger, Budget: budget, LegacyAdmission: cfg.AI.Summary.LegacyAdmission}
 	}
 	return group, nil
 }

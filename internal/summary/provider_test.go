@@ -1,6 +1,7 @@
 package summary
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,11 +9,25 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 )
 
+// modelContext 使用测试 SQLite 发放真实凭证，HTTP 仍由本地假模型接收。
+func modelContext(t *testing.T, q Queue) context.Context {
+	t.Helper()
+	ctx, _, err := aibudget.ForConfig(q.DB, q.AI.Summary).Start(t.Context(), aibudget.Request{Lane: admission.Growth}, time.Now(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ctx
+}
+
 func TestChatProviderSingleRequestAndSafeFailure(t *testing.T) {
+	e, _, _, _ := fixture(t)
 	var count, code atomic.Int32
 	code.Store(http.StatusOK)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,17 +53,24 @@ func TestChatProviderSingleRequestAndSafeFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	p := NewChatProvider(config.AI{BaseURL: server.URL + "/v1", Model: "fixture", Summary: config.DefaultSummary()}, "fixture")
-	ok := p.Generate(t.Context(), "public excerpt")
+	if got := p.Generate(t.Context(), "public excerpt"); !got.Unsent || count.Load() != 0 {
+		t.Fatalf("没有凭证的调用到达模型: %+v", got)
+	}
+	ctx := modelContext(t, e.Queue)
+	ok := p.Generate(ctx, "public excerpt")
 	if ok.Content != "{}" || ok.RequestID != "request_fixture" || ok.InputTokens == nil || *ok.InputTokens != 20 {
 		t.Fatalf("正常结构化响应错误: %+v", ok)
 	}
+	if got := p.Generate(ctx, "public excerpt"); !got.Unsent || count.Load() != 1 {
+		t.Fatalf("同一凭证重复发送: %+v", got)
+	}
 	code.Store(http.StatusTooManyRequests)
-	failed := p.Generate(t.Context(), "public excerpt")
+	failed := p.Generate(modelContext(t, e.Queue), "public excerpt")
 	if failed.Code != "ai_rate_limited" || !failed.Retry || failed.Content != "" || failed.Unknown {
 		t.Fatalf("明确拒绝应交给队列重试: %+v", failed)
 	}
 	code.Store(http.StatusGatewayTimeout)
-	unknown := p.Generate(t.Context(), "public excerpt")
+	unknown := p.Generate(modelContext(t, e.Queue), "public excerpt")
 	if !unknown.Unknown || unknown.Retry || unknown.Content != "" || count.Load() != 3 {
 		t.Fatalf("未知结果不可自动重发: %+v", unknown)
 	}
@@ -59,6 +81,7 @@ type requestTransport func(*http.Request) (*http.Response, error)
 func (f requestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestDeepSeekFlashUsesNonThinkingJSONMode(t *testing.T) {
+	e, _, _, _ := fixture(t)
 	cfg := config.AI{BaseURL: "https://api.deepseek.com/v1", Model: "deepseek-flash", Summary: config.DefaultSummary()}
 	p := NewChatProvider(cfg, "fixture")
 	p.http.Transport = requestTransport(func(r *http.Request) (*http.Response, error) {
@@ -76,7 +99,7 @@ func TestDeepSeekFlashUsesNonThinkingJSONMode(t *testing.T) {
 		data := `{"choices":[{"message":{"content":"   "}}]}`
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(data))}, nil
 	})
-	result := p.Generate(t.Context(), "public excerpt")
+	result := p.Generate(modelContext(t, e.Queue), "public excerpt")
 	if result.Code != "invalid_output" || !result.Retry {
 		t.Fatalf("空模型响应应进入原有重试流程: %+v", result)
 	}

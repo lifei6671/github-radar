@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -31,6 +33,7 @@ type Engine struct {
 	GitHub      GitHubSource
 	Provider    Provider
 	Translate   func(context.Context, string) ModelResult
+	CleanReadme func(context.Context, string) ModelResult
 	WriteReport func(context.Context, string) ModelResult
 	Logger      *slog.Logger
 	Tick        time.Duration
@@ -63,6 +66,9 @@ func (e *Engine) Run(ctx context.Context) error {
 					queue.AI.Summary.AutoDailyCalls = 0
 				}
 				err = queue.Schedule(workerCtx, now)
+				if err == nil && e.CleanReadme != nil {
+					err = queue.scheduleReadmeCleanup(workerCtx, now)
+				}
 			}
 			if err != nil && workerCtx.Err() == nil {
 				e.Logger.Warn("摘要调度失败", "error", err)
@@ -94,7 +100,7 @@ func (e *Engine) Run(ctx context.Context) error {
 }
 
 func (e *Engine) Step(ctx context.Context) (bool, error) {
-	job, localOnly, err := e.Queue.claimWork(ctx, time.Now(), e.Provider != nil || e.Translate != nil || e.WriteReport != nil, e.GitHub != nil, e.Provider != nil, e.Translate != nil)
+	job, localOnly, err := e.Queue.claimWork(ctx, time.Now(), e.Provider != nil || e.Translate != nil || e.CleanReadme != nil || e.WriteReport != nil, e.GitHub != nil, e.Provider != nil, e.Translate != nil)
 	if err != nil || job == nil {
 		return false, err
 	}
@@ -142,8 +148,17 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 	if err := q.DB.WithContext(ctx).Take(&repo, storage.RepositoryColumns.RepoID+"=?", *job.RepoID).Error; err != nil {
 		return err
 	}
-	if repo.Blocked || repo.Disabled || !repo.NameIsCurrent || repo.State == consts.StatusUnavailable {
+	if !repo.IsPublic() {
 		return e.fail(ctx, job, consts.CodeSummaryRepoUnavailable, false, 0, false)
+	}
+	if !p.Manual && !q.AI.Summary.LegacyAdmission && jobOperation(job) != "verify" {
+		d, _, err := storage.AIDecision(q.DB.WithContext(ctx), repo, jobOperation(job), false, time.Now())
+		if err != nil {
+			return err
+		}
+		if d.State != admission.Pass {
+			return q.stopAdmission(ctx, job, d)
+		}
 	}
 	if job.Type == TranslationJob {
 		return e.runTranslation(ctx, job, repo, p, localOnly)
@@ -160,9 +175,14 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 	}
 	withTopics := e.Provider != nil && (p.Manual || q.AI.Summary.AutoDailyCalls > 0)
 	var catalog storage.ThemeCatalog
+	var vocabulary storage.TechnicalTags
 	if withTopics {
 		var err error
 		catalog, err = storage.ReadThemeCatalog(db)
+		if err != nil {
+			return err
+		}
+		vocabulary, err = storage.ReadTechnicalTags(db)
 		if err != nil {
 			return err
 		}
@@ -174,20 +194,19 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 	if err != nil {
 		return err
 	}
-	wantsSummary := e.Provider != nil && (p.Manual || eligible || (old.RepoID != 0 && q.AI.Summary.AutoDailyCalls > 0))
+	wantsSummary := e.Provider != nil && (p.Manual || eligible || (q.AI.Summary.LegacyAdmission && old.RepoID != 0 && q.AI.Summary.AutoDailyCalls > 0))
 	cachedSummary := old.SummaryStatus == consts.StatusReady && hasStructuredSummary(old) && q.matches(old, check.SourceFingerprint)
 	topicModelMatches := q.matchesTopicModel(oldTopics) && oldTopics.ThemeCatalogKey == catalog.Key
 	cachedTopics := topicModelMatches &&
 		strings.HasPrefix(oldTopics.SourceFingerprint, check.SourceFingerprint+"|")
-	missingTopics := withTopics && catalog.NeedsAI(repo.GitHubTopics())
-	if !p.Manual && missingTopics && !topicModelMatches && old.SummaryStatus == consts.StatusReady {
+	if !p.Manual && withTopics && !topicModelMatches && old.SummaryStatus == consts.StatusReady && (q.AI.Summary.LegacyAdmission || p.TopicsOnly) {
 		if err := q.setTopicScope(ctx, &job, true); err != nil {
 			return err
 		}
 	}
 	etag := ""
 	if !p.Force && check.ReadmeETag != nil && (!wantsSummary || cachedSummary) &&
-		(!missingTopics || cachedTopics) {
+		(!withTopics || cachedTopics) {
 		var cached int64
 		limit := q.AI.Summary.ReadmeMaxBytes
 		if err := db.Model(&storage.RepoReadmeDocument{}).Where("repo_id=? AND readme_sha=?", repo.RepoID, check.LastSeenReadmeSHA).
@@ -202,7 +221,8 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 	policy := gh.Policy{RepositoryID: repo.RepoID, Grade: repo.Grade, Priority: p.Manual, ReadmeBudget: q.AI.Summary.GitHubBudget}
 	var input source
 	var usingCached, unchanged bool
-	if !p.Manual && missingTopics && !topicModelMatches && old.SummaryStatus == consts.StatusReady {
+	if withTopics && !p.Force && !topicModelMatches && old.SummaryStatus == consts.StatusReady &&
+		((!p.Manual && (q.AI.Summary.LegacyAdmission || p.TopicsOnly)) || (p.Manual && cachedSummary && oldTopics.TagVocabVersion != storage.TagVocabularyVersion)) {
 		input, usingCached, err = cachedTopicSource(db, repo, old, check)
 		if err != nil {
 			return err
@@ -217,7 +237,7 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 		input, unchanged, err = e.readSummarySource(ctx, job, etag, policy)
 	}
 	// README 返回 304 时仍需检查简介是否变化，变化后重新读取正文。
-	if err == nil && unchanged && withTopics && catalog.NeedsAI(input.githubTopics) &&
+	if err == nil && unchanged && withTopics &&
 		(!topicModelMatches || oldTopics.SourceFingerprint != topicsFingerprint(check.SourceFingerprint, input.description)) {
 		input, unchanged, err = e.readSource(ctx, repo.RepoID, "", policy)
 	}
@@ -251,20 +271,29 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 			if err := saveObserved(tx, old, check, topicsFingerprint(input.fingerprint, input.description)); err != nil {
 				return err
 			}
-			return tx.Model(&old).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusReady).Error
+			return publishGuideStatus(tx, old, now.UnixMilli())
 		}})
 	}
 	unchangedGuide := jobTopicsOnly(job) && old.SummaryStatus == consts.StatusReady && old.SourceFingerprint == input.fingerprint
 	makeSummary := !usingCached && !unchangedGuide && wantsSummary && (p.Force || !summaryMatches || !hasStructuredSummary(old))
 	fingerprint := topicsFingerprint(input.fingerprint, input.description)
-	makeTopics := withTopics && (makeSummary ||
-		(catalog.NeedsAI(input.githubTopics) && (p.Force || !topicModelMatches || oldTopics.SourceFingerprint != fingerprint)))
+	makeTopics := withTopics && (makeSummary || p.Force || !topicModelMatches || oldTopics.SourceFingerprint != fingerprint)
+	if (makeSummary || makeTopics || (!cachedSummary && wantsSummary)) &&
+		!q.AI.Summary.LegacyAdmission && !p.Manual && !repo.StarredByUser &&
+		!admission.Readable(input.body, repo.Name) && !admission.Readable(input.description, repo.Name) {
+		return q.stopAdmission(ctx, job, admission.Decision{State: admission.Defer, Reason: "verified_no_readable_source",
+			RetryAt: now.Add(7 * 24 * time.Hour).UnixMilli()})
+	}
 	if (!makeSummary && !makeTopics) || (input.body == "" && input.description == "") {
 		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts, apply: func(tx *gorm.DB) error {
 			if summaryMatches && old.SummaryStatus != consts.StatusReady {
-				if err := tx.Model(&old).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusReady).Error; err != nil {
+				if err := publishGuideStatus(tx, old, now.UnixMilli()); err != nil {
 					return err
 				}
+			}
+			if !p.Manual && !q.AI.Summary.LegacyAdmission && summaryMatches {
+				return errors.Join(saveObserved(tx, old, check, fingerprint),
+					storage.SaveAdmission(tx, repo.RepoID, "cache", admission.Decision{State: admission.Pass, Reason: "fingerprint_cached"}, admission.Evidence{}, now))
 			}
 			return saveObserved(tx, old, check, fingerprint)
 		}})
@@ -273,6 +302,7 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 		return err
 	}
 	input.themePrompt = themePrompt(catalog, q.AI.Summary.InputTokens/4)
+	input.technicalTags = vocabulary
 	// 选题材料为可选输出，给低输出预算保留导读及译文所需空间。
 	editorial := q.AI.Summary.OutputTokens >= 1536
 	prompt, sent := input.prompt(q.AI.Summary.InputTokens, makeSummary, makeTopics, editorial)
@@ -290,15 +320,11 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 			encoded, _ := json.Marshal(segments)
 			basePrompt, baseSource := input.prompt(q.AI.Summary.InputTokens-len(combinedTranslationInstruction)-len(encoded)-1,
 				makeSummary, makeTopics, editorial && q.AI.Summary.OutputTokens >= 3072)
-			if len(basePrompt)+len(systemPrompt)+len(combinedTranslationInstruction)+len(encoded)+1 > q.AI.Summary.InputTokens {
+			if len(basePrompt)+len(systemPrompt)+len(combinedTranslationInstruction)+len(encoded)+1 > q.AI.Summary.InputTokens || (baseSource.body == "" && baseSource.description == "") {
 				segments = nil
 			} else {
 				task, evidence, _ := strings.Cut(basePrompt, "\n")
 				prompt, sent = task+combinedTranslationInstruction+string(encoded)+"\n"+evidence, baseSource
-				if sent.body == "" && sent.description == "" {
-					// 首批片段也可作为导读依据，保留本轮请求的来源版本和质量。
-					sent.body = strings.Join(segments, "\n")
-				}
 			}
 		}
 	}
@@ -315,34 +341,63 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 	if err != nil {
 		return err
 	}
-	if err := q.sending(ctx, job, call); err != nil {
-		return err
+	operation := jobOperation(job)
+	if makeSummary && old.RepoID == 0 {
+		operation = "summary_first"
+	}
+	sendCtx, err := q.sending(ctx, job, call, fmt.Sprintf("%d:%s", q.AI.Summary.PromptVersion, fingerprint), operation)
+	if err != nil {
+		return q.sendingFailure(ctx, job, call, err)
 	}
 	start := time.Now()
-	result := e.Provider.Generate(ctx, prompt)
+	result := e.Provider.Generate(sendCtx, prompt)
 	duration := time.Since(start)
 	completed := time.Now()
 	var record storage.AISummary
-	var topicsJSON, themeSlugs, themeKey string
+	var topicsJSON, themeSlugs, themeKey, tagSlugs, taxonomyJSON string
+	keepPreviousClassification := false
 	valid := true
 	if makeSummary {
 		record, valid = resultSummary(result.Content, sent, repo.RepoID, call.Provider, q.AI.Model, q.AI.Summary.PromptVersion, completed.UnixMilli())
 	}
+	if makeSummary && old.RepoID != 0 {
+		// 旧版自由标签只作为历史数据保留，不再接受模型写入。
+		record.ValueTagsJSON = old.ValueTagsJSON
+		if old.SourceFingerprint == input.fingerprint {
+			record.ValueTagSlugsJSON = old.ValueTagSlugsJSON
+		}
+	}
 	if makeTopics {
-		var topicsValid bool
-		topicsJSON, topicsValid = resultTopics(result.Content)
+		classification, issue := readTaxonomyResult(result.Content, sent)
+		topicsJSON = classification.topics()
 		var themesValid bool
 		themeSlugs, themesValid = resultThemeSlugs(result.Content, topicsJSON, catalog)
-		if themesValid {
+		// 导读与分类分开验收；没有原文证据的主能力不会覆盖旧分类。
+		if issue == "" && themesValid {
+			// 合法留空是一次已完成的判断。记录待复核，同时保留历史分类的审核状态。
+			keepPreviousClassification = classification.Primary == "" && oldTopics.RepoID != 0 && oldTopics.TopicsJSON != "[]" && oldTopics.TopicsJSON != ""
 			themeKey = catalog.Key
-		} else if topicModelMatches && oldTopics.SourceFingerprint == fingerprint {
-			themeSlugs, themeKey = oldTopics.ThemeSlugsJSON, oldTopics.ThemeCatalogKey
+			tagSlugs = classification.cardTags()
+			encoded, _ := json.Marshal(classification)
+			taxonomyJSON = string(encoded)
 		}
-		// 同一请求里的有效摘要可以独立保存，缺失主题词留给下次检查。
-		valid = valid && (makeSummary || (topicsValid && themesValid))
+		if issue == "" && !themesValid {
+			issue = "taxonomy_invalid_themes"
+		}
+		if issue != "" && result.Code == "" {
+			// 只记录固定错误类别，避免把未审核的模型响应写入日志。
+			e.Logger.Info("技术用途未通过校验", "job_id", job.ID, "issue", issue)
+			if result.OutputIssue == "" {
+				result.OutputIssue = issue
+			}
+		}
+		valid = valid && (makeSummary || issue == "")
 	}
 	if result.Code == "" && !valid {
 		result.Code, result.Retry = consts.CodeInvalidOutput, true
+		if result.OutputIssue == "" {
+			result.OutputIssue = "summary_validation_failed"
+		}
 	}
 	if result.Code != "" {
 		if usingCached {
@@ -431,11 +486,19 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 				}
 			}
 			if makeSummary {
+				if keepPreviousClassification {
+					record.ValueTagSlugsJSON = old.ValueTagSlugsJSON
+				}
 				if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&record).Error; err != nil {
 					return err
 				}
+				if record.SummaryStatus == consts.StatusReady {
+					if err := storage.RecordFirstGuide(tx, repo.RepoID, time.Now().UnixMilli()); err != nil {
+						return err
+					}
+				}
 			} else if summaryMatches && !changed && verifyErr == nil && old.SummaryStatus != consts.StatusReady {
-				if err := tx.Model(&old).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusReady).Error; err != nil {
+				if err := publishGuideStatus(tx, old, time.Now().UnixMilli()); err != nil {
 					return err
 				}
 			}
@@ -450,14 +513,38 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job, localOnly bool) er
 					}
 				}
 			}
-			if topicsJSON != "" && verifyErr == nil && !topicsChanged {
+			if topicsJSON != "" && themeKey != "" && verifyErr == nil && !topicsChanged {
+				if usingCached && check.LastErrorCode != nil {
+					// 缓存回填成功后清除上次检查的分类错误，不改来源检查时间。
+					if err := tx.Model(&check).Update(storage.SummaryCheckColumns.LastErrorCode, nil).Error; err != nil {
+						return err
+					}
+				}
+				// 与分类同事务发布标签；独立回填沿用已发布的导读正文和时间。
 				topics := storage.RepoAITopics{RepoID: repo.RepoID, TopicsJSON: topicsJSON, SourceFingerprint: fingerprint,
-					ThemeSlugsJSON: themeSlugs, ThemeCatalogKey: themeKey,
+					ThemeSlugsJSON: themeSlugs, ThemeCatalogKey: themeKey, PurposeVersion: storage.TechnicalPurposeVersion, TagVocabVersion: storage.TagVocabularyVersion, TaxonomyJSON: taxonomyJSON,
 					ModelProvider: call.Provider, ModelName: q.AI.Model, PromptVersion: q.AI.Summary.PromptVersion, GeneratedAt: completed.UnixMilli()}
+				if keepPreviousClassification {
+					topics.TopicsJSON, topics.PurposeVersion = oldTopics.TopicsJSON, oldTopics.PurposeVersion
+					if oldTopics.ThemeCatalogKey == catalog.Key {
+						topics.ThemeSlugsJSON = oldTopics.ThemeSlugsJSON
+					}
+				} else if err := tx.Model(&storage.AISummary{}).Where("repo_id = ? AND summary_status = ? AND source_fingerprint = ?", repo.RepoID, consts.StatusReady, input.fingerprint).
+					Update(storage.AISummaryColumns.ValueTagSlugsJSON, tagSlugs).Error; err != nil {
+					return err
+				}
 				return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&topics).Error
 			}
 			return nil
 		}})
+}
+
+// publishGuideStatus 复核旧输出后第一次可用时才计入首次清洗。
+func publishGuideStatus(tx *gorm.DB, row storage.AISummary, at int64) error {
+	if err := tx.Model(&row).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusReady).Error; err != nil {
+		return err
+	}
+	return storage.RecordFirstGuide(tx, row.RepoID, at)
 }
 
 func staleSummarySource(job storage.Job, sha string, out outcome) outcome {

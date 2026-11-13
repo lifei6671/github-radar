@@ -54,6 +54,9 @@ func read(tx *gorm.DB) (Snapshot, error) {
 	if err := json.Unmarshal([]byte(row.ValueJSON), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("解析数据库运行设置: %w", err)
 	}
+	// 旧库可能保存超过硬上限的试运行值。保留较低的自定义额度，并在读取时钳制。
+	snapshot.Settings.AI.Summary.AutoDailyCalls = min(config.MaxAutoDailyCalls, snapshot.Settings.AI.Summary.AutoDailyCalls)
+	snapshot.Settings.AI.Summary.ManualDailyCalls = min(config.MaxManualDailyCalls, snapshot.Settings.AI.Summary.ManualDailyCalls)
 	snapshot.Settings.DefaultMetricsInterval()
 	if snapshot.Revision < 1 {
 		return Snapshot{}, errors.New("数据库运行设置缺少有效修订号")

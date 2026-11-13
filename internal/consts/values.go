@@ -76,6 +76,7 @@ const (
 const (
 	CommandServer                = "server"
 	CommandMigrate               = "migrate"
+	CommandAdmissionAudit        = "admission-audit"
 	CommandCollectOnce           = "collect-once"
 	CommandMaintenanceOnce       = "maintenance-once"
 	CommandBackup                = "backup"

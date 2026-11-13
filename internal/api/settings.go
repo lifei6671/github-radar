@@ -12,6 +12,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
+	"github.com/lifei6671/github-radar/internal/storage"
 )
 
 func (a *collectionAPI) registerSettings(system *gin.RouterGroup) {
@@ -20,6 +21,8 @@ func (a *collectionAPI) registerSettings(system *gin.RouterGroup) {
 	system.PUT("/settings", a.putRuntime)
 	system.GET("/categories", a.getCategorySettings)
 	system.PUT("/categories", a.putCategorySettings)
+	system.GET("/technical-tags", a.getTechnicalTags)
+	system.PUT("/technical-tags", a.putTechnicalTags)
 	system.GET("/discovery-rules", a.getDiscoveryRules)
 	system.PUT("/discovery-rules", a.putDiscoveryRules)
 	system.GET("/discovery-runs", a.discoveryRuns)
@@ -31,13 +34,52 @@ func (a *collectionAPI) registerSettings(system *gin.RouterGroup) {
 	system.PUT("/project-theme-groups", a.putProjectThemeGroups)
 }
 
+// getTechnicalTags 只向管理员返回可编辑的技术词表及修订号。
+func (a *collectionAPI) getTechnicalTags(c *gin.Context) {
+	revision, items, err := (settings.Store{DB: a.db}).TechnicalTags(c.Request.Context())
+	if err != nil {
+		a.settingsFailure(c, err)
+		return
+	}
+	a.technicalTagsResponse(c, revision, items)
+}
+
+// putTechnicalTags 校验整表后原子保存，成功即供后续模型调用和展示读取。
+func (a *collectionAPI) putTechnicalTags(c *gin.Context) {
+	var input struct {
+		Revision int64                  `json:"revision"`
+		Items    []storage.TechnicalTag `json:"items"`
+	}
+	// 有界请求同时覆盖 512 个词条和每条允许的别名。
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2<<20)
+	if !decodeSettings(c, &input) {
+		return
+	}
+	revision, items, err := (settings.Store{DB: a.db}).SaveTechnicalTags(c.Request.Context(), input.Revision, input.Items)
+	if err != nil {
+		a.settingsFailure(c, err)
+		return
+	}
+	a.technicalTagsResponse(c, revision, items)
+}
+
+// technicalTagsResponse 返回可编辑能力与用于选择的内置领域。
+func (a *collectionAPI) technicalTagsResponse(c *gin.Context, revision int64, items []storage.TechnicalTag) {
+	version, domains, _, err := storage.TaxonomyMetadata()
+	if err != nil {
+		a.fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"revision": revision, "items": items, "taxonomyVersion": version, "domains": domains})
+}
+
 // decodeSettings 避免拼错字段时悄悄丢弃管理员设置。
 func decodeSettings(c *gin.Context, dest any) bool {
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
 	var extra any
 	if err := decoder.Decode(dest); err != nil || decoder.Decode(&extra) != io.EOF {
-		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings})
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings, "message": "配置字段或数据格式无效，请重新加载后保存"})
 		return false
 	}
 	return true
@@ -52,6 +94,9 @@ func (a *collectionAPI) settingsFailure(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeSettingsConflict})
 	case errors.Is(err, settings.ErrCapacity):
 		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeMonitoringCapacityBelowFollowed})
+	case storage.IsBusy(err):
+		// 让表单保留当前编辑，并区分临时写锁与配置字段无效。
+		c.JSON(http.StatusServiceUnavailable, gin.H{"code": "settings_database_busy"})
 	default:
 		a.fail(c, err)
 	}

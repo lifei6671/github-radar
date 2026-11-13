@@ -52,6 +52,7 @@ export interface Repo {
   id: number
   fullName: string
   nameIsCurrent?: boolean
+  detailAvailable?: boolean
   htmlUrl: string
   description: string | null
   titleZh: string | null
@@ -260,6 +261,11 @@ export type SettingValue = boolean | number | string | null | SettingValue[] | S
 export interface SettingFields { [key: string]: SettingValue }
 export interface RuntimeSettings { revision: number; settings: SettingFields; restartRequired: boolean }
 export interface CategorySetting { slug: string; name: string; anyTopics: string[] }
+export interface TechnicalTagSetting { slug: string; name: string; aliases: string[]; domain: string; definition: string }
+export interface TechnicalTagSettings extends ListSettings<TechnicalTagSetting> {
+  taxonomyVersion: string
+  domains: { id: string; name: string; definition: string }[]
+}
 export interface ProjectThemeSetting { slug: string; name: string; description: string; anyTopics: string[]; aliases?: string[]; owners?: string[]; icon: string; iconColor: string; groupSlug: string }
 export interface DiscoveryTab { slug: string; label: string }
 export interface DiscoveryTabOption { slug: string; name: string }

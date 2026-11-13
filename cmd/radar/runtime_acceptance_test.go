@@ -103,8 +103,15 @@ func TestAcceptanceRuntimeReload(t *testing.T) {
 	current.Settings.AI.BaseURL = fixture.URL + "/v1"
 	current.Settings.AI.Model = "model-before-save"
 	current.Settings.AI.Summary.AutoDailyCalls = 0
+	current.Settings.AI.Summary.ManualDailyCalls = 500
+	current.Settings.AI.Summary.InputTokens = 800_000
+	current.Settings.AI.Summary.OutputTokens = 131_072
 	if saved := save(current); saved.RestartRequired {
 		t.Fatal("只保存业务配置应在同进程生效")
+	}
+	reloaded := acceptanceJSON[runtimeReply](t, server, http.MethodGet, runtimePath, nil, 200)
+	if got := reloaded.Settings.AI.Summary; got.ManualDailyCalls != 500 || got.InputTokens != 800_000 || got.OutputTokens != 131_072 {
+		t.Fatalf("运行配置保存后读回了旧额度: %+v", got)
 	}
 	for kind, days := range map[string]int{"weekly": 4, "monthly": 24} {
 		reply := acceptanceJSON[struct{ Report struct{ RequiredDays int } }](t, server, http.MethodGet,

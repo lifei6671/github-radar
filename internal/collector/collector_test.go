@@ -130,6 +130,8 @@ func newEngineWithBusyTimeout(t *testing.T, timeout int) *testEngine {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 既有采集用例验证原分档和恢复行为；新准入在独立用例中显式开启。
+	cfg.Scheduler.LegacyMonitoring = true
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "collector.db")
 	cfg.Storage.BusyTimeoutMS = timeout
 	cfg.Discovery.TrendingEnabled, cfg.Discovery.SearchRules = false, nil

@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 import { mockRadar, session } from './fixture'
 
-test('详情分开展示两种 Star 口径，回补入口只在后台', async ({ page }) => {
+test('详情只展示本地 Star 趋势，GitHub 回补入口只在后台', async ({ page }) => {
   const fixture = await mockRadar(page)
   fixture.setStarHistory(1, {
     days: [{ date: '2026-11-11', count: null, state: 'missing' },
@@ -12,19 +12,25 @@ test('详情分开展示两种 Star 口径，回补入口只在后台', async ({
   await page.goto('/repos/vercel/ai?range=180d#star-trend')
   await expect(page.getByRole('heading', { name: '本地累计 Star 与窗口净增' })).toBeVisible()
   await expect(page.getByRole('img', { name: '累计 Star 趋势，缺测点断开' })).toBeVisible()
-  await expect(page.getByRole('img', { name: 'GitHub 历史日 Star 柱状图' })).toBeVisible()
-  await expect(page.getByText('GitHub 日 Star 爆发待确认')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'GitHub 历史日 Star' })).toHaveCount(0)
+  await expect(page.getByRole('img', { name: 'GitHub 历史日 Star 柱状图' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: '回补 GitHub 历史' })).toHaveCount(0)
-  const extended = page.waitForRequest((r) => r.url().includes('/star-history?days=90'))
-  await page.getByRole('combobox', { name: 'GitHub 历史范围' }).selectOption('90')
-  await extended
   await session(page)
   await page.goto('/admin/repos/vercel/ai#star-trend')
   const submitted = page.waitForRequest((r) => r.method() === 'POST' && r.url().endsWith('/1/star-history'))
   await page.getByRole('button', { name: '回补 GitHub 历史' }).click()
   expect((await submitted).postDataJSON().requestId).toMatch(/^[0-9a-f]{32}$/)
-  await page.goto('/repos')
-  await page.getByRole('combobox', { name: '爆发信号' }).selectOption('github')
+  const publicList = page.waitForRequest((r) => new URL(r.url()).pathname === '/api/v1/public/repos')
+  await page.goto('/repos?breakout=github')
+  expect(new URL((await publicList).url()).searchParams.has('breakout')).toBe(false)
+  await expect(page.getByRole('combobox', { name: '爆发信号' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: 'vercel/ai', exact: true })).toBeVisible()
+
+  await page.goto('/admin/repos')
+  await page.getByRole('button', { name: '筛选', exact: true }).click()
+  const filters = page.getByRole('form', { name: '筛选项目' })
+  await filters.getByRole('combobox', { name: '爆发信号' }).selectOption('github')
+  await filters.getByRole('button', { name: '应用筛选' }).click()
   await expect(page).toHaveURL(/breakout=github/)
   await expect(page.getByRole('link', { name: 'vercel/ai', exact: true })).toBeVisible()
 })

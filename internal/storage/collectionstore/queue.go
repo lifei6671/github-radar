@@ -63,10 +63,10 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 		if err := cancelDisabledRules(tx, ms); err != nil {
 			return err
 		}
-		if err := cancelIneligibleObservationProbes(tx, ms, q.Cfg.ObservationPool); err != nil {
+		if err := cancelIneligibleObservationProbes(tx, ms, q.probesEnabled()); err != nil {
 			return err
 		}
-		if q.Cfg.ObservationPool {
+		if q.probesEnabled() {
 			if err := q.scheduleObservationProbes(tx, now); err != nil {
 				return err
 			}
@@ -213,7 +213,7 @@ func (q Queue) claim(db *gorm.DB, now time.Time, blocked []string) (*storage.Job
 				consts.JobStarHistory, consts.StatusRunning, ms)
 		next = next.Where("(jobs.type <> ? OR NOT EXISTS (?))", consts.JobStarHistory, inFlight)
 	}
-	if !q.Cfg.ObservationPool {
+	if !q.probesEnabled() {
 		next = next.Where("dedup_key NOT LIKE ?", observationProbePattern)
 	}
 	var job storage.Job

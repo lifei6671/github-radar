@@ -12,8 +12,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -32,11 +34,13 @@ var (
 
 // Worker 在可中止的后台生命周期中分批检查来源，页面请求无需访问模型。
 type Worker struct {
-	DB     *gorm.DB
-	Config config.Embedding
-	Embed  func(context.Context, string) ([]byte, error)
-	Readme func(context.Context, storage.Repository) (string, error)
-	Logger *slog.Logger
+	DB              *gorm.DB
+	Config          config.Embedding
+	Embed           func(context.Context, string) ([]byte, error)
+	Readme          func(context.Context, storage.Repository) (string, error)
+	Logger          *slog.Logger
+	Budget          aibudget.Service
+	LegacyAdmission bool
 }
 
 func (w Worker) Run(ctx context.Context) error {
@@ -62,11 +66,20 @@ func (w Worker) once(ctx context.Context, now time.Time) error {
 	if err != nil || paused {
 		return err
 	}
+	if w.Budget.DB != nil {
+		remaining, err := w.Budget.Remaining(db, admission.Maintenance, now)
+		if err != nil || remaining == 0 {
+			return err
+		}
+	}
 	key := ModelKey(w.Config)
 	table := storage.RepoEmbeddingTable + "."
 	var batch []storage.Repository
 	err = db.Model(&storage.Repository{}).Select(storage.RepositoryTable+".*").
 		Joins("LEFT "+embeddingJoin).Where(storage.PublicRepositoryCondition).
+		Where("NOT EXISTS (?)", db.Model(&storage.AdmissionDecision{}).Select("1").
+			Where("repo_id = repositories.repo_id AND operation = ? AND state <> ? AND next_check_at > ? AND updated_at >= repositories.updated_at",
+				"embedding", admission.Pass, now.UnixMilli())).
 		Where(table+vectors.RepoID+" IS NULL OR "+table+vectors.ModelKey+" <> ? OR "+table+vectors.NextCheckAt+" <= ?", key, now.UnixMilli()).
 		Order(table + vectors.NextCheckAt).Order(storage.RepositoryTable + "." + repos.RepoID).Limit(w.Config.BatchSize).Find(&batch).Error
 	if err != nil {
@@ -85,6 +98,12 @@ func (w Worker) once(ctx context.Context, now time.Time) error {
 
 func (w Worker) process(ctx context.Context, repo storage.Repository, key string, now time.Time) error {
 	db := w.DB.WithContext(ctx)
+	if !w.LegacyAdmission {
+		allowed, err := w.admitted(db, repo, now)
+		if err != nil || !allowed {
+			return err
+		}
+	}
 	var row storage.RepoEmbedding
 	if err := db.Find(&row, vectors.RepoID+" = ?", repo.RepoID).Error; err != nil {
 		return err
@@ -120,14 +139,59 @@ func (w Worker) process(ctx context.Context, repo storage.Repository, key string
 		if err != nil || !public {
 			return err
 		}
-		vector, err := w.Embed(ctx, input)
+		if !w.LegacyAdmission {
+			var about string
+			if repo.Description != nil {
+				about = *repo.Description
+			}
+			if !repo.StarredByUser && !admission.Readable(about, repo.Name) && !admission.Readable(readme, repo.Name) {
+				return storage.SaveAdmission(db, repo.RepoID, "embedding", admission.Decision{State: admission.Defer,
+					Reason: "no_readable_source", RetryAt: now.Add(refreshInterval).UnixMilli()}, admission.Evidence{}, now)
+			}
+			allowed, err := w.admitted(db, repo, time.Now())
+			if err != nil || !allowed {
+				return err
+			}
+		}
+		stored := false
+		original := row
+		sendCtx := context.WithValue(ctx, repositoryInputKey{}, repositoryInput{ID: repo.RepoID, FullName: repo.FullName,
+			Save: func(tx *gorm.DB, vector []byte) error {
+				var latest storage.Repository
+				if err := tx.Find(&latest, "repo_id = ?", repo.RepoID).Error; err != nil {
+					return err
+				}
+				if !latest.IsPublic() || latest.FullName != repo.FullName {
+					// 不能落盘的已发结果保持未决，避免身份恢复时自动付费重发相同输入。
+					return aibudget.ErrUncertain
+				}
+				row.Vector, row.SourceFingerprint = vector, fingerprint
+				if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
+					return err
+				}
+				stored = true
+				return nil
+			}})
+		vector, err := w.Embed(sendCtx, input)
 		if err != nil {
-			return w.retry(ctx, row, now, err)
+			return w.retry(ctx, original, now, err)
+		}
+		if stored {
+			return nil
 		}
 		row.Vector = vector
 	}
 	row.SourceFingerprint = fingerprint
 	return save(db, row)
+}
+
+// admitted 使用与摘要相同的内容门槛，记录被过滤的仓库以避免反复扫头部。
+func (w Worker) admitted(db *gorm.DB, repo storage.Repository, now time.Time) (bool, error) {
+	d, evidence, err := storage.AIDecision(db, repo, "embedding", false, now)
+	if err != nil {
+		return false, err
+	}
+	return d.State == admission.Pass, storage.SaveAdmission(db, repo.RepoID, "embedding", d, evidence, now)
 }
 
 func (w Worker) retry(ctx context.Context, row storage.RepoEmbedding, now time.Time, err error) error {

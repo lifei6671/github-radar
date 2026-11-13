@@ -114,6 +114,7 @@ func TestPublicSearchStarFloorUsesDurableDiscoverySources(t *testing.T) {
 func TestPublicReadDoesNotExposeAdminData(t *testing.T) {
 	router, db := collectionRouter(t)
 	const public = "/api/v1/public"
+
 	before := request(t, router, "GET", public+"/repos", "", "", 503)
 	if before["code"] != "setup_required" {
 		t.Fatalf("公开读取应遵守安装门禁: %v", before)
@@ -126,7 +127,7 @@ func TestPublicReadDoesNotExposeAdminData(t *testing.T) {
 	for id := int64(1); id <= 8; id++ {
 		repo := storage.Repository{RepoID: id, Owner: "example", Name: fmt.Sprint(id), FullName: fmt.Sprintf("example/%d", id),
 			NameIsCurrent: true, HTMLURL: fmt.Sprintf("https://github.com/example/%d", id), TopicsJSON: `["mcp"]`,
-			State: "active", Grade: "A", DiscoveredAt: now + id, LastDiscoveredAt: now, LastSuccessAt: &now, NextFetchAt: now, UpdatedAt: now}
+			Description: new("GitHub 简介"), State: "active", Grade: "A", DiscoveredAt: now + id, LastDiscoveredAt: now, LastSuccessAt: &now, NextFetchAt: now, UpdatedAt: now}
 		switch id {
 		case 1:
 			repo.StarredByUser, repo.FollowedAt = true, &now
@@ -142,6 +143,7 @@ func TestPublicReadDoesNotExposeAdminData(t *testing.T) {
 		if err := db.Create(&repo).Error; err != nil {
 			t.Fatal(err)
 		}
+		seedPurposeTopics(t, db, id, `["mcp-server"]`)
 		if id != 4 && id != 5 {
 			summary := readySummaryFixture(id, now)
 			switch id {
@@ -234,11 +236,35 @@ func TestPublicReadDoesNotExposeAdminData(t *testing.T) {
 	if len(jobs) != 2 || jobs[0].(map[string]any)["repoFullName"] != nil || jobs[1].(map[string]any)["repoFullName"] != "example/1" {
 		t.Fatalf("任务入口应使用关联仓库的完整名称: %+v", jobs)
 	}
-	trending := request(t, router, "GET", public+"/trending", "", "", 200)["items"].([]any)
-	if len(trending) != 1 || trending[0].(map[string]any)["id"] != float64(1) {
-		t.Fatalf("公开榜单未正确过滤批次成员: %v", trending)
+	// 榜单保留可公开仓库的原始名次，详情门槛和导读展示独立判断。
+	assertTrending := func(withNewSummary bool) {
+		t.Helper()
+		trending := request(t, router, "GET", public+"/trending", "", "", 200)["items"].([]any)
+		wantRanks := []int{1, 4, 5, 6, 7, 8}
+		if len(trending) != len(wantRanks) {
+			t.Fatalf("公开榜单应保留可公开的批次成员: %v", trending)
+		}
+		for i, rank := range wantRanks {
+			card := trending[i].(map[string]any)
+			assertPublicCard(card)
+			entry := card["trendingEntries"].([]any)[0].(map[string]any)
+			if card["id"] != float64(rank) || entry["rank"] != float64(rank) {
+				t.Fatalf("公开榜单改变了原始名次 %d: %v", rank, card)
+			}
+			hasDetail := rank == 1 || (rank == 5 && withNewSummary)
+			if card["detailAvailable"] != hasDetail {
+				t.Fatalf("第 %d 名的详情可用状态错误: %v", rank, card)
+			}
+			if hasDetail || rank == 6 {
+				if card["summaryPreview"] != summary.SummaryZh {
+					t.Fatalf("第 %d 名应展示已就绪的导读: %v", rank, card)
+				}
+			} else if card["summaryPreview"] != nil || card["titleZh"] != nil || card["description"] != "GitHub 简介" {
+				t.Fatalf("第 %d 名应回退到 GitHub 简介: %v", rank, card)
+			}
+		}
 	}
-	assertPublicCard(trending[0].(map[string]any))
+	assertTrending(false)
 	categories := request(t, router, "GET", public+"/categories", "", "", 200)["items"].([]any)
 	for _, item := range categories {
 		category := item.(map[string]any)
@@ -256,12 +282,13 @@ func TestPublicReadDoesNotExposeAdminData(t *testing.T) {
 	seedReadySummary(t, db, 5, now)
 	request(t, router, "GET", public+"/repos/by-name/example/5", "", "", 200)
 	request(t, router, "GET", public+"/repos/5/trend", "", "", 200)
-	for _, path := range []string{"/repos", "/discovery", "/trending"} {
+	for _, path := range []string{"/repos", "/discovery"} {
 		page := request(t, router, "GET", public+path, "", "", 200)["items"].([]any)
 		if len(page) != 2 || !slices.ContainsFunc(page, func(raw any) bool { return raw.(map[string]any)["id"] == float64(5) }) {
 			t.Fatalf("导读准备完成后应进入 %s: %v", path, page)
 		}
 	}
+	assertTrending(true)
 	for _, action := range []string{"refresh", "summary", "follow", "topic"} {
 		request(t, router, "POST", "/api/v1/repos/1/"+action, "{}", "", 401)
 		rec := httptest.NewRecorder()
@@ -269,5 +296,14 @@ func TestPublicReadDoesNotExposeAdminData(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("公开接口注册了写操作 %s: %d", action, rec.Code)
 		}
+	}
+}
+
+// seedPurposeTopics 为 API 用例显式保存经过新协议审核的技术用途词。
+func seedPurposeTopics(t *testing.T, db *gorm.DB, id int64, topics string) {
+	t.Helper()
+	row := storage.RepoAITopics{RepoID: id, TopicsJSON: topics, PurposeVersion: storage.TechnicalPurposeVersion}
+	if err := db.Create(&row).Error; err != nil {
+		t.Fatal(err)
 	}
 }

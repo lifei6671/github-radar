@@ -51,6 +51,7 @@ type Repository struct {
 	Stars                    int     `gorm:"column:stars"`
 	Forks                    int     `gorm:"column:forks"`
 	Archived                 bool    `gorm:"column:archived"`
+	DerivedProject           bool    `gorm:"column:derived_project"`
 	Disabled                 bool    `gorm:"column:disabled"`
 	Blocked                  bool    `gorm:"column:blocked"`
 	Grade                    string  `gorm:"column:grade"`

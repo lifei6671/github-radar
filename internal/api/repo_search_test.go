@@ -80,6 +80,9 @@ func TestSemanticRepoSearchRanksFiltersAndPaginates(t *testing.T) {
 		if err := db.Create(&repo).Error; err != nil {
 			t.Fatal(err)
 		}
+		if row.topics == `["mcp"]` {
+			seedPurposeTopics(t, db, id, `["mcp-server"]`)
+		}
 		if row.name != "unpublished" {
 			seedReadySummary(t, db, id, id)
 		}

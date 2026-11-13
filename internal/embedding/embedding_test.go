@@ -17,6 +17,7 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -170,7 +171,7 @@ func TestWorkerUsesPublicSourcesAndReusesUnchangedVector(t *testing.T) {
 	defer provider.Close()
 	cfg := config.DefaultEmbedding()
 	cfg.BaseURL, cfg.Model = provider.URL+"/v1", "demo-model"
-	worker := Worker{DB: db, Config: cfg, Embed: NewProvider(cfg, "fixture").Embed, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	worker := Worker{DB: db, Config: cfg, Embed: NewProvider(cfg, "fixture", aibudget.ForConfig(db, config.DefaultSummary())).Embed, LegacyAdmission: true, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Readme: func(_ context.Context, repo storage.Repository) (string, error) {
 			switch repo.RepoID {
 			case 2:
@@ -238,7 +239,7 @@ func TestWorkerRechecksVisibilityAfterReadingStoredSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker := Worker{DB: db, Config: config.DefaultEmbedding(),
+	worker := Worker{DB: db, Config: config.DefaultEmbedding(), LegacyAdmission: true,
 		Readme: func(context.Context, storage.Repository) (string, error) { return "公开 README", nil },
 		Embed: func(context.Context, string) ([]byte, error) {
 			t.Error("屏蔽提交后不应向模型发送项目材料")
@@ -266,7 +267,7 @@ func TestWorkerWaitsForRestoreResume(t *testing.T) {
 		}
 	}
 	reads, calls := 0, 0
-	worker := Worker{DB: db, Config: config.DefaultEmbedding(),
+	worker := Worker{DB: db, Config: config.DefaultEmbedding(), LegacyAdmission: true,
 		Readme: func(context.Context, storage.Repository) (string, error) { reads++; return "", nil },
 		Embed: func(context.Context, string) ([]byte, error) {
 			calls++

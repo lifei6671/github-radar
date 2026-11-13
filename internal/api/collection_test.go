@@ -133,6 +133,8 @@ func TestRepositoryCursorAndClassification(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	seedPurposeTopics(t, db, 1, `["mcp-server","tts"]`)
+	seedPurposeTopics(t, db, 3, `["mcp-server"]`)
 	first := request(t, router, "GET", "/api/v1/repos?sort=stars&limit=1", "", "admin", 200)
 	items := first["items"].([]any)
 	card := items[0].(map[string]any)
@@ -162,6 +164,7 @@ func TestRepositoryCursorAndClassification(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatal(err)
 	}
+	seedPurposeTopics(t, db, 4, `["mcp-server"]`)
 	categories := request(t, router, "GET", "/api/v1/categories", "", "admin", 200)
 	wantLatest := map[string]float64{"mcp": 1, "media": 1, "other": 2}
 	for _, raw := range categories["items"].([]any) {
@@ -229,7 +232,7 @@ func TestRepositoryBlockAdminAndPublicContracts(t *testing.T) {
 	}
 }
 
-func TestAITopicsClassificationAndGitHubPrecedence(t *testing.T) {
+func TestAITopicsClassificationIgnoresGitHubTopics(t *testing.T) {
 	router, db := collectionRouter(t)
 	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
 		t.Fatal(err)
@@ -239,24 +242,24 @@ func TestAITopicsClassificationAndGitHubPrecedence(t *testing.T) {
 	if err := db.Create(&repo).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: `["mcp"]`}).Error; err != nil {
+	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: `["graphics-editor"]`, PurposeVersion: storage.TechnicalPurposeVersion}).Error; err != nil {
 		t.Fatal(err)
 	}
 	seedReadySummary(t, db, repo.RepoID, *repo.LastSuccessAt)
 	for _, tc := range []struct {
 		topics, category string
 		inferred         bool
-	}{{"[]", "mcp", true}, {`["unmapped"]`, "other", true}, {`["mcp","mcp-server"]`, "mcp", false}} {
+	}{{"[]", "graphics", true}, {`["unmapped"]`, "graphics", true}, {`["mcp","mcp-server"]`, "graphics", true}} {
 		if err := db.Model(&repo).Update("topics_json", tc.topics).Error; err != nil {
 			t.Fatal(err)
 		}
 		detail := request(t, router, "GET", "/api/v1/public/repos/by-name/owner/repo", "", "", 200)
 		tags := detail["aiTopics"].([]any)
 		if detail["categories"].([]any)[0] != tc.category || (len(tags) > 0) != tc.inferred ||
-			(tc.inferred && tags[0] != "mcp") {
+			(tc.inferred && tags[0] != "graphics-editor") {
 			t.Fatalf("详情分类或 AI Topics 来源不符: %+v", detail)
 		}
-		for _, category := range []string{"mcp", "other"} {
+		for _, category := range []string{"mcp", "graphics", "other"} {
 			items := request(t, router, "GET", "/api/v1/repos?category="+category, "", "admin", 200)["items"].([]any)
 			if (len(items) == 1) != (category == tc.category) {
 				t.Fatalf("分类 %s 的筛选结果不符: %+v", category, items)

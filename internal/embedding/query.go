@@ -9,6 +9,7 @@ import (
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/config"
 )
 
@@ -39,11 +40,11 @@ type QueryVectors struct {
 	limit    *rate.Limiter
 }
 
-func NewQueryVectors(cfg config.Embedding, key string) *QueryVectors {
+func NewQueryVectors(cfg config.Embedding, key string, budget aibudget.Service) *QueryVectors {
 	if !cfg.Enabled || key == "" {
 		return nil
 	}
-	return &QueryVectors{provider: NewProvider(cfg, key), modelKey: ModelKey(cfg),
+	return &QueryVectors{provider: NewProvider(cfg, key, budget), modelKey: ModelKey(cfg),
 		cache: make(map[string]cachedQuery), limit: rate.NewLimiter(rate.Every(time.Second), 5)}
 }
 

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/config"
 )
 
@@ -32,7 +33,7 @@ func TestSearchVectorSharedAcrossCanceledRequest(t *testing.T) {
 	}()
 	cfg := config.DefaultEmbedding()
 	cfg.Enabled, cfg.BaseURL, cfg.Model = true, server.URL, "fixture"
-	vectors := NewQueryVectors(cfg, "fixture")
+	vectors := NewQueryVectors(cfg, "fixture", aibudget.ForConfig(testDB(t), config.DefaultSummary()))
 	firstContext, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	first, second := make(chan QueryVector, 1), make(chan QueryVector, 1)

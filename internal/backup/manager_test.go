@@ -20,6 +20,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/migrations"
@@ -225,6 +226,17 @@ func TestR2BackupRetentionAndSetupRestore(t *testing.T) {
 	if err := db.Create(&call).Error; err != nil {
 		t.Fatal(err)
 	}
+	// 真实发送中的报告任务在恢复后保持待确认，不能被自动重新投递。
+	report := storage.Job{Type: consts.JobComposeReport, DedupKey: "report:in-flight", PayloadJSON: "{}",
+		Status: consts.StatusRunning, MaxAttempts: 3}
+	if err := db.Create(&report).Error; err != nil {
+		t.Fatal(err)
+	}
+	reportCall := storage.AICall{CallKey: "report-call", JobID: report.ID, Provider: "fixture", Origin: "auto",
+		Status: "sending", ReservedAt: time.Now().UnixMilli()}
+	if err := db.Create(&reportCall).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Create(&storage.RateLimit{Resource: "core", LimitTotal: 5000, Remaining: 100}).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -276,6 +288,14 @@ func TestR2BackupRetentionAndSetupRestore(t *testing.T) {
 
 	workers := drainFixture{started: make(chan struct{})}
 	target, targetDB, targetCfg := testManager(t, filepath.Join(dir, "target.db"), false, workers)
+	// 恢复旧快照不能擦除目标库当天发送过的请求。
+	sent := time.Now().UnixMilli()
+	budgetRow := storage.AIBudgetReservation{ReservationKey: "after-backup", LogicalKey: "embedding-index-fixture",
+		Origin: "auto", Lane: "maintenance", Operation: "embedding_index", Provider: "fixture",
+		ReservedAt: sent, SendingAt: &sent, Status: "unknown"}
+	if err := targetDB.Create(&budgetRow).Error; err != nil {
+		t.Fatal(err)
+	}
 	target.store = factory
 	runtimeFixture := restoreRuntimeFixture{applied: make(chan config.Runtime, 1)}
 	target.runtime = runtimeFixture
@@ -329,6 +349,9 @@ func TestR2BackupRetentionAndSetupRestore(t *testing.T) {
 	requireValue(t, target.pool.QueryRow("SELECT last_error_code FROM jobs WHERE id=?", job.ID), "restore_reset")
 	requireValue(t, target.pool.QueryRow("SELECT error_code FROM ai_calls WHERE call_key=?", call.CallKey), "restore_reset_unknown")
 	requireValue(t, target.pool.QueryRow("SELECT CAST(COUNT(*) AS TEXT) FROM rate_limits"), "0")
+	requireValue(t, target.pool.QueryRow("SELECT status FROM ai_budget_reservations WHERE reservation_key='after-backup'"), "unknown")
+	requireValue(t, target.pool.QueryRow("SELECT status FROM jobs WHERE dedup_key='report:in-flight'"), "unknown")
+	requireValue(t, target.pool.QueryRow("SELECT status FROM ai_calls WHERE call_key='report-call'"), "unknown")
 	saved, err := readSettings(ctx, targetDB)
 	if err != nil || saved.R2 != targetConn || strings.Contains(target.Settings().R2.AccessKeyIDMasked, targetConn.AccessKeyID) {
 		t.Fatalf("连接未原子替换: %v", err)

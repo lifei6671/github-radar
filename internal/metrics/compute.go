@@ -14,8 +14,8 @@ import (
 const ComputeKey = "metrics.compute"
 
 type Store interface {
-	Transaction(context.Context, func(Transaction) error) error
 	ReadTransaction(context.Context, func(Transaction) error) error
+	Publish(context.Context, string, int64, bool, []domain.Repository, []domain.Calculation, []domain.GradeChange) error
 }
 
 type Transaction interface {
@@ -24,7 +24,6 @@ type Transaction interface {
 	LoadAnchors(target, limit, asOf int64, hourlyOnly, observation bool) (domain.Anchors, error)
 	LoadObservationPoints(from, to int64) (map[int64][]domain.Point, error)
 	LoadTrending(asOf int64) ([]domain.TrendingBatch, error)
-	Publish(slot string, asOf int64, rows []domain.Calculation, grades []domain.GradeChange) error
 }
 
 // ObservationReplay 以同一份实测数据比较当前配置与 P0.4 试运行规则，期间不发布指标或变更。
@@ -85,17 +84,19 @@ func ObservationReplay(ctx context.Context, store Store, cfg config.Config, now 
 	return result, err
 }
 
-// Compute 原子发布同一 asOf 的全量指标和等级；恢复时只计算当前窗口。
+// Compute 在同一读快照内算指标，准备完毕后才开启写事务，原子发布指标和档位。
 func Compute(ctx context.Context, store Store, cfg config.Config, now time.Time, force bool) error {
 	asOf := now.UnixMilli()
 	slot := strconv.FormatInt(now.UTC().Truncate(time.Duration(cfg.Scheduler.MetricsIntervalMinutes)*time.Minute).UnixMilli(), 10)
 	// 同一时槽内切换规则或容量时也要立刻按新配置分配。
 	if cfg.Scheduler.ObservationPool {
 		s := cfg.Scheduler
-		slot = fmt.Sprintf("%s/observation/%d/%v/%d/%d/%d/%d", slot, s.MaxMonitoredRepos, s.ObservationCapacities(),
+		slot = fmt.Sprintf("%s/observation/%t/%d/%v/%d/%d/%d/%d", slot, s.LegacyMonitoring, s.MaxMonitoredRepos, s.ObservationCapacities(),
 			s.IntervalsMinutes[consts.GradeS], s.IntervalsMinutes[consts.GradeA], s.IntervalsMinutes[consts.GradeB], s.IntervalsMinutes[consts.GradeC])
 	}
-	return store.Transaction(ctx, func(tx Transaction) error {
+	var repos []domain.Repository
+	var rows []domain.Calculation
+	err := store.ReadTransaction(ctx, func(tx Transaction) error {
 		lastSlot, updatedAt, found, err := tx.ComputeMarker()
 		if err != nil {
 			return err
@@ -103,30 +104,30 @@ func Compute(ctx context.Context, store Store, cfg config.Config, now time.Time,
 		if found && (updatedAt > asOf || (!force && lastSlot == slot)) {
 			return nil
 		}
-		repos, err := tx.Repositories(asOf, cfg.Scheduler.ObservationPool)
+		repos, err = tx.Repositories(asOf, cfg.Scheduler.ObservationPool)
 		if err != nil {
 			return err
 		}
-		rows, err := calculate(tx, cfg, repos, now)
-		if err != nil {
-			return err
-		}
-		grades := allocate(cfg, repos, rows, asOf)
-		return tx.Publish(slot, asOf, rows, grades)
+		rows, err = calculate(tx, cfg, repos, now)
+		return err
 	})
+	if err != nil || repos == nil {
+		return err
+	}
+	return store.Publish(ctx, slot, asOf, force, repos, rows, allocate(cfg, repos, rows, asOf))
 }
 
 func allocate(cfg config.Config, repos []domain.Repository, rows []domain.Calculation, asOf int64) []domain.GradeChange {
 	s := cfg.Scheduler
 	if !s.ObservationPool {
-		return domain.AllocateGrades(cfg.Metrics, [3]int{s.MaxHot, s.MaxActive, s.MaxNormal}, repos, rows, asOf)
+		return domain.AllocateGrades(cfg.Metrics, [3]int{s.MaxHot, s.MaxActive, s.MaxNormal}, repos, rows, asOf, !s.LegacyMonitoring)
 	}
 	var intervals [4]int64
 	for i, grade := range []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC} {
 		intervals[i] = s.Interval(grade).Milliseconds()
 	}
 	return domain.AllocateObservation(domain.ObservationPolicy{
-		Capacity: s.ObservationCapacities(), Total: s.MaxMonitoredRepos, Intervals: intervals,
+		Capacity: s.ObservationCapacities(), Total: s.MaxMonitoredRepos, Intervals: intervals, AgeAdmission: !s.LegacyMonitoring,
 	}, repos, rows, asOf)
 }
 

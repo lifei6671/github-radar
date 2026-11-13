@@ -29,6 +29,9 @@ func InterruptJob(ctx context.Context, db *gorm.DB, job Job) error {
 		}
 		if call.Status == consts.StatusSending || call.Status == consts.StatusUnknown {
 			status, code = consts.StatusUnknown, consts.CodeAIDeliveryUnknown
+			if err := MarkBudgetUnknown(tx, tx.Model(&AICall{}).Select("call_key").Where("call_key = ?", call.CallKey), at); err != nil {
+				return err
+			}
 			if err := tx.Model(&call).Updates(map[string]any{AICallColumns.Status: consts.StatusUnknown, AICallColumns.ErrorCode: code, AICallColumns.UpdatedAt: at}).Error; err != nil {
 				return err
 			}

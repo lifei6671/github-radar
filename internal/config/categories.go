@@ -11,7 +11,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/consts"
 )
 
-// Category 按 GitHub 原始 topics 派生，允许一个仓库同时命中多类。
+// Category 按已审核的技术用途匹配，允许一个仓库同时命中多类。
 type Category struct {
 	Slug      string   `yaml:"slug" json:"slug"`
 	Name      string   `yaml:"name" json:"name"`

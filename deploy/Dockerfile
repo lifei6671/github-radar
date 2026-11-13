@@ -13,6 +13,7 @@ COPY cmd ./cmd
 COPY internal ./internal
 COPY migrations ./migrations
 COPY configs/categories.go configs/categories.yaml ./configs/
+COPY docs/taxonomy.go docs/technical-taxonomy-v1.yaml ./docs/
 # modernc SQLite 可在关闭 CGO 时编译。
 RUN CGO_ENABLED=0 go build -trimpath -o /out/radar ./cmd/radar
 

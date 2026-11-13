@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,76 @@ func jsonBody(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// TestTechnicalTagsSettingsLifecycle 覆盖鉴权、冲突、保存以及历史卡片和标签筛选的即时变化。
+func TestTechnicalTagsSettingsLifecycle(t *testing.T) {
+	router, db := collectionRouter(t)
+	const path = "/api/v1/system/technical-tags"
+	const detail = "/api/v1/public/repos/by-name/example/editor"
+	request(t, router, http.MethodGet, path, "", "", 401)
+	request(t, router, http.MethodPut, path, "{}", "", 401)
+	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
+	defaults := request(t, router, http.MethodGet, path, "", "admin", 200)
+	if len(defaults["items"].([]any)) != 219 || len(defaults["domains"].([]any)) != 16 || defaults["taxonomyVersion"] != "1.0.0" {
+		t.Fatal("未配置时应使用正式内置词表和领域")
+	}
+	for _, invalid := range []string{
+		`{"revision":1,"items":null}`,
+		`{"revision":1,"items":[{"slug":"bad slug","name":"无效"}]}`,
+		`{"revision":1,"items":[{"slug":"finance","name":"金融"}]}`,
+		`{"revision":1,"items":[{"slug":"graphics-editor","name":"不应复用旧标识"}]}`,
+		`{"revision":1,"items":[{"slug":"test","name":"测试能力","domain":"finance"}]}`,
+		`{"revision":1,"items":[{"slug":"first","name":"一","aliases":["Alias"]},{"slug":"second","name":"二","aliases":[" alias "]}]}`,
+	} {
+		request(t, router, http.MethodPut, path, invalid, "admin", 400)
+	}
+	now := time.Now().UnixMilli()
+	if err := db.Create(&storage.Repository{RepoID: 1, Owner: "example", Name: "editor", FullName: "example/editor",
+		HTMLURL: "https://github.com/example/editor", TopicsJSON: `[]`, State: "active", Grade: "A", NameIsCurrent: true,
+		DiscoveredAt: now, LastDiscoveredAt: now, LastSuccessAt: &now, UpdatedAt: now}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&storage.AISummary{RepoID: 1, SummaryZh: "用于编辑矢量图形。", SummaryStatus: "ready",
+		SourceQuality: "sufficient", SourceLanguage: "zh", FeaturesJSON: "[]", AudienceJSON: "[]",
+		ValueTagsJSON: `["旧自由标签"]`, ValueTagSlugsJSON: `["graphics-editor","unknown-tag"]`}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: `["vector-graphics"]`, PurposeVersion: storage.TechnicalPurposeVersion}).Error; err != nil {
+		t.Fatal(err)
+	}
+	assertTags := func(want string) {
+		t.Helper()
+		got := request(t, router, http.MethodGet, detail, "", "", 200)
+		if tags := jsonBody(t, got["valueTags"]); tags != want {
+			t.Fatalf("公开标签=%s，期望=%s", tags, want)
+		}
+	}
+	assertFilter := func(label string, want int) {
+		t.Helper()
+		page := request(t, router, http.MethodGet, "/api/v1/public/repos?tag="+url.QueryEscape(label), "", "", 200)
+		if len(page["items"].([]any)) != want {
+			t.Fatalf("标签筛选 %q 返回 %+v", label, page)
+		}
+	}
+	assertTags(`["矢量图形编辑"]`)
+	assertFilter("旧自由标签", 0)
+	assertFilter("graphics-editor", 1)
+	assertFilter("vector-graphics", 1)
+	const edit = `{"revision":1,"items":[{"slug":"vector-graphics","name":"矢量编辑","aliases":["矢量图形编辑"],"domain":"media-creation","definition":"设计和编辑矢量图形"}]}`
+	request(t, router, http.MethodPut, path, edit, "admin", 200)
+	request(t, router, http.MethodPut, path, edit, "admin", 409)
+	assertTags(`["矢量编辑"]`)
+	assertFilter("矢量图形编辑", 1)
+	request(t, router, http.MethodPut, path, `{"revision":2,"items":[]}`, "admin", 200)
+	if _, err := (settings.Store{DB: db}).Initialize(t.Context(), config.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := request(t, router, http.MethodGet, path, "", "admin", 200); jsonBody(t, got["items"]) != "[]" {
+		t.Fatalf("删除全部后不能自动恢复内置词表: %+v", got)
+	}
+	assertTags(`[]`)
+	assertFilter("graphics-editor", 0)
 }
 
 func TestDiscoveryTabsPersistWithoutChangingGlobalCategories(t *testing.T) {
@@ -225,11 +296,12 @@ func TestAdminConfigurationIsAuthenticatedAndApplied(t *testing.T) {
 		t.Fatal(err)
 	}
 	categoryPath := "/api/v1/system/categories"
+	seedPurposeTopics(t, db, 1, `["mcp-server"]`)
 	request(t, router, http.MethodPut, categoryPath, `{"revision":2,"items":[{"slug":"other","name":"无效","anyTopics":["mcp"]}]}`, "admin", 400)
 	categories := request(t, router, http.MethodPut, categoryPath,
-		`{"revision":2,"items":[{"slug":"custom","name":"自定义","anyTopics":[" MCP ","mcp"]}]}`, "admin", 200)
+		`{"revision":2,"items":[{"slug":"custom","name":"自定义","anyTopics":[" MCP-SERVER ","mcp-server"]}]}`, "admin", 200)
 	topics := categories["items"].([]any)[0].(map[string]any)["anyTopics"].([]any)
-	if len(topics) != 1 || topics[0] != "mcp" {
+	if len(topics) != 1 || topics[0] != "mcp-server" {
 		t.Fatalf("分类主题未归一化: %+v", topics)
 	}
 	public := request(t, router, http.MethodGet, "/api/v1/categories", "", "admin", 200)
@@ -252,13 +324,19 @@ func TestAdminConfigurationIsAuthenticatedAndApplied(t *testing.T) {
 	request(t, router, http.MethodPut, rulePath,
 		`{"revision":3,"items":[{"sourceType":"trending","sourceKey":"all:hourly","intervalMinutes":30}]}`, "admin", 400)
 	request(t, router, http.MethodPut, rulePath,
-		`{"revision":3,"items":[{"sourceType":"trending","sourceKey":"language:zig:daily","query":"","enabled":false,"intervalMinutes":30,"priority":10}]}`, "admin", 200)
+		`{"revision":3,"items":[{"sourceType":"trending","sourceKey":"language:zig:daily","query":"","enabled":false,"intervalMinutes":30,"priority":10},
+		{"sourceType":"trending","sourceKey":"language:c#:daily","enabled":true,"intervalMinutes":240,"priority":30},
+		{"sourceType":"trending","sourceKey":"language:c++:weekly","enabled":true,"intervalMinutes":720,"priority":10}]}`, "admin", 200)
 	request(t, router, http.MethodGet, "/api/v1/trending?sourceKey=language:zig", "", "admin", 200)
+	request(t, router, http.MethodGet, "/api/v1/public/trending?sourceKey=language%3Ac%23", "", "", 200)
+	request(t, router, http.MethodGet, "/api/v1/public/trending?sourceKey=language%3Ac%2B%2B&period=weekly", "", "", 200)
 	request(t, router, http.MethodGet, "/api/v1/trending", "", "admin", 400)
 	for _, body := range []string{
 		`{"sourceType":"search","sourceKey":"mcp","query":"topic:mcp","minStars":-1,"intervalMinutes":30}`,
 		`{"sourceType":"search","sourceKey":"mcp","query":"topic:mcp","minStars":2.5,"intervalMinutes":30}`,
 		`{"sourceType":"trending","sourceKey":"all:daily","minStars":200,"intervalMinutes":30}`,
+		`{"sourceType":"search","sourceKey":"c#","query":"topic:csharp","intervalMinutes":30}`,
+		`{"sourceType":"trending","sourceKey":"language:c#/other:daily","intervalMinutes":240}`,
 	} {
 		request(t, router, http.MethodPut, rulePath, `{"revision":4,"items":[`+body+`]}`, "admin", 400)
 	}

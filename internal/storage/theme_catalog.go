@@ -2,8 +2,6 @@ package storage
 
 import (
 	"encoding/json"
-	"slices"
-	"strings"
 
 	"gorm.io/gorm"
 )
@@ -14,31 +12,21 @@ const ThemeCatalogKeySQL = `COALESCE((SELECT json_extract(value_json,'$') FROM s
 
 // 指定所有者的专题以仓库归属为准，不参与主题词或 AI 分类。
 const ThemeUsesTopicsSQL = `(json_array_length(project_themes.owners_json)=0)`
-const HasTopicThemesSQL = `EXISTS (SELECT 1 FROM project_themes WHERE ` + ThemeUsesTopicsSQL + `)`
 
-// GitHub Topics 与每个专题的规范标识、匹配词和别名做精确匹配。
-const ThemeTermMatchSQL = `(lower(term.value)=project_themes.slug
- OR lower(term.value) IN (SELECT value FROM json_each(project_themes.topics_json))
- OR lower(term.value) IN (SELECT value FROM json_each(project_themes.aliases_json)))`
+// TechnicalPurposeVersion 标记由技术用途提示词审核过的模型结果。
+const TechnicalPurposeVersion = 1
+const CurrentPurposeSQL = `purpose_version = 1`
 
-const NativeThemeMatchSQL = `(` + ThemeUsesTopicsSQL + ` AND EXISTS (SELECT 1 FROM json_each(repositories.topics_json) term WHERE ` + ThemeTermMatchSQL + `))`
-const HasNativeThemeSQL = `EXISTS (SELECT 1 FROM project_themes WHERE ` + NativeThemeMatchSQL + `)`
+// TagVocabularyVersion 区分受控词表结果和升级前的自由标签；旧专题继续可读。
+const TagVocabularyVersion = 2
+const CurrentTagVocabularySQL = `tag_vocab_version = 2`
 
-// 现有 AI Topics 和 AI 导读标签在回填完成前可以按新词表重匹配。
+// 技术专题只使用模型显式选择的有效目录项。组织专题沿用管理员指定的所有者。
 const ProjectThemeMatchSQL = `(lower(repositories.owner) IN (SELECT value FROM json_each(project_themes.owners_json))
- OR ` + NativeThemeMatchSQL + ` OR (` + ThemeUsesTopicsSQL + ` AND NOT ` + HasNativeThemeSQL + ` AND (
+ OR (` + ThemeUsesTopicsSQL + ` AND
  EXISTS (SELECT 1 FROM repo_ai_topics ai, json_each(ai.theme_slugs_json) chosen
-   WHERE ai.repo_id=repositories.repo_id AND ai.theme_catalog_key=` + ThemeCatalogKeySQL + ` AND chosen.value=project_themes.slug)
- OR (
-  NOT EXISTS (SELECT 1 FROM repo_ai_topics ai WHERE ai.repo_id=repositories.repo_id AND ai.theme_catalog_key=` + ThemeCatalogKeySQL + `)
-  AND (
-   EXISTS (SELECT 1 FROM repo_ai_topics ai, json_each(ai.topics_json) term
-     WHERE ai.repo_id=repositories.repo_id AND ` + ThemeTermMatchSQL + `)
-   OR EXISTS (SELECT 1 FROM ai_summaries ai, json_each(ai.value_tags_json) term
-     WHERE ai.repo_id=repositories.repo_id AND ai.summary_status='ready' AND ` + ThemeTermMatchSQL + `)
-  )
- )
-)))`
+   WHERE ai.repo_id=repositories.repo_id AND ai.` + CurrentPurposeSQL + `
+   AND ai.theme_catalog_key=` + ThemeCatalogKeySQL + ` AND chosen.value=project_themes.slug)))`
 
 type ThemeTerm struct {
 	Slug, Name, Description string
@@ -80,19 +68,4 @@ func ReadThemeCatalog(db *gorm.DB) (ThemeCatalog, error) {
 			Terms: append(append([]string{row.Slug}, keywords...), aliases...)})
 	}
 	return catalog, nil
-}
-
-func (c ThemeCatalog) HasNative(topics []string) bool {
-	for _, topic := range topics {
-		for _, theme := range c.Terms {
-			if slices.Contains(theme.Terms, strings.ToLower(topic)) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func (c ThemeCatalog) NeedsAI(topics []string) bool {
-	return len(topics) == 0 || (len(c.Terms) > 0 && !c.HasNative(topics))
 }

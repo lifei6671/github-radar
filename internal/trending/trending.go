@@ -40,6 +40,7 @@ func (c *Client) Fetch(ctx context.Context, language, period string) ([]Entry, e
 	if err != nil {
 		return nil, err
 	}
+	// 语言名传入原始路径值，由 URL 编码 C# 的井号。
 	target.Path = "/trending/" + language
 	target.RawQuery = url.Values{"since": {period}}.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)

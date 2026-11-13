@@ -62,7 +62,7 @@ func TestProjectThemeMatchesConfiguredOwnersExactly(t *testing.T) {
 	}
 }
 
-func TestProjectThemeUsesTopicsAndKeepsDiscoveryAndCompleteViews(t *testing.T) {
+func TestProjectThemeUsesReviewedAssignmentsInDiscoveryAndCompleteViews(t *testing.T) {
 	router, db := collectionRouter(t)
 	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestProjectThemeUsesTopicsAndKeepsDiscoveryAndCompleteViews(t *testing.T) {
 		blocked    bool
 	}{
 		{`["mcp","mcp-server"]`, `["unrelated"]`, time.Hour, "A", false},
-		{`["mcp"]`, `["mcp-server"]`, 2 * time.Hour, "S", false},  // 原生标签没有命中词表，使用已有 AI Topics。
+		{`["mcp"]`, `["mcp-server"]`, 2 * time.Hour, "S", false},
 		{`[]`, `["mcp-server"]`, 40 * 24 * time.Hour, "C", false}, // 只出现在专题全部项目。
 		{`["mcp-server"]`, "", 2 * time.Hour, "A", true},
 		{`["mcp-client"]`, "", 2 * time.Hour, "A", false},
@@ -96,13 +96,7 @@ func TestProjectThemeUsesTopicsAndKeepsDiscoveryAndCompleteViews(t *testing.T) {
 			t.Fatal(err)
 		}
 		seedReadySummary(t, db, id, sampledAt)
-		if fixture.ai != "" {
-			topics := storage.RepoAITopics{RepoID: id, TopicsJSON: fixture.ai, SourceFingerprint: "fixture",
-				ModelProvider: "fixture", ModelName: "fixture", PromptVersion: 1, GeneratedAt: sampledAt}
-			if err := db.Create(&topics).Error; err != nil {
-				t.Fatal(err)
-			}
-		}
+
 	}
 
 	request(t, router, "GET", admin, "", "", 401)
@@ -127,6 +121,18 @@ func TestProjectThemeUsesTopicsAndKeepsDiscoveryAndCompleteViews(t *testing.T) {
 		t.Fatalf("专题管理改变了分类映射: %v", after)
 	}
 
+	// 模拟模型按当前目录明确确认了四个项目。
+	catalog, err := storage.ReadThemeCatalog(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{1, 2, 3, 6} {
+		row := storage.RepoAITopics{RepoID: id, TopicsJSON: `["mcp-server"]`, ThemeSlugsJSON: `["mcp-tools"]`,
+			ThemeCatalogKey: catalog.Key, PurposeVersion: storage.TechnicalPurposeVersion}
+		if err := db.Create(&row).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
 	const summaryPath = public + "/project-themes"
 	directory := request(t, router, "GET", summaryPath, "", "", 200)["items"].([]any)
 	if len(directory) != 1 {
@@ -205,7 +211,7 @@ func TestProjectThemeUsesTopicsAndKeepsDiscoveryAndCompleteViews(t *testing.T) {
 	request(t, router, "GET", public+"/repos?theme=mcp-tools", "", "", 404)
 }
 
-func TestThemeCatalogPrefersNativeMatchesAndUsesAIForUnknownTopics(t *testing.T) {
+func TestThemeCatalogUsesReviewedChoicesWithoutNativeFallback(t *testing.T) {
 	router, db := collectionRouter(t)
 	if err := storage.InitializeEmpty(t.Context(), db); err != nil {
 		t.Fatal(err)
@@ -217,7 +223,7 @@ func TestThemeCatalogPrefersNativeMatchesAndUsesAIForUnknownTopics(t *testing.T)
 		t.Fatal(err)
 	}
 	seedReadySummary(t, db, 1, now)
-	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: `["tui"]`, ThemeSlugsJSON: `["terminal-tools"]`, ThemeCatalogKey: "initial"}).Error; err != nil {
+	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: `["tui"]`, ThemeSlugsJSON: `["terminal-tools"]`, ThemeCatalogKey: "initial", PurposeVersion: storage.TechnicalPurposeVersion}).Error; err != nil {
 		t.Fatal(err)
 	}
 	const themes = "/api/v1/public/project-themes/"
@@ -225,14 +231,14 @@ func TestThemeCatalogPrefersNativeMatchesAndUsesAIForUnknownTopics(t *testing.T)
 		t.Helper()
 		return request(t, router, "GET", themes+slug, "", "", 200)["count"].(float64)
 	}
-	if count("mcp-servers") != 1 || count("terminal-tools") != 0 {
-		t.Fatal("原生匹配必须优先于 AI 归类")
+	if count("mcp-servers") != 0 || count("terminal-tools") != 1 {
+		t.Fatal("GitHub Topics 不能覆盖模型确认的用途")
 	}
 	if err := db.Model(&repo).Update("topics_json", `["unmapped-topic"]`).Error; err != nil {
 		t.Fatal(err)
 	}
 	if count("mcp-servers") != 0 || count("terminal-tools") != 1 {
-		t.Fatal("原生主题未命中时应显示词表内的 AI 归类")
+		t.Fatal("GitHub Topics 更新不能改变已确认的用途")
 	}
 }
 

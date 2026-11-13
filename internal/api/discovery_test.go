@@ -285,7 +285,7 @@ func TestDiscoverySelectsSortsAndPagesOnServer(t *testing.T) {
 		row := readySummaryFixture(int64(id), anchor)
 		if reason, exists := reasons[id]; exists {
 			row.RecommendationReason = new(reason)
-			row.ValueTagsJSON = `["工具调用","编排"]`
+			row.ValueTagSlugsJSON = `["tool-calling","workflow"]`
 		}
 		if err := db.Create(&row).Error; err != nil {
 			t.Fatal(err)
@@ -293,6 +293,9 @@ func TestDiscoverySelectsSortsAndPagesOnServer(t *testing.T) {
 	}
 
 	const discovery = "/api/v1/public/discovery"
+	for _, id := range []int64{1, 2, 4, 5, 14, 15, 16} {
+		seedPurposeTopics(t, db, id, `["mcp-server"]`)
+	}
 	ids := func(body map[string]any) []int {
 		t.Helper()
 		var out []int
@@ -383,7 +386,7 @@ func TestDiscoverySelectsSortsAndPagesOnServer(t *testing.T) {
 	}
 	for _, raw := range tagged["items"].([]any) {
 		item := raw.(map[string]any)
-		if tags := item["valueTags"].([]any); !slices.Equal(tags, []any{"工具调用", "编排"}) {
+		if tags := item["valueTags"].([]any); !slices.Equal(tags, []any{"模型工具调用", "工作流自动化"}) {
 			t.Fatalf("公开列表应返回可用于筛选的 AI 标签: %v", item)
 		}
 	}

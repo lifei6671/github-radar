@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import { ArrowLeft, ArrowRight, Bot, Check, ChevronDown, ChevronRight, CodeXml, Folder, ListFilter, Plug, Video, Wrench, X } from 'lucide-react'
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
@@ -9,7 +9,7 @@ import { distinct, publicRepoListOptions, useAdminArea, useCategories, useRepos 
 import type { Category, DiscoveryTabOption, Items, Page, ProjectThemeDirectory, ProjectThemeDetail as ThemeDetail, Repo, Trending } from '../api/types'
 import { Badge, Empty, InlineSearch, More, Notice, PageError, Skeleton } from '../components/ui'
 import { AnimatedPills } from '../components/navigation-feedback'
-import { GrowthValue, RankedRepos, RepoBlockButton, RepoCard, RepoLink, Sparkline } from '../components/repo'
+import { GrowthValue, RankedRepos, RepoBlockButton, RepoCard, RepoLink, Sparkline, TrendingLanguageEntries } from '../components/repo'
 import { RepoCollectionEmpty } from '../components/repo-collection'
 import { RepoSubmission } from '../components/repo-submission'
 import { PageTitle } from '../components/page-title'
@@ -176,7 +176,11 @@ function AdminRepoTable({ params, names }: { params: URLSearchParams; names: Map
 function repoListCriteria(search: URLSearchParams, admin: boolean, slug?: string) {
   const params = new URLSearchParams(search)
   params.delete('cursor')
-  if (!admin) params.delete('category')
+  if (!admin) {
+    // 公开列表以分类路由为准，旧链接中的爆发信号也不参与筛选。
+    params.delete('category')
+    params.delete('breakout')
+  }
   const q = params.get('q') ?? ''
   const hasQuery = q.trim() !== ''
   const defaultSort = hasQuery ? 'relevance' : 'discovered'
@@ -267,13 +271,6 @@ export function Repos() {
             to={{ pathname: repoCategoryPath(entry.slug), search: searchParams }}>{entry.name}</Link>)}
         </AnimatedPills>
         {search}
-      </div>
-      <div className="list-actions">
-        <label className="select-label"><span className="sr-only">爆发信号</span>
-          <select value={params.get('breakout') ?? ''} onChange={(event) => change('breakout', event.target.value)}>
-            <BreakoutOptions />
-          </select>
-        </label>
       </div>
       {tag && <button type="button" className="badge badge-accent repo-tag-filter" aria-label={'清除标签筛选 ' + tag}
         onClick={() => change('tag', '')}><span>#{tag}</span><X size={14} aria-hidden /></button>}
@@ -429,8 +426,15 @@ const officialPeriods = [
   { value: 'daily', label: '日榜' }, { value: 'weekly', label: '周榜' }, { value: 'monthly', label: '月榜' },
 ]
 const officialLanguageNames = new Map([
-  ['all', '不限'], ['language:go', 'Go'], ['language:python', 'Python'], ['language:rust', 'Rust'], ['language:typescript', 'TypeScript'],
+  ['all', '不限语言'], ['language:go', 'Go'], ['language:python', 'Python'], ['language:rust', 'Rust'], ['language:typescript', 'TypeScript'],
+  ['language:javascript', 'JavaScript'], ['language:ruby', 'Ruby'], ['language:java', 'Java'], ['language:c#', 'C#'],
+  ['language:c++', 'C++'], ['language:shell', 'Shell'], ['language:php', 'PHP'], ['language:hcl', 'HCL'],
 ])
+
+// 榜单名称优先使用显示名，其余语言沿用来源标识。
+function officialLanguageName(source: string) {
+  return officialLanguageNames.get(source) ?? source.slice('language:'.length)
+}
 
 function Official() {
   const [params, setParams] = useSearchParams()
@@ -439,50 +443,80 @@ function Official() {
     meta: { pageLoad: true },
     queryFn: ({ signal }) => publicApi<Items<{ sourceKey: string }>>('/trending/sources', { signal }),
   })
-  const choices = new Set(sources.data?.items.map(({ sourceKey }) => sourceKey))
+  const choices = sources.data?.items.map(({ sourceKey }) => sourceKey) ?? []
+  const periodsFor = (source: string) => officialPeriods.filter(({ value }) => source === 'all'
+    ? choices.some((choice) => choice.endsWith(':' + value))
+    : choices.includes(source + ':' + value))
+  const allPeriods = periodsFor('all')
   const requested = params.get('source')
-  const key = requested && choices.has(requested) ? requested : choices.has('all:daily') ? 'all:daily' : [...choices][0] ?? 'all:daily'
+  const key = requested && (choices.includes(requested) || allPeriods.some(({ value }) => requested === 'all:' + value))
+    ? requested : 'all:' + (allPeriods[0]?.value ?? 'daily')
   const split = key.lastIndexOf(':')
   const sourceKey = key.slice(0, split)
   const period = key.slice(split + 1)
-  const trending = useQuery({
-    queryKey: ['trending', key],
-    meta: { pageLoad: true },
-    enabled: sources.isSuccess && choices.size > 0,
-    queryFn: ({ signal }) => publicApi<Trending>('/trending?' + new URLSearchParams({ sourceKey, period }), { signal }),
+  // 不限语言并行读取同周期的所有已配置榜单，切换语言时复用对应缓存。
+  const selectedKeys = sourceKey === 'all' ? choices.filter((choice) => choice.endsWith(':' + period)) : [key]
+  const trending = useQueries({
+    queries: selectedKeys.map((choice) => ({
+      queryKey: ['trending', choice],
+      meta: { pageLoad: true },
+      queryFn: ({ signal }) => publicApi<Trending>('/trending?' + new URLSearchParams({
+        sourceKey: choice.slice(0, choice.lastIndexOf(':')), period,
+      }), { signal }),
+    })),
   })
   if (sources.isPending) return <Skeleton />
-  if (sources.error) return <PageError error={sources.error} retry={() => { void sources.refetch() }} />
-  if (!choices.size) return <Empty title="暂无 GitHub Trending 榜单" />
+  if (sources.error && !sources.data) return <PageError error={sources.error} retry={() => { void sources.refetch() }} />
+  if (!choices.length) return <Empty title="暂无 GitHub Trending 榜单" />
 
-  const languages = Array.from(new Set(Array.from(choices, (choice) => choice.slice(0, choice.lastIndexOf(':')))),
-    (value) => ({ value, label: officialLanguageNames.get(value) ?? value.slice('language:'.length) }))
-  const periodsFor = (source: string) => officialPeriods.filter(({ value }) => choices.has(source + ':' + value))
+  const languages = Array.from(new Set(['all', ...choices.map((choice) => choice.slice(0, choice.lastIndexOf(':')))]),
+    (value) => ({ value, label: officialLanguageName(value) }))
   const select = (source: string, range: string) => {
     const next = source + ':' + range
     if (next !== key) setParams({ view: 'official', source: next }, { preventScrollReset: true })
   }
+  const primary = trending.find(({ data }) => data?.sourceKey === sourceKey)?.data
+  const rankItems = (data: Trending) => data.items.flatMap((repo) => {
+    const entry = repo.trendingEntries.find((item) => item.sourceKey === data.sourceKey && item.period === data.period)
+    return entry ? [{ repo, rank: entry.rank }] : []
+  })
+  const mainItems = primary ? rankItems(primary) : []
+  const seen = new Set(mainItems.map(({ repo }) => repo.id))
+  // 全站名次优先；补充项目按最靠前的语言榜名次排序，每个仓库只展示一次。
+  const extraItems = sourceKey === 'all' ? trending.flatMap(({ data }) => data && data.sourceKey !== 'all'
+    ? rankItems(data).map((item) => ({ ...item, sourceName: officialLanguageName(data.sourceKey) + ' 榜' }))
+    : []).sort((a, b) => a.rank - b.rank).filter(({ repo }) => {
+      if (seen.has(repo.id)) return false
+      seen.add(repo.id)
+      return true
+    }) : []
+  const failed = trending.filter(({ error }) => error)
+  const waiting = trending.some(({ isPending }) => isPending)
+  const hasBatch = trending.some(({ data }) => data?.batch)
+  const retryFailed = () => { void Promise.all(failed.map((query) => query.refetch())) }
   return <>
     <div className="official-tools">
-      {trending.data?.updatedAt && <time className="minor muted" dateTime={trending.data.updatedAt}>抓取于 {timestamp(trending.data.updatedAt)}</time>}
+      {primary?.updatedAt && <time className="minor muted" dateTime={primary.updatedAt}>{sourceKey === 'all' ? '全站榜抓取于 ' : '抓取于 '}{timestamp(primary.updatedAt)}</time>}
       <div className="official-filters" role="group" aria-label="GitHub Trending 筛选">
         <OfficialFilter label="编程语言" options={languages} value={sourceKey} searchable onSelect={(language) => {
-          // 只读取已配置的组合，换语言时优先沿用当前周期。
-          const range = choices.has(language + ':' + period) ? period : periodsFor(language)[0]?.value
+          // 换语言时优先沿用当前周期。
+          const ranges = periodsFor(language)
+          const range = ranges.find(({ value }) => value === period)?.value ?? ranges[0]?.value
           if (range) select(language, range)
         }} />
         <OfficialFilter label="时间范围" options={periodsFor(sourceKey)} value={period} onSelect={(range) => select(sourceKey, range)} />
       </div>
     </div>
-    {trending.isPending ? <Skeleton /> : trending.error && !trending.data
-        ? <PageError error={trending.error} retry={() => { void trending.refetch() }} /> :
-        trending.data?.items.length ? <>
-          {trending.error && <Notice error>{errorText(trending.error)}</Notice>}
-          <RankedRepos key={key} metric="official" items={trending.data.items.map((repo) => {
-            const entry = repo.trendingEntries.find((item) => item.sourceKey === sourceKey && item.period === period)
-            return { repo, rank: entry?.rank ?? null }
-          })} />
-        </> : <Empty title={trending.data?.batch ? '本批榜单没有项目' : '等待首次成功抓取'} />}
+    {!hasBatch && waiting ? <Skeleton /> : failed.length && !hasBatch
+      ? <PageError error={failed[0].error} retry={retryFailed} /> : <>
+        {failed.length > 0 && <Notice error>{sourceKey === 'all' ? '部分榜单加载失败' : errorText(failed[0].error)}
+          {sourceKey === 'all' && <> <button type="button" className="button" onClick={retryFailed}>重试</button></>}
+        </Notice>}
+        {mainItems.length > 0 && <RankedRepos key={key} metric="official" items={mainItems} />}
+        {extraItems.length > 0 && <TrendingLanguageEntries items={extraItems} />}
+        {waiting ? <Skeleton /> : !mainItems.length && !extraItems.length &&
+          <Empty title={hasBatch ? '本批榜单没有项目' : '等待首次成功抓取'} />}
+      </>}
   </>
 }
 

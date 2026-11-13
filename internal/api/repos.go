@@ -205,8 +205,17 @@ func (a *collectionAPI) filterRepoList(c *gin.Context, tx, db *gorm.DB, filters 
 		db = db.Where(storage.RepositoryColumns.Grade+"=?", filters.Grade)
 	}
 	if filters.Tag != "" {
-		db = db.Where(`EXISTS (SELECT 1 FROM `+storage.AISummaryTable+` s JOIN json_each(s.`+storage.AISummaryColumns.ValueTagsJSON+`) tag
-WHERE s.`+storage.AISummaryColumns.RepoID+`=`+storage.RepositoryTable+`.`+storage.RepositoryColumns.RepoID+` AND tag.value=?)`, filters.Tag)
+		vocabulary, err := storage.ReadTechnicalTags(tx)
+		if err != nil {
+			return nil, err
+		}
+		// 筛选和卡片共用词表，删除词条后也不再命中历史标识。
+		if slugs := vocabulary.FilterIDs(filters.Tag); len(slugs) != 0 {
+			db = db.Where(`EXISTS (SELECT 1 FROM `+storage.AISummaryTable+` s JOIN json_each(s.`+storage.AISummaryColumns.ValueTagSlugsJSON+`) tag
+WHERE s.`+storage.AISummaryColumns.RepoID+`=`+storage.RepositoryTable+`.`+storage.RepositoryColumns.RepoID+` AND tag.value IN ?)`, slugs)
+		} else {
+			db = db.Where("1 = 0")
+		}
 	}
 	if filters.Breakout != "" {
 		local := tx.Model(&storage.LatestMetric{}).Select("1").

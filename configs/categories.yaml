@@ -14,3 +14,6 @@
 - slug: tools
   name: 开发工具
   any_topics: [developer-tools, devtools, cli]
+- slug: graphics
+  name: 图形编辑
+  any_topics: [graphics-editor, vector-graphics, vector-editor, image-editor, graphical-design]

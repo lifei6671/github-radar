@@ -31,6 +31,7 @@ func metadata(source *sdk.Repository) map[string]any {
 		storage.RepositoryColumns.HTMLURL: source.GetHTMLURL(), storage.RepositoryColumns.Description: source.Description, storage.RepositoryColumns.TopicsJSON: string(data),
 		storage.RepositoryColumns.PrimaryLanguage: source.Language, storage.RepositoryColumns.Stars: source.GetStargazersCount(), storage.RepositoryColumns.Forks: source.GetForksCount(),
 		storage.RepositoryColumns.Archived: source.GetArchived(), storage.RepositoryColumns.Disabled: source.GetDisabled(), storage.RepositoryColumns.LicenseSPDXID: nil, storage.RepositoryColumns.LicenseName: nil,
+		storage.RepositoryColumns.DerivedProject:  source.GetFork() || source.GetIsTemplate() || source.GetMirrorURL() != "",
 		storage.RepositoryColumns.GitHubCreatedAt: nil, storage.RepositoryColumns.GitHubPushedAt: nil,
 	}
 	if source.License != nil {
@@ -66,7 +67,7 @@ func (q Queue) detachName(tx *gorm.DB, repo storage.Repository, at int64) error 
 
 // Discover 合并已确认的数字身份；发现元数据不会被当成 Star 成功采样。
 func (q Queue) Discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, error) {
-	if source.GetID() <= 0 || source.GetPrivate() {
+	if source.GetID() <= 0 || source.GetPrivate() || (source.GetVisibility() != "" && source.GetVisibility() != "public") {
 		return false, errors.New("发现源返回无效仓库身份")
 	}
 	var repo storage.Repository
@@ -130,6 +131,9 @@ func (q Queue) Discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, er
 }
 
 func (q Queue) admit(tx *gorm.DB, repo *storage.Repository, at int64) error {
+	if !q.Cfg.LegacyMonitoring {
+		return q.admitByPolicy(tx, repo, time.UnixMilli(at))
+	}
 	if q.Cfg.ObservationPool {
 		if !repo.StarredByUser || !repo.MonitoringState().CanProbeObservation() {
 			return nil
@@ -201,6 +205,9 @@ func (q Queue) Rebalance(ctx context.Context, now time.Time) error {
 	if q.Cfg.ObservationPool {
 		// 观察池在指标事务内统一分配四档容量，旧的每日准入不再独立修改档位。
 		return nil
+	}
+	if !q.Cfg.LegacyMonitoring {
+		return q.rebalanceByPolicy(ctx, now)
 	}
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var followedActive int64

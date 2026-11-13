@@ -43,6 +43,7 @@ var AICallColumns = struct {
 	EstimatedCost     string
 	DurationMS        string
 	ErrorCode         string
+	OutputIssue       string
 }{
 	CallKey:           "call_key",
 	JobID:             "job_id",
@@ -57,6 +58,7 @@ var AICallColumns = struct {
 	EstimatedCost:     "estimated_cost",
 	DurationMS:        "duration_ms",
 	ErrorCode:         "error_code",
+	OutputIssue:       "output_issue",
 }
 
 // AISummaryColumns 对应 AISummary 的 GORM 字段。
@@ -72,6 +74,7 @@ var AISummaryColumns = struct {
 	FeaturesJSON         string
 	AudienceJSON         string
 	ValueTagsJSON        string
+	ValueTagSlugsJSON    string
 	EditorialBriefJSON   string
 	SourceReadmeURL      string
 	ModelProvider        string
@@ -91,6 +94,7 @@ var AISummaryColumns = struct {
 	FeaturesJSON:         "features_json",
 	AudienceJSON:         "audience_json",
 	ValueTagsJSON:        "value_tags_json",
+	ValueTagSlugsJSON:    "value_tag_slugs_json",
 	EditorialBriefJSON:   "editorial_brief_json",
 	SourceReadmeURL:      "source_readme_url",
 	ModelProvider:        "model_provider",
@@ -347,6 +351,9 @@ var RateLimitColumns = struct {
 
 // RepoAITopicsColumns 对应 RepoAITopics 的 GORM 字段。
 var RepoAITopicsColumns = struct {
+	TaxonomyJSON      string
+	TagVocabVersion   string
+	PurposeVersion    string
 	ThemeSlugsJSON    string
 	ThemeCatalogKey   string
 	RepoID            string
@@ -357,6 +364,9 @@ var RepoAITopicsColumns = struct {
 	PromptVersion     string
 	GeneratedAt       string
 }{
+	TaxonomyJSON:      "taxonomy_json",
+	TagVocabVersion:   "tag_vocab_version",
+	PurposeVersion:    "purpose_version",
 	ThemeSlugsJSON:    "theme_slugs_json",
 	ThemeCatalogKey:   "theme_catalog_key",
 	RepoID:            "repo_id",
@@ -416,6 +426,7 @@ var RepositoryColumns = struct {
 	Stars                    string
 	Forks                    string
 	Archived                 string
+	DerivedProject           string
 	Disabled                 string
 	Blocked                  string
 	Grade                    string
@@ -451,6 +462,7 @@ var RepositoryColumns = struct {
 	Stars:                    "stars",
 	Forks:                    "forks",
 	Archived:                 "archived",
+	DerivedProject:           "derived_project",
 	Disabled:                 "disabled",
 	Blocked:                  "blocked",
 	Grade:                    "grade",

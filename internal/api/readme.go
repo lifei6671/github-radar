@@ -17,7 +17,7 @@ func cachedReadme(c *gin.Context, db *gorm.DB, repo storage.Repository) (summary
 	}
 	view, err := summary.CachedReadme(db, repo.RepoID)
 	if err != nil || c.GetBool(publicReadKey) || view.State != consts.StatusPending ||
-		view.Language == "" || view.Language == consts.LanguageChinese {
+		view.Language == "" {
 		return view, err
 	}
 	var job storage.Job

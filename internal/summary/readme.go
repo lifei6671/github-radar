@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -232,8 +233,51 @@ func translatedMarkdown(data []byte, parts []readmePart, translations []string) 
 	return out.Bytes()
 }
 
+// readmeHeadingIDs 以标题文字生成保留中英文的片段标识，并处理重复标题。
+func readmeHeadingIDs(root ast.Node, data []byte) (ids []string, aliases []string) {
+	used := make(map[string]bool)
+	_ = ast.Walk(root, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		heading, ok := n.(*ast.Heading)
+		if !entering || !ok {
+			return ast.WalkContinue, nil
+		}
+		old, _ := heading.AttributeString("id")
+		legacy, _ := old.([]byte)
+		label := strings.ToLower(strings.TrimSpace(string(heading.Text(data))))
+		base := strings.Map(func(r rune) rune {
+			switch {
+			case unicode.IsLetter(r) || unicode.IsNumber(r) || r == '-' || r == '_':
+				return r
+			case unicode.IsSpace(r):
+				return '-'
+			default:
+				return -1
+			}
+		}, label)
+		if base == "" {
+			base = "heading"
+		}
+		id := base
+		for suffix := 1; used[id]; suffix++ {
+			id = base + "-" + strconv.Itoa(suffix)
+		}
+		used[id] = true
+		heading.SetAttributeString("id", []byte(id))
+		ids, aliases = append(ids, id), append(aliases, string(legacy))
+		return ast.WalkContinue, nil
+	})
+	return ids, aliases
+}
+
 func renderReadme(data []byte, sourceURL string, original []byte) (string, error) {
 	base, _ := url.Parse(sourceURL)
+	repoURL := ""
+	if base != nil && strings.EqualFold(base.Hostname(), "github.com") {
+		repoPath, _, ok := strings.Cut(base.Path, "/blob/")
+		if ok {
+			repoURL = (&url.URL{Scheme: base.Scheme, Host: base.Host, Path: repoPath}).String()
+		}
+	}
 	resolve := func(value []byte, image bool) []byte {
 		target, err := url.Parse(string(value))
 		if err != nil || target.User != nil {
@@ -252,6 +296,12 @@ func renderReadme(data []byte, sourceURL string, original []byte) (string, error
 		return []byte(target.String())
 	}
 	root := readmeMarkdown.Parser().Parse(text.NewReader(data))
+	// 译文标题保留原文锚点映射，避免相同标题或中文改名后指向错误位置。
+	headingIDs := make(map[string]string)
+	translated, aliases := readmeHeadingIDs(root, data)
+	for i, alias := range aliases {
+		headingIDs[alias] = translated[i]
+	}
 	var sourceHeadings map[int]bool
 	if original != nil {
 		sourceHeadings = make(map[int]bool)
@@ -263,13 +313,32 @@ func renderReadme(data []byte, sourceURL string, original []byte) (string, error
 				index++
 			}
 		}
+		sourceIDs, sourceAliases := readmeHeadingIDs(source, original)
+		for i := range min(len(sourceIDs), len(translated)) {
+			headingIDs[sourceIDs[i]] = translated[i]
+			headingIDs[sourceAliases[i]] = translated[i]
+		}
 	}
 	removeNonProjectSections(root, data, sourceHeadings)
 	_ = ast.Walk(root, func(n ast.Node, enter bool) (ast.WalkStatus, error) {
 		if enter {
 			switch node := n.(type) {
 			case *ast.Link:
-				node.Destination = resolve(node.Destination, false)
+				destination, err := url.Parse(string(node.Destination))
+				destinationBase := ""
+				if err == nil && base != nil {
+					destinationBase = strings.SplitN(base.ResolveReference(destination).String(), "#", 2)[0]
+				}
+				if err == nil && destination.Fragment != "" && (strings.HasPrefix(string(node.Destination), "#") ||
+					destinationBase == sourceURL || repoURL != "" && strings.EqualFold(strings.TrimSuffix(destinationBase, "/"), repoURL)) {
+					fragment := destination.Fragment
+					if translated := headingIDs[fragment]; translated != "" {
+						fragment = translated
+					}
+					node.Destination = []byte((&url.URL{Fragment: fragment}).String())
+				} else {
+					node.Destination = resolve(node.Destination, false)
+				}
 			case *ast.Image:
 				node.Destination = resolve(node.Destination, true)
 			}
@@ -295,18 +364,21 @@ type ReadmeView struct {
 // CachedReadme 只读后台已经准备的当前版本。
 func CachedReadme(db *gorm.DB, repoID int64) (ReadmeView, error) {
 	var row storage.RepoReadmeDocument
-	if err := db.Select("repo_id", "readme_bytes", "language", "source_url", "chinese_html", "complete", "truncated").Find(&row, "repo_id = ?", repoID).Error; err != nil {
+	if err := db.Select("repo_id", "readme_bytes", "language", "source_url", "cleaned_html", "cleanup_verified", "complete", "truncated").Find(&row, "repo_id = ?", repoID).Error; err != nil {
 		return ReadmeView{}, err
 	}
-	state := consts.StatusPending
+	view := ReadmeView{State: consts.StatusPending, Language: row.Language, SourceURL: row.SourceURL, Truncated: row.Truncated}
 	switch {
-	case row.Complete:
-		state = consts.StatusReady
 	case row.RepoID != 0 && row.ReadmeBytes == 0:
-		state = consts.StatusMissing
+		view.State = consts.StatusMissing
+	case row.Complete && row.CleanupVerified && row.CleanedHTML != nil:
+		if *row.CleanedHTML == "" {
+			view.State = consts.StatusUnavailable
+		} else {
+			view.State, view.Complete, view.ChineseHTML = consts.StatusReady, true, *row.CleanedHTML
+		}
 	}
-	return ReadmeView{State: state, Language: row.Language, SourceURL: row.SourceURL,
-		ChineseHTML: row.ChineseHTML, Complete: row.Complete, Truncated: row.Truncated}, nil
+	return view, nil
 }
 
 func saveReadme(tx *gorm.DB, repoID int64, source gh.ReadmeResult, fullName string, jobID int64) error {
@@ -318,15 +390,41 @@ func saveReadme(tx *gorm.DB, repoID int64, source gh.ReadmeResult, fullName stri
 	row := storage.RepoReadmeDocument{RepoID: repoID, ReadmeSHA: source.SHA, ReadmeBytes: len(source.Body),
 		SourceURL: source.URL, Truncated: source.Truncated, SourceMarkdown: source.Body, SourceRepoName: fullName,
 		SourceETag: source.ETag, SourcePath: source.Path, SourceJobID: jobID}
-	if !source.Missing && len(source.Body) > 0 {
-		data := readmeBody(source.Body)
+	if err := buildReadmeDraft(tx, &row); err != nil {
+		return err
+	}
+	// 普通来源复查只在正文版本、发布地址或译文变化时使清理结果过期。
+	if row.Complete {
+		var current storage.RepoReadmeDocument
+		if err := tx.Select("cleaned_html", "cleanup_verified").Find(&current,
+			"repo_id = ? AND readme_sha = ? AND source_url = ? AND chinese_html = ?", repoID, row.ReadmeSHA, row.SourceURL, row.ChineseHTML).Error; err != nil {
+			return err
+		}
+		row.CleanedHTML, row.CleanupVerified = current.CleanedHTML, current.CleanupVerified
+	}
+	if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
+		return err
+	}
+	// 同一事务中撤下基于旧 README 的导读。
+	cols := storage.AISummaryColumns
+	return tx.Model(&storage.AISummary{}).
+		Where(cols.RepoID+"=? AND "+cols.SummaryStatus+"=? AND COALESCE("+cols.ReadmeSHA+",'')<>?",
+			repoID, consts.StatusReady, row.ReadmeSHA).
+		Update(cols.SummaryStatus, consts.StatusStale).Error
+}
+
+// buildReadmeDraft 根据原文与同版译文生成安全的中文草稿。
+func buildReadmeDraft(tx *gorm.DB, row *storage.RepoReadmeDocument) error {
+	row.ChineseHTML, row.Complete = "", false
+	if len(row.SourceMarkdown) > 0 {
+		data := readmeBody(row.SourceMarkdown)
 		var original []byte
 		row.Language = language(prose(data))
 		if row.Language != consts.LanguageChinese && row.Language != consts.LanguageUndetermined {
 			var saved storage.RepoReadmeTranslation
 			cols := storage.RepoReadmeTranslationColumns
 			if err := tx.Find(&saved, cols.RepoID+"=? AND "+cols.ReadmeSHA+"=? AND "+cols.ReadmeBytes+"=? AND "+cols.Complete+"=1",
-				repoID, row.ReadmeSHA, row.ReadmeBytes).Error; err != nil {
+				row.RepoID, row.ReadmeSHA, row.ReadmeBytes).Error; err != nil {
 				return err
 			}
 			if saved.RepoID == 0 {
@@ -344,22 +442,14 @@ func saveReadme(tx *gorm.DB, repoID int64, source gh.ReadmeResult, fullName stri
 			}
 		}
 		if len(data) > 0 {
-			html, err := renderReadme(data, source.URL, original)
+			html, err := renderReadme(data, row.SourceURL, original)
 			if err != nil {
 				return err
 			}
 			row.ChineseHTML, row.Complete = html, strings.TrimSpace(html) != ""
 		}
 	}
-	if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&row).Error; err != nil {
-		return err
-	}
-	// 同一事务中撤下基于旧 README 的导读。
-	cols := storage.AISummaryColumns
-	return tx.Model(&storage.AISummary{}).
-		Where(cols.RepoID+"=? AND "+cols.SummaryStatus+"=? AND COALESCE("+cols.ReadmeSHA+",'')<>?",
-			repoID, consts.StatusReady, row.ReadmeSHA).
-		Update(cols.SummaryStatus, consts.StatusStale).Error
+	return nil
 }
 
 func (e *Engine) rememberReadme(ctx context.Context, job storage.Job, source gh.ReadmeResult, fullName string) error {

@@ -188,7 +188,7 @@ func TestReportJobsUseSavedEvidenceAndAccountForAI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := q.sending(t.Context(), *running, call); err != nil {
+	if _, err := q.sending(t.Context(), *running, call); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Model(&job).Update("lease_until", now.Add(-time.Second).UnixMilli()).Error; err != nil {

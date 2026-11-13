@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"slices"
 	"time"
 
@@ -12,20 +13,18 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 	domain "github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
+// ErrMonitoringChanged 表示计算期间监控或身份发生变更，应重新读取快照。
+var ErrMonitoringChanged = errors.New("监控状态已更新，指标快照已过期")
+
 type Store struct{ DB *gorm.DB }
 
 type transaction struct{ db *gorm.DB }
-
-func (s Store) Transaction(ctx context.Context, work func(metrics.Transaction) error) error {
-	return s.DB.WithContext(ctx).Transaction(func(db *gorm.DB) error {
-		return work(transaction{db: db})
-	})
-}
 
 func (s Store) ReadTransaction(ctx context.Context, work func(metrics.Transaction) error) error {
 	return s.DB.WithContext(ctx).Transaction(func(db *gorm.DB) error {
@@ -45,40 +44,90 @@ func observationSubjects(observation bool) string {
 		return "repositories.state = 'active'"
 	}
 	// 活跃项目即使正在复核 404，也需要占用原容量直至确认下线。
-	return "(repositories.state = 'active' OR ((" + storage.PublicRepositoryCondition + ") AND (repositories.last_success_at IS NOT NULL OR repositories.starred_by_user = 1)))"
+	return "(repositories.state = 'active' OR ((" + storage.PublicRepositoryCondition + ") AND (repositories.last_success_at IS NOT NULL OR repositories.starred_by_user = 1 OR repositories.stars >= 200)))"
 }
 
 func (r transaction) Repositories(asOf int64, observation bool) ([]domain.Repository, error) {
 	c := storage.RepositoryColumns
 	var rows []storage.Repository
 	err := r.db.Select(c.RepoID, c.Grade, c.BelowGradeSince, c.FirstNotFoundAt, c.NextFetchAt,
-		c.State, c.Stars, c.PrimaryLanguage, c.StarredByUser, c.LastSuccessAt).
+		c.State, c.Stars, c.PrimaryLanguage, c.StarredByUser, c.LastSuccessAt, c.GitHubCreatedAt, c.GitHubPushedAt,
+		c.Blocked, c.Disabled, c.NameIsCurrent).
 		Where(observationSubjects(observation)).Order(c.RepoID).Find(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	var signals map[int64]int64
 	paused := make(map[int64]int64)
+	pausedReason := make(map[int64]string)
+	lastDowngrade := make(map[int64]int64)
+	trending := make(map[int64]int64)
+	official := make(map[int64]int64)
+	protected := make(map[int64]bool)
 	if observation {
 		signals, err = r.observationSignals(asOf)
 		if err != nil {
 			return nil, err
 		}
-		var history []struct{ RepoID, At int64 }
 		ids := r.db.Model(&storage.Repository{}).Select("repo_id").Where("state = ?", consts.StatusPaused)
-		if err := r.db.Model(&storage.ObservationTransition{}).Select("repo_id, MAX(occurred_at) AS at").
-			Where("repo_id IN (?) AND to_state = ?", ids, consts.StatusPaused).Group("repo_id").Scan(&history).Error; err != nil {
+		var transitions []storage.ObservationTransition
+		if err := r.db.Select("repo_id", "occurred_at", "reason").Where("repo_id IN (?) AND to_state = ?", ids, consts.StatusPaused).
+			Order("occurred_at DESC, id DESC").Find(&transitions).Error; err != nil {
 			return nil, err
 		}
-		for _, row := range history {
-			paused[row.RepoID] = row.At
+		for _, transition := range transitions {
+			if paused[transition.RepoID] == 0 {
+				paused[transition.RepoID] = transition.OccurredAt
+				pausedReason[transition.RepoID] = transition.Reason
+			}
+		}
+		var cooled []struct{ RepoID, At int64 }
+		if err := r.db.Model(&storage.ObservationTransition{}).Select("repo_id, MAX(occurred_at) AS at").
+			Where("to_grade = ? AND from_grade <> ? AND to_state = ? AND occurred_at >= ?",
+				consts.GradeC, consts.GradeC, consts.StatusActive, asOf-3*domain.Day).
+			Group("repo_id").Scan(&cooled).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range cooled {
+			lastDowngrade[row.RepoID] = row.At
+		}
+		var trend []struct{ RepoID, At int64 }
+		if err := storage.StrongTrending(r.db, time.UnixMilli(asOf)).Select("o.repo_id, MAX(b.observed_at) AS at").
+			Group("o.repo_id").Scan(&trend).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range trend {
+			trending[row.RepoID] = row.At
+		}
+		var bursts []storage.RepoStarHistoryStatus
+		if err := r.db.Select("repo_id", "breakout_at").Where("breakout_at BETWEEN ? AND ?", asOf-2*domain.Day, asOf).
+			Find(&bursts).Error; err != nil {
+			return nil, err
+		}
+		for _, row := range bursts {
+			official[row.RepoID] = *row.BreakoutAt
+		}
+		for _, query := range []*gorm.DB{
+			r.db.Model(&storage.AISummary{}).Where("summary_status = ? AND summary_zh <> ''", consts.StatusReady),
+			r.db.Model(&storage.TopicCandidate{}).Where("status IN ?", []string{consts.StatusCandidate, consts.StatusShortlisted}),
+		} {
+			var ids []int64
+			if err := query.Distinct("repo_id").Pluck("repo_id", &ids).Error; err != nil {
+				return nil, err
+			}
+			for _, id := range ids {
+				protected[id] = true
+			}
 		}
 	}
 	repos := make([]domain.Repository, 0, len(rows))
 	for _, row := range rows {
 		repo := domain.Repository{ID: row.RepoID, Grade: row.Grade, State: row.State, Stars: row.Stars,
-			Followed: row.StarredByUser, LastSuccessAt: row.LastSuccessAt, LastSignalAt: signals[row.RepoID], PausedAt: paused[row.RepoID], BelowGradeSince: row.BelowGradeSince,
-			FirstNotFoundAt: row.FirstNotFoundAt, NextFetchAt: row.NextFetchAt}
+			Followed: row.StarredByUser, LastSuccessAt: row.LastSuccessAt, LastSignalAt: signals[row.RepoID], PausedAt: paused[row.RepoID], PausedReason: pausedReason[row.RepoID], BelowGradeSince: row.BelowGradeSince,
+			FirstNotFoundAt: row.FirstNotFoundAt, NextFetchAt: row.NextFetchAt, CreatedAt: row.GitHubCreatedAt, PushedAt: row.GitHubPushedAt,
+			Blocked: row.Blocked, Disabled: row.Disabled, NameIsCurrent: row.NameIsCurrent,
+			TrustedTrendingAt: trending[row.RepoID], OfficialBurstAt: official[row.RepoID], PreserveAvailability: protected[row.RepoID],
+			LastDowngradeAt: lastDowngrade[row.RepoID]}
 		if row.PrimaryLanguage != nil {
 			repo.Language = *row.PrimaryLanguage
 		}
@@ -145,9 +194,23 @@ func (r transaction) LoadObservationPoints(from, to int64) (map[int64][]domain.P
 	return points, nil
 }
 
-func (r transaction) Publish(slot string, asOf int64, calculations []domain.Calculation, grades []domain.GradeChange) error {
+// Publish 在短写事务中复核档位和身份，避免旧快照覆盖屏蔽、恢复和人工关注。
+func (s Store) Publish(ctx context.Context, slot string, asOf int64, force bool, repos []domain.Repository, calculations []domain.Calculation, grades []domain.GradeChange) error {
+	// 计算仍覆盖观察池候选，最终只持久化会留在活跃池的指标。
+	active := make(map[int64]bool, len(repos))
+	for _, repo := range repos {
+		active[repo.ID] = repo.State == consts.StatusActive
+	}
+	for _, grade := range grades {
+		if grade.State != "" {
+			active[grade.RepoID] = grade.State == consts.StatusActive
+		}
+	}
 	rows := make([]storage.LatestMetric, 0, len(calculations))
 	for _, result := range calculations {
+		if !active[result.RepoID] {
+			continue
+		}
 		windows, err := json.Marshal(result.Windows)
 		if err != nil {
 			return err
@@ -173,6 +236,68 @@ func (r transaction) Publish(slot string, asOf int64, calculations []domain.Calc
 			TrendingScore: result.TrendingScore, DataQuality: result.DataQuality, BreakoutJSON: breakout,
 		})
 	}
+	return s.DB.WithContext(ctx).Transaction(func(db *gorm.DB) error {
+		r := transaction{db: db}
+		lastSlot, at, found, err := r.ComputeMarker()
+		if err != nil || found && (at > asOf || !force && lastSlot == slot) {
+			return err
+		}
+		current, err := r.verifyMonitoringSnapshot(repos, grades)
+		if err != nil {
+			return err
+		}
+		return r.publish(slot, asOf, rows, calculations, grades, current)
+	})
+}
+
+// verifyMonitoringSnapshot 只比较席位、身份和恢复状态。并发采样可以继续落盘。
+func (r transaction) verifyMonitoringSnapshot(repos []domain.Repository, grades []domain.GradeChange) (map[int64]storage.Repository, error) {
+	expected := make(map[int64]domain.Repository, len(repos))
+	for _, repo := range repos {
+		expected[repo.ID] = repo
+	}
+	ids := make([]int64, 0, len(grades))
+	samplingChanges := make(map[int64]bool, len(grades))
+	for _, grade := range grades {
+		ids = append(ids, grade.RepoID)
+		samplingChanges[grade.RepoID] = grade.NextFetchAt != nil
+	}
+	var rows []storage.Repository
+	if err := r.db.Select("repo_id", "state", "grade", "below_grade_since", "starred_by_user", "blocked", "disabled", "name_is_current",
+		"first_not_found_at", "last_success_at", "next_fetch_at", "updated_at").
+		Where("state = ? OR repo_id IN ?", consts.StatusActive, ids).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	current := make(map[int64]storage.Repository, len(rows))
+	for _, row := range rows {
+		before, exists := expected[row.RepoID]
+		if !exists || before.State != row.State || before.Grade != row.Grade || before.Followed != row.StarredByUser ||
+			before.Blocked != row.Blocked || before.Disabled != row.Disabled || before.NameIsCurrent != row.NameIsCurrent ||
+			!sameTime(before.FirstNotFoundAt, row.FirstNotFoundAt) || !sameTime(before.BelowGradeSince, row.BelowGradeSince) ||
+			samplingChanges[row.RepoID] && !sameTime(before.LastSuccessAt, row.LastSuccessAt) {
+			return nil, ErrMonitoringChanged
+		}
+		current[row.RepoID] = row
+	}
+	for _, before := range repos {
+		if before.State == consts.StatusActive && current[before.ID].RepoID == 0 {
+			return nil, ErrMonitoringChanged
+		}
+	}
+	for _, id := range ids {
+		if current[id].RepoID == 0 {
+			return nil, ErrMonitoringChanged
+		}
+	}
+	return current, nil
+}
+
+func sameTime(a, b *int64) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
+// publish 写入已算好的指标，事务内只做必要的状态更新和水位提交。
+func (r transaction) publish(slot string, asOf int64, rows []storage.LatestMetric, calculations []domain.Calculation, grades []domain.GradeChange, current map[int64]storage.Repository) error {
 	if len(rows) > 0 {
 		if err := r.db.Clauses(clause.OnConflict{UpdateAll: true}).CreateInBatches(&rows, 100).Error; err != nil {
 			return err
@@ -195,8 +320,10 @@ func (r transaction) Publish(slot string, asOf int64, calculations []domain.Calc
 	}
 	c := storage.RepositoryColumns
 	for _, grade := range grades {
-		updates := map[string]any{c.Grade: grade.Grade, c.BelowGradeSince: grade.BelowGradeSince, c.UpdatedAt: asOf}
-		if grade.NextFetchAt != nil {
+		repo := current[grade.RepoID]
+		updates := map[string]any{c.Grade: grade.Grade, c.BelowGradeSince: grade.BelowGradeSince, c.UpdatedAt: max(asOf, repo.UpdatedAt)}
+		updateNext := grade.NextFetchAt != nil
+		if updateNext {
 			updates[c.NextFetchAt] = *grade.NextFetchAt
 		}
 		if grade.Breakout != nil {
@@ -208,11 +335,21 @@ func (r transaction) Publish(slot string, asOf int64, calculations []domain.Calc
 			updates[c.BreakoutGradeJSON] = string(encoded)
 		}
 		if grade.State != "" {
-			var repo storage.Repository
-			if err := r.db.Take(&repo, c.RepoID+" = ?", grade.RepoID).Error; err != nil {
+			if err := storage.RecordObservation(r.db, repo, grade.State, grade.Grade, grade.Reason, asOf, grade.Evidence); err != nil {
 				return err
 			}
-			if err := storage.RecordObservation(r.db, repo, grade.State, grade.Grade, grade.Reason, asOf, grade.Evidence); err != nil {
+			decision := admission.Decision{State: "monitoring", Reason: grade.Reason}
+			if grade.State == consts.StatusPaused {
+				decision.State = "deferred"
+			}
+			evidence := admission.Evidence{Exact24h: grade.Evidence.Exact24h}
+			if grade.Evidence.WindowStartAt != nil && grade.Evidence.WindowEndAt != nil {
+				evidence.StartAt, evidence.EndAt = *grade.Evidence.WindowStartAt, *grade.Evidence.WindowEndAt
+			}
+			if grade.Evidence.Breakout != nil {
+				evidence.BurstAt, evidence.Source = grade.Evidence.Breakout.At, grade.Evidence.Breakout.Source
+			}
+			if err := storage.SaveAdmission(r.db, repo.RepoID, "monitor", decision, evidence, time.UnixMilli(asOf)); err != nil {
 				return err
 			}
 			updates[c.State], updates["observation_probe_due_at"] = grade.State, 0
@@ -220,7 +357,7 @@ func (r transaction) Publish(slot string, asOf int64, calculations []domain.Calc
 				updates["observation_probe_due_at"] = max(asOf, *repo.FirstNotFoundAt+domain.Hour)
 			}
 			if err := storage.UpdateObservationJobs(r.db, grade.RepoID, asOf,
-				grade.State != consts.StatusActive || grade.NextFetchAt != nil && *grade.NextFetchAt > asOf,
+				grade.State != consts.StatusActive || updateNext && *grade.NextFetchAt > asOf,
 				storage.SamplingPriority(grade.Grade)); err != nil {
 				return err
 			}
@@ -231,6 +368,9 @@ func (r transaction) Publish(slot string, asOf int64, calculations []domain.Calc
 	}
 	inactive := r.db.Model(&storage.Repository{}).Select(c.RepoID).Where(c.State+" <> ?", consts.StatusActive)
 	if err := r.db.Where(storage.LatestMetricColumns.RepoID+" IN (?)", inactive).Delete(&storage.LatestMetric{}).Error; err != nil {
+		return err
+	}
+	if err := storage.RecordMonitoringTotal(r.db, time.UnixMilli(asOf)); err != nil {
 		return err
 	}
 	marker := storage.MaintenanceState{Key: metrics.ComputeKey, Value: slot, UpdatedAt: asOf}

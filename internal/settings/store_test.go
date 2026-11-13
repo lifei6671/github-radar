@@ -61,7 +61,8 @@ json_set(value_json,'$.settings.ai.model','existing-model'), '$.settings.ai.summ
 	}
 	snapshot, err := store.Initialize(t.Context(), cfg)
 	if err != nil || snapshot.Revision != original.Revision || snapshot.Settings.AI.Model != "existing-model" ||
-		snapshot.Settings.AI.Summary.AutoDailyCalls != 50 || snapshot.Settings.Recommendations.Timezone != "Asia/Shanghai" ||
+		snapshot.Settings.AI.Summary.AutoDailyCalls != 4500 || snapshot.Settings.AI.Summary.ManualDailyCalls != 500 ||
+		snapshot.Settings.Recommendations.Timezone != "Asia/Shanghai" ||
 		snapshot.Settings.ReportPublication != config.DefaultReportPublication() {
 		t.Fatalf("升级没有保留 AI 配置或补齐新值: %+v %v", snapshot, err)
 	}

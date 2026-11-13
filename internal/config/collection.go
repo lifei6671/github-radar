@@ -27,6 +27,8 @@ const DefaultCoolingCapacity = 1000
 
 // Scheduler 定义扫描、租约、四档容量与采样周期。
 type Scheduler struct {
+	// LegacyMonitoring 回退常规准入和分龄滞回，保留原观察池配置。
+	LegacyMonitoring bool `yaml:"-" json:"legacyMonitoring,omitempty"`
 	// ObservationPool 启用试运行规则。升级后的已有设置默认保留原有分档。
 	ObservationPool        bool           `yaml:"observation_pool" json:"observationPool"`
 	TickMinutes            int            `yaml:"tick_minutes" json:"tickMinutes"`
@@ -100,7 +102,10 @@ func collectionDefaults() (GitHub, Scheduler, Discovery) {
 
 var sourceSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9+_-]*$`)
 
-// ValidSourceSlug 校验分类、语言和 Search 规则的稳定键。
+// GitHub Trending 的语言路径包含 C# 等写法，独立于分类和 Search 规则键。
+var trendingLanguageSlug = regexp.MustCompile(`^[a-z0-9][a-z0-9+#_-]*$`)
+
+// ValidSourceSlug 校验分类和 Search 规则的稳定键。
 func ValidSourceSlug(value string) bool { return sourceSlug.MatchString(value) }
 
 // TrendingSource 从规则稳定键解析来源和周期，队列与管理接口共用。
@@ -117,7 +122,7 @@ func TrendingSource(key string) (source, language, period string, err error) {
 		return source, "", period, nil
 	}
 	language, ok := strings.CutPrefix(source, "language:")
-	if !ok || !ValidSourceSlug(language) {
+	if !ok || !trendingLanguageSlug.MatchString(language) {
 		return "", "", "", fmt.Errorf("Trending 来源必须为 all 或 language:<语言>")
 	}
 	return source, language, period, nil
@@ -186,7 +191,7 @@ func (cfg Config) ValidateDiscoverySeed() error {
 	}
 	languages := make(map[string]bool)
 	for _, language := range cfg.Discovery.TrendingLanguages {
-		if !sourceSlug.MatchString(language) || languages[language] {
+		if !trendingLanguageSlug.MatchString(language) || languages[language] {
 			return fmt.Errorf("discovery.trending_languages 含无效或重复来源")
 		}
 		languages[language] = true

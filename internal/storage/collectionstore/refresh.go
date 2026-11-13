@@ -48,7 +48,7 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 		}
 		if state.FirstNotFoundAt == nil {
 			values[storage.RepositoryColumns.FirstNotFoundAt] = at
-			if w.queue.Cfg.ObservationPool && failureStatus == 404 && current.State != consts.StatusActive && state.CanMonitor() {
+			if w.queue.probesEnabled() && failureStatus == 404 && current.State != consts.StatusActive && state.CanMonitor() {
 				values["observation_probe_due_at"] = at + metrics.Hour
 			}
 		}
@@ -112,8 +112,14 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 		}
 	}
 	sample := storage.RepoSnapshot{RepoID: current.RepoID, SampleSlot: collection.Slot(p.PlannedAt), ObservedAt: at, Stars: stars, Forks: forks}
-	if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&sample).Error; err != nil {
-		return err
+	saved := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&sample)
+	if saved.Error != nil {
+		return saved.Error
+	}
+	if p.ObservationProbe && saved.RowsAffected == 1 {
+		if err := storage.RecordProbeSample(tx, observed); err != nil {
+			return err
+		}
 	}
 	if !updateCurrent {
 		return nil
@@ -135,14 +141,14 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 	if p.ObservationProbe {
 		var next int64
 		// 以实际首采时刻约定复采，排队或限流延迟不会改变 24 小时的比较起点。
-		if w.queue.Cfg.ObservationPool && !p.ObservationFollowup &&
+		if w.queue.probesEnabled() && !p.ObservationFollowup &&
 			(current.State != consts.StatusActive || current.Grade == consts.GradeC) {
 			next = at + metrics.Day
 		}
 		if err := finishObservationProbe(tx, current.RepoID, p, next); err != nil {
 			return err
 		}
-	} else if w.queue.Cfg.ObservationPool && state.FirstNotFoundAt != nil {
+	} else if w.queue.probesEnabled() && state.FirstNotFoundAt != nil {
 		// 人工采样先恢复身份时，清理原探测的复核计划。
 		if err := tx.Model(&current).Update("observation_probe_due_at", 0).Error; err != nil {
 			return err
@@ -150,6 +156,11 @@ func (w writer) SaveRefresh(change port.Refresh) error {
 	}
 	if err := tx.Take(&current, storage.RepositoryColumns.RepoID+" = ?", current.RepoID).Error; err != nil {
 		return err
+	}
+	if p.ObservationFollowup && !w.queue.Cfg.LegacyMonitoring {
+		if err := w.queue.recordProbeGrowth(tx, &current, observed); err != nil {
+			return err
+		}
 	}
 	return w.queue.admit(tx, &current, at)
 }

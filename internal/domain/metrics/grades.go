@@ -6,23 +6,32 @@ import (
 	"time"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 )
 
 var gradeNames = []string{consts.GradeS, consts.GradeA, consts.GradeB, consts.GradeC}
 
 type Repository struct {
-	ID              int64
-	Grade           string
-	State           string
-	Stars           int
-	Language        string
-	Followed        bool
-	LastSuccessAt   *int64
-	LastSignalAt    int64
-	PausedAt        int64
-	BelowGradeSince *int64
-	FirstNotFoundAt *int64
-	NextFetchAt     int64
+	ID                   int64
+	Grade                string
+	State                string
+	Stars                int
+	Language             string
+	Followed             bool
+	LastSuccessAt        *int64
+	LastSignalAt         int64
+	PausedAt             int64
+	PausedReason         string
+	BelowGradeSince      *int64
+	FirstNotFoundAt      *int64
+	Blocked, Disabled    bool
+	NameIsCurrent        bool
+	NextFetchAt          int64
+	CreatedAt, PushedAt  *int64
+	TrustedTrendingAt    int64
+	OfficialBurstAt      int64
+	PreserveAvailability bool
+	LastDowngradeAt      int64
 }
 
 type GradeChange struct {
@@ -36,7 +45,7 @@ type GradeChange struct {
 	Evidence        ObservationEvidence
 }
 
-func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calculation, asOf int64) []GradeChange {
+func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calculation, asOf int64, ageAdmission bool) []GradeChange {
 	exact := func(i int) bool { return rows[i].Windows[consts.Window24h].Quality == Exact }
 	var changes []GradeChange
 	order := make([]int, len(repos))
@@ -88,6 +97,14 @@ func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calc
 				}
 			}
 		}
+		if ageAdmission && current >= 0 && desired > current {
+			in := admission.Input{CreatedAt: repo.CreatedAt, PushedAt: repo.PushedAt, Stars: repo.Stars}
+			if _, ok := admission.RegularMonitoring(in, time.UnixMilli(asOf)); !ok {
+				if _, grace := admission.CrossAgeGrace(in, time.UnixMilli(asOf)); grace {
+					desired, since = current, nil
+				}
+			}
+		}
 		list = append(list, allocation{i, desired, since})
 	}
 	// 容量不足时先保留高热度仓库，同分比较精确增长和稳定 ID。
@@ -117,6 +134,10 @@ func AllocateGrades(cfg Policy, capacity [3]int, repos []Repository, rows []Calc
 			continue
 		}
 		change := GradeChange{RepoID: repo.ID, Grade: grade, BelowGradeSince: item.since}
+		if ageAdmission && level > slices.Index(gradeNames, repo.Grade) && grade != repo.Grade {
+			// 兼容分档也记录降级时间，以便冷却期和待发采样计划使用同一轨迹。
+			change.State, change.Reason = consts.StatusActive, "legacy_grade_demotion"
+		}
 		if grade == consts.GradeS && repo.Grade != consts.GradeS {
 			change.Breakout = rows[item.index].Breakout
 		}

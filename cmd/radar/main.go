@@ -49,8 +49,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if command == consts.CommandHashPassword || command == consts.CommandGenerateSessionSecret {
 		return runCredentialCommand(command, args, os.Stdin, os.Stdout, os.Stderr)
 	}
+	if command == consts.CommandAdmissionAudit {
+		return runAdmissionAudit(ctx, args, os.Stdout)
+	}
 	if command != consts.CommandServer && command != consts.CommandMigrate && command != consts.CommandCollectOnce && command != consts.CommandMaintenanceOnce && command != consts.CommandBackup {
-		return fmt.Errorf("未知命令 %q，请使用 server、migrate、collect-once、maintenance-once、backup、hash-password 或 generate-session-secret", command)
+		return fmt.Errorf("未知命令 %q，请使用 server、migrate、admission-audit、collect-once、maintenance-once、backup、hash-password 或 generate-session-secret", command)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	configPath := flags.String("config", "", "YAML 配置文件路径，server 和 backup 命令必填")

@@ -3,12 +3,14 @@ package collectionstore
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 	"github.com/lifei6671/github-radar/internal/domain/collection"
 	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -46,29 +48,70 @@ func (q Queue) scheduleObservationProbes(tx *gorm.DB, now time.Time) error {
 	var rows []struct {
 		RepoID, Signal, Due int64
 		Recheck             bool
+		Trusted             bool
+		Stars               int
+		Created             *int64
 	}
 	// 官方信号和传播链接可为暂停或冷却仓库触发复核，普通 Search 重复命中不会重开探测。
-	signals := tx.Model(&storage.Repository{}).Select(`repositories.repo_id, repositories.observation_probe_due_at AS due,
+	trending := storage.StrongTrending(tx, now).Select("MAX(b.observed_at)").Where("o.repo_id = repositories.repo_id")
+	if !q.Cfg.LegacyMonitoring {
+		// 连续上榜属于同一轮传播。探测过的仓库需重新入榜或获得新官方/人工证据。
+		trending = trending.Where("repositories.observation_probe_signal_at = 0 OR NOT EXISTS (?)",
+			tx.Table(storage.TrendingObservationTable+" prior").Select("1").
+				Where("prior.repo_id = o.repo_id AND prior.source_key = o.source_key AND prior.window = o.window AND prior.rank BETWEEN 1 AND 10").
+				Where("prior.observed_slot < o.observed_slot AND prior.observed_slot >= o.observed_slot - ?", 2*metrics.Day))
+	}
+	signals := tx.Model(&storage.Repository{}).Select(`repositories.repo_id, repositories.stars, repositories.github_created_at AS created, repositories.observation_probe_due_at AS due,
 		CASE WHEN repositories.state = 'candidate' AND repositories.stars >= ? AND repositories.discovered_at > COALESCE(signal.breakout_at, 0)
 		THEN repositories.discovered_at ELSE COALESCE(signal.breakout_at, 0) END AS initial_signal,
 		(SELECT MAX(first_observed_at) FROM repo_discovery_events e WHERE e.repo_id = repositories.repo_id AND e.source_url <> '' AND first_observed_at <= ?) AS source_signal,
-		(SELECT MAX(observed_slot) FROM trending_observations o WHERE o.repo_id = repositories.repo_id AND observed_slot <= ?) AS trending_signal,
-		repositories.observation_probe_signal_at AS previous_signal, repositories.first_not_found_at IS NOT NULL AS recheck`, metrics.ObservationMinStars, at, at).
+		(?) AS trending_signal, COALESCE(signal.breakout_at, 0) AS official_signal,
+		repositories.observation_probe_signal_at AS previous_signal, repositories.first_not_found_at IS NOT NULL AS recheck`, metrics.ObservationMinStars, at, trending).
 		Joins("LEFT JOIN repo_star_history_status signal ON signal.repo_id = repositories.repo_id AND signal.breakout_at BETWEEN ? AND ? AND (signal.confirmed_at IS NULL OR signal.confirmed_at <> signal.breakout_at)",
 			at-metrics.StarHistorySignalAge, at).
 		Where(observationEligible()).
 		Where("NOT EXISTS (?)", open.Where("jobs.repo_id = repositories.repo_id"))
-	candidates := tx.Table("(?) AS signals", signals).Select(`repo_id, due, recheck,
+	candidates := tx.Table("(?) AS signals", signals).Select(`repo_id, due, recheck, stars, created,
+		(COALESCE(source_signal,0) > previous_signal OR COALESCE(trending_signal,0) > previous_signal OR official_signal > previous_signal) AS trusted,
 		CASE WHEN COALESCE(source_signal, 0) >= initial_signal AND COALESCE(source_signal, 0) >= COALESCE(trending_signal, 0) THEN COALESCE(source_signal, 0)
 		WHEN COALESCE(trending_signal, 0) > initial_signal THEN trending_signal ELSE initial_signal END AS signal, previous_signal`)
-	err := tx.Table("(?) AS probes", candidates).Select("repo_id, signal, due, recheck").
+	err := tx.Table("(?) AS probes", candidates).Select("repo_id, signal, due, recheck, trusted, stars, created").
 		Where("(due > 0 AND due <= ?) OR (due = 0 AND signal > previous_signal AND (previous_signal = 0 OR signal >= previous_signal + ?) AND signal >= ?)",
 			at, 2*metrics.Day, at-7*metrics.Day).
-		Order("CASE WHEN due > 0 THEN 0 ELSE 1 END, due, signal DESC, repo_id").Limit(limit).Scan(&rows).Error
+		Order("CASE WHEN due > 0 THEN 0 ELSE 1 END, due, trusted DESC, signal DESC, repo_id").Limit(160).Scan(&rows).Error
 	if err != nil {
 		return err
 	}
+	// 先保护复采，其次强证据，再选靠近分龄门槛和稳定抽样的低 Star 候选。
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		priority := func(due int64, trusted bool, stars int, created *int64) int {
+			if due > 0 {
+				return 3
+			}
+			if trusted {
+				return 2
+			}
+			age, ok := admission.AgeDays(created, now)
+			if ok && ((age <= 7 && stars >= 100) || (age > 7 && age <= 14 && stars >= 250) ||
+				(age > 14 && age <= 30 && stars >= 500)) {
+				return 1
+			}
+			return 0
+		}
+		x, y := priority(a.Due, a.Trusted, a.Stars, a.Created), priority(b.Due, b.Trusted, b.Stars, b.Created)
+		if x != y {
+			return x > y
+		}
+		if x == 0 {
+			return admission.DailySample(a.RepoID, now) < admission.DailySample(b.RepoID, now)
+		}
+		return false
+	})
 	for _, row := range rows {
+		if limit == 0 {
+			break
+		}
 		// 复采已经错过精确窗时清除约定，等待下一条证据。
 		if !row.Recheck && row.Due > 0 && at-row.Due > q.probeTolerance().Milliseconds() {
 			if err := tx.Model(&storage.Repository{}).Where("repo_id = ?", row.RepoID).Update("observation_probe_due_at", 0).Error; err != nil {
@@ -86,6 +129,21 @@ func (q Queue) scheduleObservationProbes(tx *gorm.DB, now time.Time) error {
 		if _, err := q.enqueue(tx, consts.JobRefreshRepo, &row.RepoID, key, p, priority, at); err != nil {
 			return err
 		}
+		if !q.Cfg.LegacyMonitoring {
+			reason := "initial_probe"
+			if p.ObservationFollowup {
+				reason = "scheduled_24h_probe"
+			} else if p.ObservationRecheck {
+				reason = "visibility_recheck"
+			} else if row.Trusted {
+				reason = "trusted_source_probe"
+			}
+			if err := storage.SaveAdmission(tx, row.RepoID, "probe_schedule",
+				admission.Decision{State: "probing", Reason: reason}, admission.Evidence{}, now); err != nil {
+				return err
+			}
+		}
+		limit--
 	}
 	return nil
 }

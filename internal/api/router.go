@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/backup"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
@@ -47,7 +48,7 @@ func NewRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config
 		manager = backups[0]
 	}
 	static := &RuntimeServices{Config: cfg, Readmes: readmes,
-		QueryVectors: embedding.NewQueryVectors(cfg.Embedding, strings.TrimSpace(os.Getenv(cfg.Embedding.APIKeyEnv)))}
+		QueryVectors: embedding.NewQueryVectors(cfg.Embedding, strings.TrimSpace(os.Getenv(cfg.Embedding.APIKeyEnv)), aibudget.ForConfig(db, cfg.AI.Summary))}
 	return newRouter(db, pool, logger, cfg, manager, func() *RuntimeServices { return static }, nil)
 }
 

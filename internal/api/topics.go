@@ -149,12 +149,12 @@ func (a *collectionAPI) topics(c *gin.Context) {
 	}
 	var rows []struct {
 		storage.TopicCandidate
-		FullName      string
-		NameIsCurrent bool `gorm:"column:name_is_current"`
-		SummaryZh     *string
-		ValueTagsJSON *string
+		FullName          string
+		NameIsCurrent     bool `gorm:"column:name_is_current"`
+		SummaryZh         *string
+		ValueTagSlugsJSON *string
 	}
-	if err := db.Select("t.*,r." + storage.RepositoryColumns.FullName + ",r." + storage.RepositoryColumns.NameIsCurrent + ",s." + storage.AISummaryColumns.SummaryZh + ",s." + storage.AISummaryColumns.ValueTagsJSON).
+	if err := db.Select("t.*,r." + storage.RepositoryColumns.FullName + ",r." + storage.RepositoryColumns.NameIsCurrent + ",s." + storage.AISummaryColumns.SummaryZh + ",s." + storage.AISummaryColumns.ValueTagSlugsJSON).
 		Joins("JOIN " + storage.RepositoryTable + " r ON r." + storage.RepositoryColumns.RepoID + "=t." + storage.TopicCandidateColumns.RepoID + " LEFT JOIN " + storage.AISummaryTable + " s ON s." + storage.AISummaryColumns.RepoID + "=t." + storage.TopicCandidateColumns.RepoID).
 		Order(orderColumn + " DESC,t." + storage.TopicCandidateColumns.ID + " DESC").Limit(limit + 1).Scan(&rows).Error; err != nil {
 		a.fail(c, err)
@@ -176,14 +176,23 @@ func (a *collectionAPI) topics(c *gin.Context) {
 		value := base64.RawURLEncoding.EncodeToString(data)
 		next = &value
 	}
+	var vocabulary storage.TechnicalTags
+	if len(rows) > 0 {
+		var err error
+		vocabulary, err = storage.ReadTechnicalTags(a.db.WithContext(c.Request.Context()))
+		if err != nil {
+			a.fail(c, err)
+			return
+		}
+	}
 	items := make([]gin.H, 0, len(rows))
 	for _, row := range rows {
 		view := topicView(row.TopicCandidate)
 		view["fullName"], view["summaryZh"] = row.FullName, row.SummaryZh
 		view["nameIsCurrent"] = row.NameIsCurrent
 		tags := []string{}
-		if row.ValueTagsJSON != nil {
-			_ = json.Unmarshal([]byte(*row.ValueTagsJSON), &tags)
+		if row.ValueTagSlugsJSON != nil {
+			tags = vocabulary.Labels(*row.ValueTagSlugsJSON)
 		}
 		view["valueTags"] = tags
 		items = append(items, view)

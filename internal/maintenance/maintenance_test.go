@@ -1,7 +1,9 @@
 package maintenance
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"path/filepath"
 	"testing"
@@ -17,6 +19,74 @@ import (
 	"github.com/lifei6671/github-radar/internal/storage/metricstore"
 	"github.com/lifei6671/github-radar/migrations"
 )
+
+// 保持指标读快照时模拟管理员屏蔽。写入应当立刻完成，旧计算不能复活该仓库。
+func TestMetricsComputeAllowsWriterAndRejectsChangedMonitoringState(t *testing.T) {
+	db, cfg, now := fixture(t)
+	if err := db.Callback().Query().After("gorm:query").Register("test:competing_metrics_write", func(tx *gorm.DB) {
+		if tx.Statement.Table != storage.RepositoryTable || tx.Error != nil {
+			return
+		}
+		_ = db.Callback().Query().Remove("test:competing_metrics_write")
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		err := db.WithContext(ctx).Model(&storage.Repository{}).Where("repo_id = ?", 1).
+			Updates(map[string]any{"blocked": true, "state": "paused"}).Error
+		if err != nil {
+			t.Errorf("指标计算持有读快照时无法写入: %v", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := metrics.Compute(t.Context(), metricstore.Store{DB: db}, cfg, now, true); !errors.Is(err, metricstore.ErrMonitoringChanged) {
+		t.Fatalf("旧指标快照未因并发监控变更被拒绝: %v", err)
+	}
+	var repo storage.Repository
+	if err := db.Take(&repo, "repo_id = ?", 1).Error; err != nil || !repo.Blocked || repo.State != "paused" {
+		t.Fatalf("屏蔽状态没有保留: %+v %v", repo, err)
+	}
+	var markers int64
+	if err := db.Model(&storage.MaintenanceState{}).Where("key = ?", metrics.ComputeKey).Count(&markers).Error; err != nil || markers != 0 {
+		t.Fatalf("已拒绝的指标快照不应推进水位: %d %v", markers, err)
+	}
+}
+
+// 晋级若与旧档位采样交错，必须基于新快照重新安排采样。
+func TestMetricsPromotionRejectsConcurrentSamplingPlan(t *testing.T) {
+	db, cfg, now := fixture(t)
+	cfg.Scheduler = cfg.Scheduler.ObservationTrial()
+	cfg.Scheduler.LegacyMonitoring = true
+	if err := db.Model(&storage.Repository{}).Where("repo_id = ?", 1).Update("grade", "C").Error; err != nil {
+		t.Fatal(err)
+	}
+	sample(t, db, 1, now.Add(-24*time.Hour), 100)
+	sample(t, db, 1, now, 650)
+	next := now.Add(72 * time.Hour).UnixMilli()
+	if err := db.Callback().Query().After("gorm:query").Register("test:sample_during_metrics", func(tx *gorm.DB) {
+		if tx.Statement.Table != storage.RepositoryTable || tx.Error != nil {
+			return
+		}
+		_ = db.Callback().Query().Remove("test:sample_during_metrics")
+		err := db.Model(&storage.Repository{}).Where("repo_id = ?", 1).
+			Updates(map[string]any{"last_success_at": now.Add(time.Second).UnixMilli(), "next_fetch_at": next}).Error
+		if err != nil {
+			t.Errorf("并发采样未落盘: %v", err)
+		}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store := metricstore.Store{DB: db}
+	if err := metrics.Compute(t.Context(), store, cfg, now, true); !errors.Is(err, metricstore.ErrMonitoringChanged) {
+		t.Fatalf("旧采样计划未被拒绝: %v", err)
+	}
+	if err := metrics.Compute(t.Context(), store, cfg, now.Add(2*time.Second), true); err != nil {
+		t.Fatal(err)
+	}
+	var repo storage.Repository
+	if err := db.Take(&repo, "repo_id = ?", 1).Error; err != nil || repo.Grade != "S" || repo.NextFetchAt >= next {
+		t.Fatalf("重新计算后未按晋级计划采样: %+v %v", repo, err)
+	}
+}
 
 // 精确净增和过去七个独立窗共同触发晋级，官方计数不能代替任何本地端点。
 func TestBreakoutPromotionPersistsLocalEvidence(t *testing.T) {

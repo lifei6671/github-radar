@@ -27,8 +27,8 @@ export function GrowthValue({ value, label, showMissing = false }: { value: Grow
 }
 
 type SparkSample = { index: number; stars: number }
-const minimumSparkSamples = 3
 
+// 保留孤立的真实样本，缺测区间只在两个真实样本之间补齐。
 function sparklineRuns(points: SparkPoint[]) {
   const runs: SparkSample[][] = []
   let run: SparkSample[] = []
@@ -36,22 +36,22 @@ function sparklineRuns(points: SparkPoint[]) {
     if (stars !== null) {
       run.push({ index, stars })
     } else if (run.length) {
-      if (run.length >= minimumSparkSamples) runs.push(run)
+      runs.push(run)
       run = []
     }
   }
-  if (run.length >= minimumSparkSamples) runs.push(run)
+  if (run.length) runs.push(run)
   return runs
 }
 
-// 小图只绘制能辨认走势的连续观测，缺测小时维持原来的间隔。
+// 实线连接连续观测，虚线对中间缺测做线性插值；不外推首尾，也不改原始数据。
 export function Sparkline({ points, expanded = false }: { points: SparkPoint[]; expanded?: boolean }) {
   const gradientId = 'spark' + useId().replace(/[^\w-]/g, '')
   const runs = sparklineRuns(points)
-  if (!runs.length) return null
+  const values = runs.flatMap((run) => run.map(({ stars }) => stars))
+  if (values.length < 2) return null
   const width = expanded ? 320 : 104
   const height = expanded ? 100 : 32
-  const values = runs.flatMap((run) => run.map(({ stars }) => stars))
   const min = Math.min(...values)
   const max = Math.max(...values)
   const coords = runs.map((run) => run.map(({ index, stars }) => ({
@@ -64,20 +64,34 @@ export function Sparkline({ points, expanded = false }: { points: SparkPoint[]; 
     const middle = (x + previous.x) / 2
     return `C${middle},${previous.y} ${middle},${y} ${x},${y}`
   }).join(' '))
-  const area = coords.map((run, i) => `${strokes[i]} L${run.at(-1)!.x},${height} L${run[0].x},${height} Z`).join(' ')
+  const area = coords.flatMap((run, i) => run.length > 1
+    ? [`${strokes[i]} L${run.at(-1)!.x},${height} L${run[0].x},${height} Z`] : []).join(' ')
+  const observed = strokes.filter((_, i) => coords[i].length > 1).join(' ')
+  const estimated = coords.slice(1).map((run, i) => {
+    const from = coords[i].at(-1)!
+    const to = run[0]
+    return `M${from.x},${from.y} L${to.x},${to.y}`
+  }).join(' ')
   const latest = coords.at(-1)!.at(-1)!
-  const gaps = values.length < points.length
-  return <svg className="sparkline" viewBox={'0 0 ' + width + ' ' + height}
-    role="img" aria-label={'最近 24 个已完成小时的累计 Star 曲线' + (gaps ? '，部分时段采样不足' : '')}>
-    <title>{'近 24 小时累计 Star 观测 ' + number(values[0]) + ' → ' + number(values.at(-1)!)}</title>
+  const missingEdges = runs[0][0].index > 0 || runs.at(-1)!.at(-1)!.index < points.length - 1
+  const chart = <svg className="sparkline" viewBox={'0 0 ' + width + ' ' + height}
+    role="img" aria-label={'最近 24 个已完成小时的累计 Star 曲线' +
+      (estimated ? '，虚线为插值估算' : '') + (missingEdges ? '，部分时段采样不足' : '')}>
+    <title>{'近 24 小时累计 Star 观测 ' + number(values[0]) + ' → ' + number(values.at(-1)!) +
+      (estimated ? '（虚线为插值估算）' : '')}</title>
     <defs><linearGradient id={gradientId} x1="0" x2="0" y1="0" y2="1">
       <stop offset="0" stopColor="currentColor" stopOpacity=".22" />
       <stop offset="1" stopColor="currentColor" stopOpacity="0" />
     </linearGradient></defs>
-    <path d={area} fill={'url(#' + gradientId + ')'} />
-    <path className="sparkline-stroke" d={strokes.join(' ')} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+    {area && <path d={area} fill={'url(#' + gradientId + ')'} />}
+    {observed && <path className="sparkline-stroke" d={observed} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />}
+    {estimated && <path className="sparkline-estimated" d={estimated} fill="none" stroke="currentColor" strokeWidth={1.5} strokeDasharray="3 3" opacity={0.75} vectorEffect="non-scaling-stroke" />}
     <circle cx={latest.x} cy={latest.y} r={expanded ? 3 : 2} fill="currentColor" />
   </svg>
+  return expanded ? <div className="rank-lead-chart">
+    <span className="minor muted">近 24 小时累计 Star</span>
+    {chart}
+  </div> : chart
 }
 
 export function External({ href, children = 'GitHub', iconOnly = false }: { href: string | null | undefined; children?: string; iconOnly?: boolean }) {
@@ -119,6 +133,11 @@ export function RepoBlockButton({ repo }: { repo: Repo }) {
 export function RepoLink({ repo }: { repo: Repo }) {
   const location = useLocation()
   const admin = useAdminArea()
+  if (!admin && repo.detailAvailable === false) {
+    // 导读发布前，榜单项目名称直接跳到 GitHub。
+    const href = githubLink(repo.htmlUrl)
+    return href ? <a className="repo-name" href={href} target="_blank" rel="noopener noreferrer">{repo.fullName}</a> : <span>{repo.fullName}</span>
+  }
   return <Link className="repo-name" to={repoPath(repo.fullName, admin, repo.nameIsCurrent === false ? repo.id : undefined)}
     state={{ ...repoListReturn(location), repoId: admin ? repo.id : undefined }}>
     {repo.fullName}
@@ -178,7 +197,7 @@ export function RepoCard({ repo, names, favorite = false, showTags = false }: {
 }
 
 type RankMetric = 'growth24h' | 'growth7d' | 'hotness' | 'official'
-type RankItem = { repo: Repo; rank: number | null }
+type RankItem = { repo: Repo; rank: number | null; sourceName?: string }
 type PodiumItem = RankItem & { rank: number }
 type RankProps = { item: RankItem; metric: RankMetric }
 const rankLabel = { growth24h: '24h 净增', growth7d: '7d 净增', hotness: '热度指数', official: '累计 Star' }
@@ -225,10 +244,7 @@ function RankPodiumCard({ item: { repo, rank }, metric }: { item: PodiumItem; me
         <h2><RepoLink repo={repo} /></h2>
         {summary && <p className="repo-summary">{summary}</p>}
       </div>
-      {lead && sparklineRuns(repo.sparkline).length > 0 && <div className="rank-lead-chart">
-        <span className="minor muted">近 24 小时累计 Star</span>
-        <Sparkline points={repo.sparkline} expanded />
-      </div>}
+      {lead && <Sparkline points={repo.sparkline} expanded />}
     </div>
     <footer className="rank-entry-footer">
       <RankRepoMeta repo={repo} rank={rank} metric={metric} />
@@ -240,27 +256,37 @@ function RankPodiumCard({ item: { repo, rank }, metric }: { item: PodiumItem; me
   </article>
 }
 
-function RankListRow({ item: { repo, rank }, metric }: RankProps) {
+// 语言榜补充项目沿用行布局，名次只显示在带来源的标签中。
+export function TrendingLanguageEntries({ items }: { items: RankItem[] }) {
+  return <section className="rank-rest" aria-labelledby="trending-language-title">
+    <header className="rank-rest-head"><h2 id="trending-language-title">各语言榜补充项目</h2></header>
+    <ol className="panel rank-list">
+      {items.map((item) => <RankListRow key={item.repo.id} item={item} metric="official" />)}
+    </ol>
+  </section>
+}
+
+function RankListRow({ item: { repo, rank, sourceName }, metric }: RankProps) {
   const summary = repo.summaryPreview || repo.titleZh || repo.description
   return <li className="rank-list-row">
-    <span className="rank-position rank-number numeric" aria-label={rank === null ? '暂无排名' : '第 ' + rank + ' 名'}>
+    {!sourceName && <span className="rank-position rank-number numeric" aria-label={rank === null ? '暂无排名' : '第 ' + rank + ' 名'}>
       {rank === null ? '—' : rankNumber(rank)}
-    </span>
+    </span>}
     <div className="rank-entry-copy">
       <h3><RepoLink repo={repo} /></h3>
       {summary && <p className="repo-summary">{summary}</p>}
     </div>
-    <RankRepoMeta repo={repo} rank={rank} metric={metric} />
+    <RankRepoMeta repo={repo} rank={rank} metric={metric} sourceName={sourceName} />
     <div className="rank-row-trend"><Sparkline points={repo.sparkline} /></div>
     <RankValue repo={repo} metric={metric} />
   </li>
 }
 
-function RankRepoMeta({ repo, metric, rank }: { repo: Repo; metric: RankMetric; rank: number | null }) {
+function RankRepoMeta({ repo, metric, rank, sourceName }: { repo: Repo; metric: RankMetric; rank: number | null; sourceName?: string }) {
   return <div className="rank-repo-meta">
     {repo.language && <span className="language"><span aria-hidden /><span className="rank-language-name" title={repo.language}>{repo.language}</span></span>}
     {metric === 'official' && rank !== null
-      ? <Badge tone="hot">GitHub Trending #{rank}</Badge>
+      ? <Badge tone="hot">{sourceName ?? 'GitHub Trending'} #{rank}</Badge>
       : <span className="metric minor muted"><Star size={13} aria-hidden /><span className="numeric">{number(repo.stars)}</span></span>}
     <External href={repo.htmlUrl} iconOnly />
   </div>

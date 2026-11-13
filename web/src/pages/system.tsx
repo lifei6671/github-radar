@@ -8,7 +8,7 @@ import { AdminMetrics, AdminPanel } from '../components/admin'
 import { SystemHeader, systemPage } from '../components/system-navigation'
 import { ActionButton, Badge, Dialog, Notice, PageError, Skeleton } from '../components/ui'
 import { formatBytes, jobLabel, number, repoPath, timestamp } from '../lib/format'
-import { CategoryEditor, DiscoveryTabEditor, ProjectThemeEditor, RulesEditor, RuntimeEditor } from './settings'
+import { CategoryEditor, DiscoveryTabEditor, ProjectThemeEditor, RulesEditor, RuntimeEditor, TechnicalTagEditor } from './settings'
 import { BackupPage } from './backup'
 
 export function System() {
@@ -20,6 +20,7 @@ export function System() {
     {tab === 'jobs' && <Jobs />}
     {tab === 'runtime' && <RuntimeEditor />}
     {tab === 'categories' && <CategoryEditor />}
+    {tab === 'technical-tags' && <TechnicalTagEditor />}
     {tab === 'discovery-tabs' && <DiscoveryTabEditor />}
     {tab === 'project-themes' && <ProjectThemeEditor />}
     {tab === 'rules' && <RulesEditor />}

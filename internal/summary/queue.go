@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -13,8 +14,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/lifei6671/github-radar/internal/aibudget"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/admission"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -34,6 +37,7 @@ type Queue struct {
 	AI           config.AI
 	LeaseSeconds int
 	Pacing       storage.JobPacing
+	Logger       *slog.Logger
 }
 
 type payload struct {
@@ -41,6 +45,10 @@ type payload struct {
 	Force           bool   `json:"force,omitempty"`
 	TopicsOnly      bool   `json:"topicsOnly,omitempty"`
 	ReadmeVerifySHA string `json:"readmeVerifySHA,omitempty"`
+	// ReadmeBatchItems 保存结构失败后缩小的批次，后续成功时恢复默认。
+	ReadmeBatchItems int `json:"readmeBatchItems,omitempty"`
+	// ReadmeNumbered 区分旧位置数组导致的死任务与已用新格式尝试的任务。
+	ReadmeNumbered bool `json:"readmeNumbered,omitempty"`
 }
 
 func jobTopicsOnly(job storage.Job) bool {
@@ -87,7 +95,8 @@ func (q Queue) matches(summary storage.AISummary, fingerprint string) bool {
 }
 
 func (q Queue) matchesTopicModel(topics storage.RepoAITopics) bool {
-	return topics.RepoID != 0 &&
+	// 词表版本标记本轮已判定，独立于仍在展示的历史分类是否通过用途审核。
+	return topics.RepoID != 0 && topics.TagVocabVersion == storage.TagVocabularyVersion &&
 		topics.ModelProvider == ProviderKey(q.AI) && topics.ModelName == q.AI.Model && topics.PromptVersion == q.AI.Summary.PromptVersion
 }
 
@@ -117,9 +126,22 @@ func (q Queue) manual(ctx context.Context, jobType string, id int64, requestID s
 		if err := tx.Find(&d.Job, storage.JobColumns.Type+"=? AND "+storage.JobColumns.RepoID+"=? AND "+storage.JobColumns.Status+" IN "+unresolved, jobType, id).Error; err != nil {
 			return err
 		}
+		var supersede storage.Job
 		if d.Job.ID != 0 {
-			d.Conflict = true
-			return nil
+			canReplace := !d.Job.IsManual() && (d.Job.Status == consts.StatusPending || d.Job.Status == consts.StatusFailed)
+			if canReplace {
+				var inFlight int64
+				if err := tx.Model(&storage.AICall{}).Where("job_id = ? AND status IN ?", d.Job.ID,
+					[]string{consts.StatusSending, consts.StatusUnknown}).Count(&inFlight).Error; err != nil {
+					return err
+				}
+				canReplace = inFlight == 0
+			}
+			if !canReplace {
+				d.Conflict = true
+				return nil
+			}
+			supersede, d.Job = d.Job, storage.Job{}
 		}
 		if jobType == JobType && !force {
 			var check storage.SummaryCheck
@@ -146,7 +168,7 @@ func (q Queue) manual(ctx context.Context, jobType string, id int64, requestID s
 				if err != nil {
 					return err
 				}
-				d.Cached = !available || !catalog.NeedsAI(repo.GitHubTopics())
+				d.Cached = !available
 				if !d.Cached {
 					var topics storage.RepoAITopics
 					if err := tx.Find(&topics, storage.RepoAITopicsColumns.RepoID+"=?", id).Error; err != nil {
@@ -167,11 +189,22 @@ func (q Queue) manual(ctx context.Context, jobType string, id int64, requestID s
 				}
 			}
 		}
-		if repo.Disabled || !repo.NameIsCurrent || repo.State == consts.StatusUnavailable {
+		if !repo.IsPublic() {
 			return ErrRepoUnavailable
 		}
 		if !available {
 			return ErrUnavailable
+		}
+		if remaining, err := aibudget.ForConfig(q.DB, q.AI.Summary).Remaining(tx, admission.Manual, now); err != nil || remaining == 0 {
+			if err != nil {
+				return err
+			}
+			return aibudget.ErrExhausted
+		}
+		if supersede.ID != 0 {
+			if err := cancelUnsent(tx, supersede, admission.Decision{Reason: "superseded_by_manual"}, now, supersede.Attempts); err != nil {
+				return err
+			}
 		}
 		job, err := q.insert(tx, jobType, id, key, payload{Manual: true, Force: force}, 200, now.UnixMilli())
 		d.Job = job
@@ -210,6 +243,12 @@ func (q Queue) RetryUnknown(ctx context.Context, id int64, requestID string, ava
 		if !available {
 			return ErrUnavailable
 		}
+		if remaining, err := aibudget.ForConfig(q.DB, q.AI.Summary).Remaining(tx, admission.Manual, now); err != nil || remaining == 0 {
+			if err != nil {
+				return err
+			}
+			return aibudget.ErrExhausted
+		}
 		if old.Type != ReportJob {
 			var repo storage.Repository
 			if err := tx.Take(&repo, storage.RepositoryColumns.RepoID+"=?", *old.RepoID).Error; err != nil {
@@ -218,11 +257,16 @@ func (q Queue) RetryUnknown(ctx context.Context, id int64, requestID string, ava
 			if repo.Blocked {
 				return storage.ErrRepositoryBlocked
 			}
-			if repo.Disabled || !repo.NameIsCurrent || repo.State == consts.StatusUnavailable {
+			if !repo.IsPublic() {
 				return ErrRepoUnavailable
 			}
 		}
 		ms := now.UnixMilli()
+		if err := tx.Model(&storage.AIBudgetReservation{}).Where("reservation_key IN (?) AND status = ?",
+			tx.Model(&storage.AICall{}).Select("call_key").Where("job_id = ? AND status = ?", id, consts.StatusUnknown), consts.StatusUnknown).
+			Updates(map[string]any{"status": consts.StatusFailed, "settled_at": ms}).Error; err != nil {
+			return err
+		}
 		if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.JobID+"=? AND "+storage.AICallColumns.Status+"='"+consts.StatusUnknown+"'", id).
 			Updates(map[string]any{storage.AICallColumns.Status: consts.StatusFailed, storage.AICallColumns.ErrorCode: consts.CodeUnknownAcknowledged, storage.AICallColumns.UpdatedAt: ms}).Error; err != nil {
 			return err
@@ -280,6 +324,10 @@ WHERE %[2]s='%[7]s' AND %[8]s IN (
 			return err
 		}
 		for _, job := range affected {
+			if err := storage.MarkBudgetUnknown(tx, tx.Model(&storage.AICall{}).Select("call_key").
+				Where("job_id = ? AND status = ?", job.ID, consts.StatusUnknown), ms); err != nil {
+				return err
+			}
 			if err := tx.Model(&job).Updates(jobFields(consts.StatusUnknown, consts.CodeAIDeliveryUnknown, ms, ms, job.Attempts)).Error; err != nil {
 				return err
 			}
@@ -339,20 +387,71 @@ func (q Queue) claimWork(ctx context.Context, now time.Time, withModel, withRepo
 }
 
 func (q Queue) claimReady(db *gorm.DB, now time.Time, withModel, withRepo bool, deferred []string, localThemes, localTranslations bool) (*storage.Job, error) {
+	if q.AI.Summary.LegacyAdmission {
+		return q.claimOne(db, now, withModel, withRepo, deferred, localThemes, localTranslations)
+	}
+	var result *storage.Job
+	err := db.Transaction(func(tx *gorm.DB) error {
+		// 同一事务内验证已领取的候选，无效任务不占用上游开工节奏。
+		for range 16 {
+			job, err := q.claimOne(tx, now, withModel, withRepo, deferred, localThemes, localTranslations)
+			if err != nil || job == nil {
+				return err
+			}
+			if job.Type == ReportJob || job.IsManual() || jobOperation(*job) == "verify" {
+				result = job
+				return nil
+			}
+			d, err := q.checkAdmission(tx, *job, now)
+			if err != nil {
+				return err
+			}
+			if d.State == admission.Pass {
+				// 失去通道额度时不再读取 GitHub。仍允许已完成译文的无模型复核。
+				if withModel && job.Type != TranslationJob {
+					left, err := aibudget.ForConfig(q.DB, q.AI.Summary).Remaining(tx, d.Lane, now)
+					if err != nil {
+						return err
+					}
+					if left == 0 {
+						next := budgetRetryAt(*job, now)
+						if now.UTC().Hour() < 12 {
+							next = admission.DayStart(now).Add(12 * time.Hour).UnixMilli()
+						}
+						if err := tx.Model(job).Updates(jobFields(consts.StatusFailed, consts.CodeAIBudgetExhausted, now.UnixMilli(), next, job.Attempts-1)).Error; err != nil {
+							return err
+						}
+						continue
+					}
+				}
+				result = job
+				return nil
+			}
+			if err := cancelUnsent(tx, *job, d, now, job.Attempts-1); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return result, err
+}
+
+// claimOne 执行原子租约领取，保持手动和无模型发布复核的优先权。
+func (q Queue) claimOne(db *gorm.DB, now time.Time, withModel, withRepo bool, deferred []string, localThemes, localTranslations bool) (*storage.Job, error) {
 	var job storage.Job
 	var localFilter string
 	var localArgs []any
 	if localThemes || localTranslations {
 		// 本地任务只使用当前有效的正文。额度用完时，仅允许复用本日已预留的调用。
 		start := now.UTC().Truncate(24 * time.Hour)
-		calls := db.Model(&storage.AICall{}).Where("origin = ? AND reserved_at >= ? AND reserved_at < ?",
+		reservations := db.Model(&storage.AICall{}).Where("origin = ? AND reserved_at >= ? AND reserved_at < ?",
 			consts.OriginAuto, start.UnixMilli(), start.Add(24*time.Hour).UnixMilli())
 		localFilter = ` AND COALESCE(json_extract(payload_json,'$.manual'),0)=0
 AND ((? AND type = ? AND repo_id IN (?)) OR (? AND type = ? AND repo_id IN (?) AND ` + translationNeedsModel + `))
 AND ((?) < ? OR EXISTS (?))`
 		localArgs = []any{localThemes, JobType, cachedThemeRepos(db), localTranslations, TranslationJob, q.cachedTranslationRepos(db),
-			calls.Session(&gorm.Session{}).Select("COUNT(*)"), q.AI.Summary.AutoDailyCalls,
-			calls.Session(&gorm.Session{}).Select("1").Where("job_id = jobs.id AND status = ? AND provider = ?", consts.StatusReserved, ProviderKey(q.AI))}
+			aibudget.Day(db, now).Select("COUNT(*)").Where("origin = ?", consts.OriginAuto), min(aibudget.AutoLimit, q.AI.Summary.AutoDailyCalls),
+			reservations.Select("1").Where("job_id = jobs.id AND status = ? AND provider = ?", consts.StatusReserved, ProviderKey(q.AI))}
 	}
 	args := []any{rand.Text(), now.Add(time.Duration(q.LeaseSeconds) * time.Second).UnixMilli(), now.UnixMilli(), JobType, TranslationJob, ReportJob, now.UnixMilli(), withRepo, ReportJob, withModel, JobType, TranslationJob, now.UnixMilli(), ReportJob, storage.AutoAIResumeKey, deferred, JobType, TranslationJob, ReportJob, now.UnixMilli(), ReportJob}
 	args = append(args, localArgs...)
