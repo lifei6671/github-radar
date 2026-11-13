@@ -20,17 +20,11 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/api"
 	"github.com/lifei6671/github-radar/internal/backup"
-	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
-	"github.com/lifei6671/github-radar/internal/embedding"
-	gh "github.com/lifei6671/github-radar/internal/github"
-	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/maintenance"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
-	"github.com/lifei6671/github-radar/internal/summary"
-	"github.com/lifei6671/github-radar/internal/trending"
 	"github.com/lifei6671/github-radar/internal/webui"
 	"github.com/lifei6671/github-radar/migrations"
 )
@@ -52,8 +46,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command, args = args[0], args[1:]
 	}
+	if command == consts.CommandHashPassword || command == consts.CommandGenerateSessionSecret {
+		return runCredentialCommand(command, args, os.Stdin, os.Stdout, os.Stderr)
+	}
 	if command != consts.CommandServer && command != consts.CommandMigrate && command != consts.CommandCollectOnce && command != consts.CommandMaintenanceOnce && command != consts.CommandBackup {
-		return fmt.Errorf("未知命令 %q，请使用 server、migrate、collect-once、maintenance-once 或 backup", command)
+		return fmt.Errorf("未知命令 %q，请使用 server、migrate、collect-once、maintenance-once、backup、hash-password 或 generate-session-secret", command)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	configPath := flags.String("config", "", "YAML 配置文件路径，server 和 backup 命令必填")
@@ -73,7 +70,11 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		}
 	}
 	if command == consts.CommandBackup {
-		return runBackup(ctx, cfg.Server.Listen, cfg.Auth.AdminPassword, logger)
+		password, err := readAdminPassword(os.Stdin, os.Stderr)
+		if err != nil {
+			return err
+		}
+		return runBackup(ctx, cfg.Server.Listen, password, logger)
 	}
 
 	if command == consts.CommandMigrate {
@@ -101,69 +102,27 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("初始化 GORM: %w", err)
 	}
-	maintainer := maintenance.Service{DB: db, Cfg: cfg, Logger: logger}
 	if command == consts.CommandMaintenanceOnce {
-		return maintainer.Once(ctx, time.Now().UTC())
+		return (maintenance.Service{DB: db, Cfg: cfg, Logger: logger}).Once(ctx, time.Now().UTC())
 	}
-	githubToken := strings.TrimSpace(os.Getenv(cfg.GitHub.TokenEnv))
-	var engine *collector.Engine
-	var readmes summary.GitHubSource
-	if githubToken == "" {
-		if command == consts.CommandCollectOnce {
-			return fmt.Errorf("采集需要环境变量 %s", cfg.GitHub.TokenEnv)
-		}
-		logger.Warn("GitHub 采集待配置", "missingEnv", cfg.GitHub.TokenEnv)
-	} else {
-		client, err := gh.New(db, cfg.GitHub, githubToken)
+	if command == consts.CommandCollectOnce {
+		engine, _, err := newCollector(db, cfg, logger, false)
 		if err != nil {
 			return err
 		}
-		readmes = client
-		engine = &collector.Engine{
-			Queue:  collector.Queue{DB: db, Cfg: cfg.Scheduler},
-			GitHub: client, Trending: trending.New(time.Duration(cfg.GitHub.TimeoutSeconds) * time.Second),
-			Cfg: cfg, Logger: logger,
+		if engine == nil {
+			return fmt.Errorf("采集需要配置 YAML 的 credentials.github_token 或环境变量 %s", cfg.GitHub.TokenEnv)
 		}
-	}
-	if command == consts.CommandCollectOnce {
 		return engine.CollectOnce(ctx)
-	}
-	var provider summary.Provider
-	var translate func(context.Context, string) summary.ModelResult
-	if missing := cfg.MissingAISettings(); len(missing) != 0 {
-		logger.Warn("AI 摘要待配置", "missing", missing)
-	} else if cfg.AI.Enabled && readmes != nil {
-		chat := summary.NewChatProvider(cfg.AI, strings.TrimSpace(os.Getenv(cfg.AI.APIKeyEnv)))
-		provider, translate = chat, chat.Translate
-	}
-	summarizer := summary.Engine{Queue: summary.Queue{DB: db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds},
-		GitHub: readmes, Provider: provider, Translate: translate, Logger: logger, Tick: time.Duration(cfg.Scheduler.TickMinutes) * time.Minute}
-	var vectorWorker *embedding.Worker
-	if cfg.Embedding.Enabled {
-		key := strings.TrimSpace(os.Getenv(cfg.Embedding.APIKeyEnv))
-		if key == "" {
-			logger.Warn("相似项目向量待配置", "missingEnv", cfg.Embedding.APIKeyEnv)
-		} else {
-			model := embedding.NewProvider(cfg.Embedding, key)
-			vectorWorker = &embedding.Worker{DB: db, Config: cfg.Embedding, Embed: model.Embed, Readme: summarizer.EmbeddingReadme, Logger: logger}
-		}
 	}
 
 	group, serviceCtx := errgroup.WithContext(ctx)
-	workers := lifecycle.NewWorkers(serviceCtx, func(ctx context.Context) error {
-		group, workerCtx := errgroup.WithContext(ctx)
-		group.Go(func() error { return maintainer.RunMetrics(workerCtx) })
-		group.Go(func() error { return maintainer.RunMaintenance(workerCtx) })
-		group.Go(func() error { return summarizer.Run(workerCtx) })
-		if vectorWorker != nil {
-			group.Go(func() error { return vectorWorker.Run(workerCtx) })
-		}
-		if engine != nil {
-			group.Go(func() error { return engine.Run(workerCtx) })
-		}
-		return group.Wait()
-	})
-	manager, err := backup.New(serviceCtx, pool, db, cfg, workers)
+	runtime, err := newRuntimeController(serviceCtx, db, cfg, logger)
+	if err != nil {
+		return err
+	}
+	workers := runtime.workers
+	manager, err := backup.New(serviceCtx, pool, db, cfg, workers, runtime)
 	if err != nil {
 		return fmt.Errorf("初始化备份服务: %w", err)
 	}
@@ -171,7 +130,7 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		workers.Resume()
 	}
 	gin.SetMode(gin.ReleaseMode)
-	router := api.NewRouter(db, pool, logger, cfg, &summarizer, manager)
+	router := api.NewLiveRouter(db, pool, logger, runtime, manager)
 	webui.Register(router, os.DirFS("web/dist"))
 	server := &http.Server{
 		Addr:         cfg.Server.Listen,

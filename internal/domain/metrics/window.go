@@ -3,9 +3,7 @@ package metrics
 import (
 	"time"
 
-	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
-	"github.com/lifei6671/github-radar/internal/storage"
 )
 
 const (
@@ -49,7 +47,7 @@ func nearest(points []Point, target, tolerance int64) *Point {
 }
 
 // Between 只使用不同时间的实际观测，保留负增长及覆盖时间。
-func Between(start, end *Point, from, to int64, tolerance config.BoundaryToleranceMinutes) Window {
+func Between(start, end *Point, from, to int64, tolerance BoundaryToleranceMinutes) Window {
 	w := Window{Quality: Insufficient}
 	if start == nil || end == nil || start.At >= end.At {
 		return w
@@ -70,8 +68,16 @@ func Between(start, end *Point, from, to int64, tolerance config.BoundaryToleran
 	return w
 }
 
-// Bucket 计算桶内首末样本的变化，单样本桶仍可提供锚点。
-func Bucket(a storage.MetricAnchors, from, span int64, tolerance config.BoundaryToleranceMinutes) Window {
-	return Between(&Point{At: a.OpenObservedAt, Stars: a.StarsOpen},
-		&Point{At: a.CloseObservedAt, Stars: a.StarsClose}, from, from+span, tolerance)
+type Anchors struct {
+	Raw, Hourly map[int64][]Point
+}
+
+func (a Anchors) Pick(id, target int64, tolerance BoundaryToleranceMinutes, hourlyOnly bool) *Point {
+	limit := int64(tolerance.Max) * minute
+	if !hourlyOnly {
+		if p := nearest(a.Raw[id], target, limit); p != nil {
+			return p
+		}
+	}
+	return nearest(a.Hourly[id], target, limit)
 }

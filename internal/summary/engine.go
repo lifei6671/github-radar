@@ -26,16 +26,17 @@ type GitHubSource interface {
 }
 
 type Engine struct {
-	Queue     Queue
-	GitHub    GitHubSource
-	Provider  Provider
-	Translate func(context.Context, string) ModelResult
-	Logger    *slog.Logger
-	Tick      time.Duration
+	Queue       Queue
+	GitHub      GitHubSource
+	Provider    Provider
+	Translate   func(context.Context, string) ModelResult
+	WriteReport func(context.Context, string) ModelResult
+	Logger      *slog.Logger
+	Tick        time.Duration
 }
 
 func (e *Engine) Run(ctx context.Context) error {
-	for {
+	for !lifecycle.Stopping(ctx) {
 		ready, err := storage.Initialized(ctx, e.Queue.DB)
 		if ready && err == nil {
 			break
@@ -43,40 +44,45 @@ func (e *Engine) Run(ctx context.Context) error {
 		if err != nil && !storage.IsBusy(err) {
 			return err
 		}
-		if err := wait(ctx, time.Second); err != nil {
-			return err
+		if !lifecycle.Wait(ctx, time.Second) {
+			return ctx.Err()
 		}
+	}
+	if lifecycle.Stopping(ctx) {
+		return ctx.Err()
 	}
 	group, workerCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		for workerCtx.Err() == nil {
+		for !lifecycle.Stopping(workerCtx) {
 			now := time.Now()
 			err := e.Queue.Recover(workerCtx, now)
-			if err == nil && e.Provider != nil && e.GitHub != nil {
-				err = e.Queue.Schedule(workerCtx, now)
+			if err == nil && !lifecycle.Stopping(workerCtx) && e.GitHub != nil {
+				queue := e.Queue
+				if e.Provider == nil {
+					queue.AI.Summary.AutoDailyCalls = 0
+				}
+				err = queue.Schedule(workerCtx, now)
 			}
 			if err != nil && workerCtx.Err() == nil {
 				e.Logger.Warn("摘要调度失败", "error", err)
 			}
-			if err := wait(workerCtx, e.Tick); err != nil {
-				return err
+			if !lifecycle.Wait(workerCtx, e.Tick) {
+				return workerCtx.Err()
 			}
 		}
 		return workerCtx.Err()
 	})
-	if e.Provider != nil && e.GitHub != nil {
+	if e.GitHub != nil || e.WriteReport != nil {
 		for range e.Queue.AI.Summary.Workers {
 			group.Go(func() error {
-				for workerCtx.Err() == nil {
+				for !lifecycle.Stopping(workerCtx) {
 					done, err := e.Step(workerCtx)
 					if err != nil && !errors.Is(err, errLease) && workerCtx.Err() == nil {
 						// 模型及 GitHub 错误已转为固定码，日志只接收数据库等本地错误。
 						e.Logger.Warn("摘要 Worker 未完成", "error", err)
 					}
-					if !done || err != nil {
-						if err := wait(workerCtx, time.Second); err != nil {
-							return err
-						}
+					if (!done || err != nil) && !lifecycle.Wait(workerCtx, time.Second) {
+						return workerCtx.Err()
 					}
 				}
 				return workerCtx.Err()
@@ -86,19 +92,8 @@ func (e *Engine) Run(ctx context.Context) error {
 	return group.Wait()
 }
 
-func wait(ctx context.Context, d time.Duration) error {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
 func (e *Engine) Step(ctx context.Context) (bool, error) {
-	job, err := e.Queue.claim(ctx, time.Now())
+	job, err := e.Queue.claim(ctx, time.Now(), e.Provider != nil || e.Translate != nil || e.WriteReport != nil, e.GitHub != nil)
 	if err != nil || job == nil {
 		return false, err
 	}
@@ -134,6 +129,9 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 }
 
 func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
+	if job.Type == ReportJob {
+		return e.runReport(ctx, job)
+	}
 	q := e.Queue
 	var p payload
 	if json.Unmarshal([]byte(job.PayloadJSON), &p) != nil {
@@ -159,8 +157,14 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	if err := db.Find(&check, storage.SummaryCheckColumns.RepoID+"=?", repo.RepoID).Error; err != nil {
 		return err
 	}
-	missingTopics := len(repo.GitHubTopics()) == 0 && (p.Manual || q.AI.Summary.AutoDailyCalls > 0)
-	if missingTopics {
+	withTopics := e.Provider != nil && (p.Manual || q.AI.Summary.AutoDailyCalls > 0)
+	var catalog storage.ThemeCatalog
+	if withTopics {
+		var err error
+		catalog, err = storage.ReadThemeCatalog(db)
+		if err != nil {
+			return err
+		}
 		if err := db.Find(&oldTopics, storage.RepoAITopicsColumns.RepoID+"=?", repo.RepoID).Error; err != nil {
 			return err
 		}
@@ -169,22 +173,46 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	if err != nil {
 		return err
 	}
-	wantsSummary := func(language string) bool { return p.Manual || (eligible && language != consts.LanguageChinese) }
-	// NULL 表示旧摘要尚未尝试生成推荐理由，空字符串表示没有可用理由。
-	cachedSummary := old.SummaryStatus == consts.StatusReady && old.RecommendationReason != nil && q.matches(old, check.SourceFingerprint)
-	topicModelMatches := q.matchesTopicModel(oldTopics)
+	wantsSummary := e.Provider != nil && (p.Manual || eligible || (old.RepoID != 0 && q.AI.Summary.AutoDailyCalls > 0))
+	cachedSummary := old.SummaryStatus == consts.StatusReady && hasStructuredSummary(old) && q.matches(old, check.SourceFingerprint)
+	topicModelMatches := q.matchesTopicModel(oldTopics) && oldTopics.ThemeCatalogKey == catalog.Key
 	cachedTopics := topicModelMatches &&
 		strings.HasPrefix(oldTopics.SourceFingerprint, check.SourceFingerprint+"|")
+	missingTopics := withTopics && catalog.NeedsAI(repo.GitHubTopics())
+	if !p.Manual && missingTopics && !topicModelMatches && old.SummaryStatus == consts.StatusReady {
+		if err := q.setTopicScope(ctx, &job, true); err != nil {
+			return err
+		}
+	}
 	etag := ""
-	if !p.Force && check.ReadmeETag != nil && (!wantsSummary(check.SourceLanguage) || cachedSummary) &&
+	if !p.Force && check.ReadmeETag != nil && (!wantsSummary || cachedSummary) &&
 		(!missingTopics || cachedTopics) {
-		etag = *check.ReadmeETag
+		var cached int64
+		limit := q.AI.Summary.ReadmeMaxBytes
+		if err := db.Model(&storage.RepoReadmeDocument{}).Where("repo_id=? AND readme_sha=?", repo.RepoID, check.LastSeenReadmeSHA).
+			Where("readme_bytes<=? AND (truncated=0 OR readme_bytes=?)", limit, limit).
+			Count(&cached).Error; err != nil {
+			return err
+		}
+		if cached != 0 {
+			etag = *check.ReadmeETag
+		}
 	}
 	policy := gh.Policy{RepositoryID: repo.RepoID, Grade: repo.Grade, Priority: p.Manual, ReadmeBudget: q.AI.Summary.GitHubBudget}
-	input, unchanged, err := e.readSource(ctx, repo.RepoID, etag, policy)
+	var input source
+	var usingCached, unchanged bool
+	if !p.Manual && missingTopics && !topicModelMatches && old.SummaryStatus == consts.StatusReady {
+		input, usingCached, err = cachedTopicSource(db, repo, old, check)
+		if err != nil {
+			return err
+		}
+	}
+	if !usingCached {
+		input, unchanged, err = e.readSource(ctx, repo.RepoID, etag, policy)
+	}
 	// README 返回 304 时仍需检查简介是否变化，变化后重新读取正文。
-	if err == nil && unchanged && missingTopics && !input.hasGitHubTopics &&
-		oldTopics.SourceFingerprint != topicsFingerprint(check.SourceFingerprint, input.description) {
+	if err == nil && unchanged && withTopics && catalog.NeedsAI(input.githubTopics) &&
+		(!topicModelMatches || oldTopics.SourceFingerprint != topicsFingerprint(check.SourceFingerprint, input.description)) {
 		input, unchanged, err = e.readSource(ctx, repo.RepoID, "", policy)
 	}
 	if err != nil {
@@ -198,11 +226,18 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 			return saveCheck(tx, check)
 		}})
 	}
-	check = sourceCheck(repo.RepoID, input, now, next)
+	if !usingCached {
+		check = sourceCheck(repo.RepoID, input, now, next)
+		if err := e.rememberReadme(ctx, job, input.readme); err != nil {
+			return err
+		}
+	}
 	summaryMatches := q.matches(old, input.fingerprint)
-	makeSummary := wantsSummary(input.language) && (p.Force || !summaryMatches || old.RecommendationReason == nil)
+	unchangedGuide := jobTopicsOnly(job) && old.SummaryStatus == consts.StatusReady && old.SourceFingerprint == input.fingerprint
+	makeSummary := !usingCached && !unchangedGuide && wantsSummary && (p.Force || !summaryMatches || !hasStructuredSummary(old))
 	fingerprint := topicsFingerprint(input.fingerprint, input.description)
-	makeTopics := missingTopics && !input.hasGitHubTopics && (p.Force || !topicModelMatches || oldTopics.SourceFingerprint != fingerprint)
+	makeTopics := withTopics && (makeSummary ||
+		(catalog.NeedsAI(input.githubTopics) && (p.Force || !topicModelMatches || oldTopics.SourceFingerprint != fingerprint)))
 	if (!makeSummary && !makeTopics) || (input.body == "" && input.description == "") {
 		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts, apply: func(tx *gorm.DB) error {
 			if summaryMatches && old.SummaryStatus != consts.StatusReady {
@@ -213,29 +248,29 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 			return saveObserved(tx, old, check, fingerprint)
 		}})
 	}
-	// 正文取得后再次确认公开性和 canonical 地址，名称被复用的内容不得发送。
-	confirmed, err := e.publicRepo(ctx, repo.RepoID, policy)
-	if err != nil {
-		return e.sourceFailed(ctx, job, err)
+	if err := q.setTopicScope(ctx, &job, makeTopics && !makeSummary); err != nil {
+		return err
 	}
-	if !strings.EqualFold(confirmed.GetFullName(), input.fullName) {
-		return e.fail(ctx, job, consts.CodeSummaryRepoAddressChanged, true, 0, false)
-	}
-	makeTopics = makeTopics && len(confirmed.GetTopics()) == 0
-	if !makeSummary && !makeTopics {
-		return q.settle(ctx, job, outcome{status: consts.StatusSucceeded, attempts: job.Attempts, apply: func(tx *gorm.DB) error {
-			return saveObserved(tx, old, check, fingerprint)
-		}})
-	}
+	input.themePrompt = themePrompt(catalog, q.AI.Summary.InputTokens/4)
 	prompt, sent := input.prompt(q.AI.Summary.InputTokens, makeSummary, makeTopics)
 	if sent.body == "" && sent.description == "" {
 		return e.fail(ctx, job, consts.CodeSummaryInputBudgetTooSmall, false, 0, false)
 	}
+	var segments []string
+	var translation storage.RepoReadmeTranslation
+	if makeSummary {
+		prompt, segments, translation, err = q.withReadmeTranslation(db, repo.RepoID, input, prompt)
+		if err != nil {
+			return err
+		}
+	}
 	reservedAt := time.Now()
 	call, err := q.reserve(ctx, job, p.Manual, reservedAt)
 	if errors.Is(err, errBudget) {
-		nextDay := reservedAt.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour).UnixMilli()
-		return q.settle(ctx, job, outcome{status: consts.StatusFailed, code: consts.CodeAIBudgetExhausted, next: nextDay, attempts: job.Attempts - 1, apply: func(tx *gorm.DB) error {
+		return q.settle(ctx, job, outcome{status: consts.StatusFailed, code: consts.CodeAIBudgetExhausted, next: budgetRetryAt(job, reservedAt), attempts: job.Attempts - 1, apply: func(tx *gorm.DB) error {
+			if usingCached {
+				return nil
+			}
 			return saveObserved(tx, old, check, fingerprint)
 		}})
 	}
@@ -250,7 +285,7 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	duration := time.Since(start)
 	completed := time.Now()
 	var record storage.AISummary
-	var topicsJSON string
+	var topicsJSON, themeSlugs, themeKey string
 	valid := true
 	if makeSummary {
 		record, valid = resultSummary(result.Content, sent, repo.RepoID, call.Provider, q.AI.Model, q.AI.Summary.PromptVersion, completed.UnixMilli())
@@ -258,18 +293,31 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	if makeTopics {
 		var topicsValid bool
 		topicsJSON, topicsValid = resultTopics(result.Content)
+		var themesValid bool
+		themeSlugs, themesValid = resultThemeSlugs(result.Content, topicsJSON, catalog)
+		if themesValid {
+			themeKey = catalog.Key
+		} else if topicModelMatches && oldTopics.SourceFingerprint == fingerprint {
+			themeSlugs, themeKey = oldTopics.ThemeSlugsJSON, oldTopics.ThemeCatalogKey
+		}
 		// 同一请求里的有效摘要可以独立保存，缺失主题词留给下次检查。
-		valid = valid && (makeSummary || topicsValid)
+		valid = valid && (makeSummary || (topicsValid && themesValid))
 	}
 	if result.Code == "" && !valid {
 		result.Code, result.Retry = consts.CodeInvalidOutput, true
 	}
 	if result.Code != "" {
+		if usingCached {
+			check = storage.SummaryCheck{}
+		}
 		return e.finishFailure(ctx, job, call, result, duration, old, check, fingerprint)
 	}
 
 	// 供应商返回后重新确认真实来源，防止分析期间 README 被替换。
-	latest, same, verifyErr := e.readSource(ctx, repo.RepoID, input.etag, policy)
+	latest, same, verifyErr := input, true, error(nil)
+	if !usingCached {
+		latest, same, verifyErr = e.readSource(ctx, repo.RepoID, input.etag, policy)
+	}
 	changed := !same && verifyErr == nil && latest.fingerprint != input.fingerprint
 	observedFingerprint := fingerprint
 	if verifyErr == nil {
@@ -309,8 +357,20 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 	}
 	return e.settleAfterCall(ctx, job, outcome{status: status, code: code, attempts: job.Attempts, call: &call, model: result, duration: duration,
 		apply: func(tx *gorm.DB) error {
-			if err := saveObserved(tx, old, check, observedFingerprint); err != nil {
-				return err
+			if usingCached {
+				current, err := cachedTopicSourceCurrent(tx, repo.RepoID, input)
+				if err != nil || !current {
+					return err
+				}
+			} else {
+				if err := saveObserved(tx, old, check, observedFingerprint); err != nil {
+					return err
+				}
+			}
+			if !same && verifyErr == nil {
+				if err := saveReadme(tx, repo.RepoID, latest.readme); err != nil {
+					return err
+				}
 			}
 			if makeSummary {
 				if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&record).Error; err != nil {
@@ -321,8 +381,17 @@ func (e *Engine) runJob(ctx context.Context, job storage.Job) error {
 					return err
 				}
 			}
-			if topicsJSON != "" && verifyErr == nil && !topicsChanged && !latest.hasGitHubTopics {
+			if len(segments) > 0 && verifyErr == nil && !changed {
+				if err := saveCombinedTranslation(tx, translation, result.Content, segments); err != nil {
+					return err
+				}
+				if err := saveReadme(tx, repo.RepoID, input.readme); err != nil {
+					return err
+				}
+			}
+			if topicsJSON != "" && verifyErr == nil && !topicsChanged {
 				topics := storage.RepoAITopics{RepoID: repo.RepoID, TopicsJSON: topicsJSON, SourceFingerprint: fingerprint,
+					ThemeSlugsJSON: themeSlugs, ThemeCatalogKey: themeKey,
 					ModelProvider: call.Provider, ModelName: q.AI.Model, PromptVersion: q.AI.Summary.PromptVersion, GeneratedAt: completed.UnixMilli()}
 				return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&topics).Error
 			}
@@ -402,12 +471,12 @@ func (e *Engine) readSource(ctx context.Context, id int64, etag string, p gh.Pol
 	if !ok {
 		return source{}, false, ErrRepoUnavailable
 	}
-	readme, err := e.GitHub.Readme(ctx, owner, name, etag, e.Queue.AI.Summary.ReadmeMaxBytes, p)
+	readme, err := e.preferredReadme(ctx, owner, name, etag, p)
 	if err != nil {
 		return source{}, false, err
 	}
 	s := source{fullName: r.GetFullName(), description: strings.Join(strings.Fields(r.GetDescription()), " "),
-		hasGitHubTopics: len(r.GetTopics()) > 0, quality: sufficient}
+		githubTopics: r.GetTopics(), quality: sufficient}
 	if readme.NotModified && etag != "" {
 		return s, true, nil
 	}
@@ -415,7 +484,7 @@ func (e *Engine) readSource(ctx context.Context, id int64, etag string, p gh.Pol
 		if err := e.checkRepoUnblocked(ctx, id); err != nil {
 			return source{}, false, err
 		}
-		readme, err = e.GitHub.Readme(ctx, owner, name, "", e.Queue.AI.Summary.ReadmeMaxBytes, p)
+		readme, err = e.preferredReadme(ctx, owner, name, "", p)
 		if err != nil {
 			return source{}, false, err
 		}
@@ -423,6 +492,17 @@ func (e *Engine) readSource(ctx context.Context, id int64, etag string, p gh.Pol
 			return source{}, false, &gh.Failure{Code: consts.CodeGitHubUnexpectedReadme304, Status: 304}
 		}
 	}
+	// 确认读取期间仓库仍公开，且路径没有被其他仓库复用。
+	confirmed, err := e.publicRepo(ctx, id, p)
+	if err != nil {
+		return source{}, false, err
+	}
+	if !strings.EqualFold(confirmed.GetFullName(), s.fullName) {
+		return source{}, false, &gh.Failure{Code: consts.CodeSummaryRepoAddressChanged}
+	}
+	s.description = strings.Join(strings.Fields(confirmed.GetDescription()), " ")
+	s.githubTopics = confirmed.GetTopics()
+	s.readme = readme
 	if readme.Missing {
 		s.fingerprint, s.quality = descriptionKey(s.description), insufficient
 	} else {
@@ -431,8 +511,11 @@ func (e *Engine) readSource(ctx context.Context, id int64, etag string, p gh.Pol
 		s.body = prose(readme.Body)
 		if readme.Truncated {
 			s.quality = incomplete
-		} else if utf8.RuneCountInString(s.body) < 200 {
-			s.quality = insufficient
+		} else {
+			if utf8.RuneCountInString(s.body) < 480 {
+				// 很短的 README 通常只够支撑简要介绍，仍可生成有依据的推荐理由。
+				s.quality = insufficient
+			}
 		}
 	}
 	natural := s.body

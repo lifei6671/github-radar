@@ -50,6 +50,7 @@ type Discovery struct {
 type SearchRule struct {
 	Key      string `yaml:"key"`
 	Query    string `yaml:"query"`
+	MinStars *int   `yaml:"min_stars"`
 	Enabled  bool   `yaml:"enabled"`
 	Priority int    `yaml:"priority"`
 }
@@ -152,7 +153,7 @@ func (cfg Config) ValidateDiscoverySeed() error {
 	}
 	keys := make(map[string]bool)
 	for _, rule := range cfg.Discovery.SearchRules {
-		if !sourceSlug.MatchString(rule.Key) || keys[rule.Key] || strings.TrimSpace(rule.Query) == "" {
+		if !sourceSlug.MatchString(rule.Key) || keys[rule.Key] || strings.TrimSpace(rule.Query) == "" || (rule.MinStars != nil && *rule.MinStars < 0) {
 			return fmt.Errorf("discovery.search_rules 含无效或重复查询")
 		}
 		keys[rule.Key] = true

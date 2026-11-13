@@ -1,6 +1,6 @@
 import { expect } from '@playwright/test'
 import type { Page, Route } from '@playwright/test'
-import type { CategorySetting, DiscoverySelection, DiscoveryTab, Job, Limits, ListSettings, ProjectThemeGroup, ProjectThemeSetting, Quality, RepoDetail, RepoReadme, RuleSetting, Topic } from '../src/api/types'
+import type { CategorySetting, DiscoveryRanking, DiscoverySelection, DiscoveryTab, Job, Limits, ListSettings, ProjectThemeGroup, ProjectThemeSetting, Quality, RepoDetail, RepoReadme, RuleSetting, Topic } from '../src/api/types'
 
 const at = '2026-11-11T12:00:00Z'
 const adminPassword = 'fixture-admin-password'
@@ -18,6 +18,7 @@ const categories = [
 const names = ['vercel/ai', 'openai/codex', 'pydantic/pydantic-ai', 'modelcontextprotocol/servers', 'astral-sh/ruff', 'charmbracelet/gum']
 const fixtureTopics = ['llm', 'coding-agent', 'ai-agent', 'mcp-server', 'mcp-server', 'cli']
 const titles = ['用于构建 AI 应用的 TypeScript 工具包', '在终端中运行的开源代码智能体', '面向生产应用的 Python 智能体框架', 'Model Context Protocol 服务端实现集合', '以 Rust 编写的 Python 代码检查工具', '用于构建交互式 Shell 脚本的组件']
+const reasons = ['应用开发者可借鉴它的统一接口来复用工具调用流程。', '维护大型仓库的开发者可以参考它如何在终端里审阅和应用补丁。']
 const stars = [22_846, 59_480, 14_270, 32_881, 40_244, 15_830]
 const growth = [318, 212, 116, -12, null, 8]
 const week = [1863, 1560, 832, 288, null, 63]
@@ -25,7 +26,6 @@ const quality = (value: number | null): Quality => value === null ? 'insufficien
 
 function repository(index: number): RepoDetail {
   const id = index + 1
-  const hasSummary = index !== 4
   const window = (delta: number | null) => ({
     delta, quality: quality(delta), startAt: delta === null ? null : '2026-11-10T12:00:00Z',
     endAt: delta === null ? null : at, resolution: 'raw' as const,
@@ -33,8 +33,8 @@ function repository(index: number): RepoDetail {
   const summary = '项目提供了统一的模型调用与流式输出接口，适用于需要把生成式 AI 集成到应用中的开发团队。文档包含基础示例，开发者可以用它构建聊天、工具调用和结构化输出流程。'
   return {
     id, fullName: names[index], htmlUrl: 'https://github.com/' + names[index], description: titles[index],
-    titleZh: hasSummary ? titles[index] : null, language: ['TypeScript', 'Rust', 'Python', 'TypeScript', 'Rust', 'Go'][index],
-    categories: [index === 3 ? 'mcp' : index === 5 ? 'tools' : index === 0 ? 'coding' : 'agent'],
+    titleZh: titles[index], language: ['TypeScript', 'Rust', 'Python', 'TypeScript', 'Rust', 'Go'][index],
+    categories: index === 0 ? ['coding', 'agent'] : [index === 3 ? 'mcp' : index === 5 ? 'tools' : 'agent'],
     state: 'active', grade: index < 2 ? 'S' : 'A', stars: stars[index], forks: 472,
     growth1h: window(5), growth24h: window(growth[index]), growth7d: window(week[index]), growth30d: window(4100),
     relativeGrowth: index === 4 ? null : 0.085,
@@ -46,15 +46,18 @@ function repository(index: number): RepoDetail {
       stars: h === 8 || index === 4 ? null : stars[index] - 318 + h * 14 + [0, 3, -8, 8, 1, 17][h % 6],
     })),
     dataQuality: index === 4 ? 'insufficient' : 'exact', metricsUpdatedAt: at, candidateBurst: false,
-    recommendationReason: index === 0 ? '应用开发者可借鉴它的统一接口来复用工具调用流程。' : null,
-    summaryPreview: hasSummary ? summary : null, summaryZh: hasSummary ? summary : null, summaryStatus: hasSummary ? 'ready' : 'missing',
-    summarySourceQuality: hasSummary ? 'sufficient' : null, summaryGeneratedAt: hasSummary ? at : null,
-    summaryModel: hasSummary ? 'fixture-model' : null, sourceReadmeUrl: hasSummary ? 'https://github.com/' + names[index] + '/blob/main/README.md' : null,
+    recommendationReason: reasons[index] ?? null,
+    selected: index !== 4,
+    summaryPreview: summary, summaryZh: summary, summaryStatus: 'ready',
+    summarySourceQuality: 'sufficient', summaryGeneratedAt: at,
+    summaryModel: 'fixture-model', sourceReadmeUrl: 'https://github.com/' + names[index] + '/blob/main/README.md',
+    readme: { state: 'pending', complete: false, truncated: false },
     summaryAvailable: true,
     summaryJobId: null, followed: index === 1, followedAt: index === 1 ? at : null,
-    discoveredAt: index < 4 ? at : '2026-11-10T12:00:00Z', lastSuccessAt: index === 4 ? null : at,
+    discoveredAt: index < 4 ? at : '2026-11-10T12:00:00Z', lastSuccessAt: at,
     license: index === 1 ? { spdxId: 'NOASSERTION', name: null } : { spdxId: 'MIT', name: 'MIT License' },
-    features: ['流式响应', '工具调用'], audience: ['开发者'], valueTags: ['开发工具'], aiTopics: [],
+    features: ['流式响应', '工具调用'], audience: ['开发者'],
+    valueTags: index === 0 ? ['开发工具', '流式响应', '工具调用', '模型接口'] : ['开发工具'], aiTopics: [],
   }
 }
 
@@ -74,7 +77,12 @@ function published(repo: RepoDetail) {
   return item
 }
 
-function barrier() {
+function canPublish(repo: RepoDetail) {
+  return !repo.blocked && repo.nameIsCurrent !== false && ['active', 'candidate', 'paused'].includes(repo.state) &&
+    repo.lastSuccessAt !== null && Boolean(repo.summaryZh?.trim()) && repo.summaryStatus !== 'stale'
+}
+
+export function barrier() {
   let resolve!: () => void
   const promise = new Promise<void>((release) => { resolve = release })
   return { promise, resolve }
@@ -91,10 +99,11 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
   }
   let delayedSave: { status: 200 | 401; started: () => void; gate: Promise<void> } | null = null
   let delayedFeedback: { started: () => void; gate: Promise<void> } | null = null
-  let runtime = { github: { tokenEnv: 'GITHUB_TOKEN', searchSoftBudgetPerMinute: 20 }, ai: { enabled: true, baseUrl: '', model: 'fixture-model', apiKeyEnv: 'AI_API_KEY', summary: { workers: 1 } }, recommendations: { enabled: true, hour: 8, minute: 30 } }
+  let runtime = { github: { tokenEnv: 'GITHUB_TOKEN', searchSoftBudgetPerMinute: 20 }, ai: { enabled: true, baseUrl: '', model: 'fixture-model', apiKeyEnv: 'AI_API_KEY', summary: { workers: 1 } }, recommendations: { enabled: true, hour: 8, minute: 30 },
+    reportPublication: { weeklyMinDays: 5, monthlyMinCoverage: 75 } }
   let ruleSettings: ListSettings<RuleSetting> = { revision: 1, items: [
     { sourceType: 'trending', sourceKey: 'all:daily', query: '', enabled: true, intervalMinutes: 60, priority: 20 },
-    { sourceType: 'search', sourceKey: 'coding', query: 'topic:code-assistant stars:>50', enabled: false, intervalMinutes: 30, priority: 20 },
+    { sourceType: 'search', sourceKey: 'coding', query: 'topic:code-assistant stars:>50', minStars: 200, enabled: false, intervalMinutes: 30, priority: 20 },
   ] }
   let categorySettings: ListSettings<CategorySetting> = { revision: 1, items: [{ slug: 'agent', name: 'AI 智能体', anyTopics: ['agent'] }] }
   const discoveryOptions = [...categories]
@@ -112,6 +121,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     { slug: 'webhook-tools', groupSlug: 'content', name: 'Webhook 与事件集成', description: '处理 Webhook 事件。', icon: '', iconColor: '', anyTopics: ['webhook'] },
   ]
   let selection: DiscoverySelection = { recentDays: 7, recentSampleHours: 48, growthSampleHours: 24, trendingHours: 24, trendingTop: 10 }
+  let ranking: DiscoveryRanking = { heatWeight: 70, freshnessWeight: 30, consecutiveDays: 3, cooldownDays: 2 }
   let moveDiscoveryAcrossCursor = false
   let topic: Topic = {
     id: 1, repoId: 1, fullName: names[0], titleZh: titles[0], readerValue: '工具调用与流式输出',
@@ -127,6 +137,9 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
   let recentJobs: Job[] = []
   let jobPolls = 0
   const readmes = new Map<number, RepoReadme>()
+  const detail = (repo: RepoDetail, publicRead: boolean) => ({
+    ...(publicRead ? published(repo) : repo), readme: readmes.get(repo.id) ?? repo.readme,
+  })
   const requests: string[] = []
   const attempts: unknown[] = []
   const repos = names.map((_, index) => repository(index))
@@ -145,7 +158,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     if (publicRead) {
       expect(headers.authorization).toBeUndefined()
       expect(headers.cookie).toBeUndefined()
-      if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/\d+\/(?:trend|readme|similar)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
+      if (method !== 'GET' || !/^\/(?:categories|discovery|discovery-tabs|project-themes(?:\/[^/]+)?|trending(?:\/sources)?|repos(?:\/published|\/\d+\/(?:trend|readme|similar)|\/by-name\/[^/]+\/[^/]+)?)$/.test(path)) {
         return reply(route, { code: 'not_found' }, 404)
       }
       if (query.get('followed') === 'true') return reply(route, { code: 'invalid_filter' }, 400)
@@ -172,14 +185,15 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       slug, name: label || discoveryOptions.find((option) => option.slug === slug)?.name,
     })) })
     if (path === '/categories') return reply(route, { items: categories.map((category) => {
-      const matches = repos.filter((repo) => !repo.blocked && repo.categories.includes(category.slug))
+      const matches = repos.filter((repo) => (!publicRead || canPublish(repo)) && repo.categories.includes(category.slug))
       const latest = matches[0]
       const latestRepo = latest ? { id: latest.id, fullName: latest.fullName, description: latest.description, discoveredAt: latest.discoveredAt } : null
       return { ...category, count: matches.length, latestRepo }
     }) })
     if (publicRead && (path === '/project-themes' || path.startsWith('/project-themes/'))) {
-      const items = projectThemes.map(({ slug, name, description, anyTopics, icon, iconColor, groupSlug }) => {
-        const matches = repos.filter((repo) => !repo.blocked && repo.state === 'active' && anyTopics.includes(fixtureTopics[repo.id - 1]))
+      const items = projectThemes.map(({ slug, name, description, anyTopics, owners, icon, iconColor, groupSlug }) => {
+        const matches = repos.filter((repo) => canPublish(repo) && repo.state === 'active' &&
+          (owners?.length ? owners.includes(repo.fullName.split('/')[0].toLowerCase()) : anyTopics.includes(fixtureTopics[repo.id - 1])))
         const latest = matches[0]
         return { slug, name, description, icon, iconColor, groupSlug, count: matches.length, recentCount: matches.length,
           latestRepo: latest ? { id: latest.id, fullName: latest.fullName, discoveredAt: latest.discoveredAt } : null }
@@ -198,14 +212,16 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       const theme = projectThemes.find(({ slug }) => slug === query.get('theme'))
       if (query.has('theme') && !theme) return reply(route, { code: 'not_found' }, 404)
       const filtered = repos.filter((repo) =>
-        (!publicRead || !repo.blocked) &&
-        (!theme || theme.anyTopics.includes(fixtureTopics[repo.id - 1])) &&
+        (!publicRead || canPublish(repo)) &&
+        (!theme || (theme.owners?.length ? theme.owners.includes(repo.fullName.split('/')[0].toLowerCase()) :
+          theme.anyTopics.includes(fixtureTopics[repo.id - 1]))) &&
         (path !== '/discovery' || (repo.id !== 5 && repo.state === 'active')) &&
         (path !== '/discovery' || query.get('sort') !== 'hotness' || repo.hotnessScore !== null) &&
         (!query.has('blocked') || Boolean(repo.blocked) === (query.get('blocked') === 'true')) &&
         (!query.get('q') || repo.fullName.includes(query.get('q')!)) &&
         (!categoriesWanted.length || repo.categories.some((category) => categoriesWanted.includes(category))) &&
         (!query.get('grade') || repo.grade === query.get('grade')) &&
+        (!query.has('tag') || repo.valueTags.includes(query.get('tag')!)) &&
         (!query.get('state') || repo.state === query.get('state')) &&
         (!query.get('language') || repo.language === query.get('language')) &&
         (query.get('followed') !== 'true' || repo.followed))
@@ -217,6 +233,10 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
       const page = movingDiscovery && offset > 0 && filtered.length > 0 ? [filtered[0], ...slice] : slice
       const items = path === '/discovery' ? page.map((repo) => ({ ...repo, discoveryAt: at })) : page
       return reply(route, { items: publicRead ? items.map(published) : items, nextCursor: offset + limit < filtered.length ? 'opaque+cursor=1' : null, updatedAt: at })
+    }
+    if (path === '/repos/published') {
+      const ids = query.getAll('id').map(Number)
+      return reply(route, { items: repos.filter((repo) => canPublish(repo) && ids.includes(repo.id)).map(({ id }) => id) })
     }
     if (path === '/trending/sources') return reply(route, {
       items: ['all:daily', 'all:weekly', 'all:monthly', 'language:rust:weekly'].map((sourceKey) => ({ sourceKey })),
@@ -231,30 +251,30 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
         }))
         : repos.slice(0, 3)
       return reply(route, { sourceKey, period, updatedAt: at,
-        batch: { observedSlot: 1, observedAt: at }, items: publicRead ? items.map(published) : items })
+        batch: { observedSlot: 1, observedAt: at }, items: publicRead ? items.filter(canPublish).map(published) : items })
     }
     if (path.startsWith('/repos/by-name/')) {
       const name = decodeURIComponent(path.slice('/repos/by-name/'.length)).toLowerCase()
       const expected = publicRead ? query.get('repoId') : null
-      const repo = repos.find(({ id, fullName, nameIsCurrent, blocked }) => nameIsCurrent !== false && (!publicRead || !blocked) &&
-        (expected ? id === Number(expected) : fullName.toLowerCase() === name))
-      return repo ? reply(route, publicRead ? published(repo) : repo) : reply(route, { code: 'not_found' }, 404)
+      const repo = repos.find((item) => item.nameIsCurrent !== false && (!publicRead || canPublish(item)) &&
+        (expected ? item.id === Number(expected) : item.fullName.toLowerCase() === name))
+      return repo ? reply(route, detail(repo, publicRead)) : reply(route, { code: 'not_found' }, 404)
     }
     const match = path.match(/^\/repos\/(\d+)(?:\/(.+))?$/)
     if (match) {
       const repo = repos[Number(match[1]) - 1]
-      if (!repo) return reply(route, { code: 'not_found' }, 404)
+      if (!repo || (publicRead && !canPublish(repo))) return reply(route, { code: 'not_found' }, 404)
       const action = match[2]
       if (action === 'block' && method === 'PATCH') {
         repo.blocked = request.postDataJSON().blocked
         repo.state = repo.blocked ? 'paused' : 'active'
         return reply(route, { blocked: repo.blocked })
       }
-      if (!action) return reply(route, publicRead ? published(repo) : repo)
-      if (action === 'readme') return reply(route, readmes.get(repo.id) ?? { state: 'unavailable', complete: false, truncated: false })
+      if (!action) return reply(route, detail(repo, publicRead))
+      if (action === 'readme') return reply(route, readmes.get(repo.id) ?? repo.readme)
       if (action === 'similar' && publicRead) {
         const ids = similarRepos.get(repo.id) ?? []
-        const items = ids.map((id) => repos[id - 1]).filter((candidate) => !candidate.blocked)
+        const items = ids.map((id) => repos[id - 1]).filter(canPublish)
           .map(({ id, fullName, description, language, stars }) => ({ id, fullName, description, language, stars }))
         return reply(route, { items })
       }
@@ -334,7 +354,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
           pending.started()
           await pending.gate
           if (pending.status === 401) return reply(route, { code: 'unauthorized' }, 401)
-          return reply(route, { revision, settings: body.settings, restartRequired: true })
+          return reply(route, { revision, settings: body.settings, restartRequired: false })
         }
         if (conflict) {
           conflict = false
@@ -345,7 +365,7 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
         runtime = body.settings
         revision++
       }
-      return reply(route, { revision, settings: runtime, restartRequired: revision > 2 })
+      return reply(route, { revision, settings: runtime, restartRequired: false })
     }
     if (path === '/system/discovery-rules') {
       if (method === 'PUT') {
@@ -365,17 +385,18 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     }
     if (path === '/system/discovery-tabs') {
       if (method === 'PUT') {
-        const body: ListSettings<DiscoveryTab> & { newCategories?: CategorySetting[]; selection?: DiscoverySelection } = request.postDataJSON()
+        const body: ListSettings<DiscoveryTab> & { newCategories?: CategorySetting[]; selection?: DiscoverySelection; ranking?: DiscoveryRanking } = request.postDataJSON()
         if (body.revision !== revision) return reply(route, { code: 'settings_conflict' }, 409)
         discoveryTabs = body.items
         selection = body.selection ?? selection
+        ranking = body.ranking ?? ranking
         for (const category of body.newCategories ?? []) {
           discoveryOptions.push({ slug: category.slug, name: category.name })
           categorySettings.items.push(category)
         }
         revision++
       }
-      return reply(route, { revision, items: discoveryTabs, options: discoveryOptions, selection })
+      return reply(route, { revision, items: discoveryTabs, options: discoveryOptions, selection, ranking })
     }
     if (path === '/system/project-theme-groups') {
       if (method === 'PUT') {
@@ -415,7 +436,20 @@ export async function mockRadar(page: Page, startInitialized = true, withTopicAr
     renameFirstRepo: (fullName: string) => { repos[0].fullName = fullName },
     setRepoName: (id: number, fullName: string, nameIsCurrent = true) => Object.assign(repos[id - 1], { fullName, nameIsCurrent }),
     setRepoState: (id: number, state: RepoDetail['state']) => { repos[id - 1].state = state },
+    setSparkline: (id: number, observed: number[]) => {
+      const repo = repos[id - 1]
+      repo.sparkline = repo.sparkline.map((point, index) => ({
+        ...point, stars: observed.includes(index) ? repo.stars + index : null, observedAt: observed.includes(index) ? point.at : null,
+      }))
+    },
     setSummaryAvailable: (id: number, available: boolean) => { repos[id - 1].summaryAvailable = available },
+    setSummaryTitle: (id: number, title: string | null) => { repos[id - 1].titleZh = title },
+    setSummary: (id: number, summary: string) => { Object.assign(repos[id - 1], { summaryZh: summary, summaryPreview: summary }) },
+    setSummaryMissing: (id: number) => { Object.assign(repos[id - 1], { summaryZh: null, summaryPreview: null, titleZh: null, summaryStatus: 'missing' }) },
+    restoreSummary: (id: number) => {
+      const { summaryZh, summaryPreview, titleZh, summaryStatus } = repository(id - 1)
+      Object.assign(repos[id - 1], { summaryZh, summaryPreview, titleZh, summaryStatus })
+    },
     setAITopics: (id: number, topics: string[]) => { repos[id - 1].aiTopics = topics },
     setSimilarRepos: (id: number, items: number[]) => { similarRepos.set(id, items) },
     setReadme: (id: number, readme: RepoReadme) => { readmes.set(id, readme) },

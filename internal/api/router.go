@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,9 +17,28 @@ import (
 	"github.com/lifei6671/github-radar/internal/backup"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/embedding"
+	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
 )
+
+type RuntimeServices struct {
+	Config       config.Config
+	Readmes      *summary.Engine
+	QueryVectors *embedding.QueryVectors
+}
+
+type LiveRuntime interface {
+	Current() *RuntimeServices
+	SaveRuntime(context.Context, int64, config.Runtime) (settings.Snapshot, error)
+}
+
+const runtimeServicesKey = "runtimeServices"
+
+func runtimeFor(c *gin.Context) *RuntimeServices {
+	return c.MustGet(runtimeServicesKey).(*RuntimeServices)
+}
 
 // NewRouter 分别注册公开只读接口、登录接口和需要管理员会话的业务接口。
 func NewRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config, readmes *summary.Engine, backups ...*backup.Manager) *gin.Engine {
@@ -25,6 +46,16 @@ func NewRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config
 	if len(backups) > 0 {
 		manager = backups[0]
 	}
+	static := &RuntimeServices{Config: cfg, Readmes: readmes,
+		QueryVectors: embedding.NewQueryVectors(cfg.Embedding, strings.TrimSpace(os.Getenv(cfg.Embedding.APIKeyEnv)))}
+	return newRouter(db, pool, logger, cfg, manager, func() *RuntimeServices { return static }, nil)
+}
+
+func NewLiveRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, live LiveRuntime, manager *backup.Manager) *gin.Engine {
+	return newRouter(db, pool, logger, live.Current().Config, manager, live.Current, live)
+}
+
+func newRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config, manager *backup.Manager, load func() *RuntimeServices, live LiveRuntime) *gin.Engine {
 	router := gin.New()
 	router.Use(gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, _ any) {
 		logger.Error("HTTP 请求处理异常", "method", c.Request.Method, "route", c.FullPath())
@@ -89,7 +120,7 @@ func NewRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config
 		}
 		c.JSON(http.StatusOK, gin.H{"initialized": true})
 	})
-	collection := &collectionAPI{db: db, cfg: cfg, logger: logger, readmes: readmes}
+	collection := &collectionAPI{db: db, logger: logger, live: live}
 	requireBusiness := func(c *gin.Context) {
 		if manager != nil {
 			release, err := manager.Enter(settingsWrite(c))
@@ -102,6 +133,7 @@ func NewRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config
 				backupFailure(c, backup.ErrSetupRequired)
 				return
 			}
+			c.Set(runtimeServicesKey, load())
 			c.Next()
 			return
 		}
@@ -114,6 +146,7 @@ func NewRouter(db *gorm.DB, pool *sql.DB, logger *slog.Logger, cfg config.Config
 			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"code": consts.CodeSetupRequired})
 			return
 		}
+		c.Set(runtimeServicesKey, load())
 		c.Next()
 	}
 	business := v1.Group("", requireBusiness)

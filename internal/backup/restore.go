@@ -306,7 +306,11 @@ func (m *Manager) openBusiness(state *liveState) {
 
 func (m *Manager) reload(ctx context.Context, id string) error {
 	state, err := m.readLive(ctx)
-	if err != nil || state.receipt.OperationID != id || !state.initialized {
+	valid := err == nil && state.receipt.OperationID == id && state.initialized
+	if valid && m.runtime != nil {
+		err = m.runtime.RestoreRuntime(state.runtime)
+	}
+	if !valid || err != nil {
 		m.mu.Lock()
 		m.failedReload = id
 		m.mu.Unlock()

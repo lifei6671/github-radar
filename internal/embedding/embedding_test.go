@@ -68,6 +68,7 @@ func TestSimilarRanksAndFiltersSQLiteVectors(t *testing.T) {
 		{repository(11, "visibility-pending"), []float32{1, 0, 0}, key},
 		{repository(12, "no-vector"), nil, key},
 		{repository(13, "audio-caption"), []float32{0, 1, 4}, key},
+		{repository(14, "summary-pending"), []float32{1, 0, 0}, key},
 	}
 	fixtures[4].repo.Blocked = true
 	fixtures[5].repo.State = consts.StatusUnavailable
@@ -75,8 +76,16 @@ func TestSimilarRanksAndFiltersSQLiteVectors(t *testing.T) {
 	fixtures[9].repo.Disabled = true
 	fixtures[10].repo.FirstNotFoundAt = new(int64)
 	for _, row := range fixtures {
+		row.repo.LastSuccessAt = new(time.Now().UnixMilli())
 		if err := db.Create(&row.repo).Error; err != nil {
 			t.Fatal(err)
+		}
+		if row.repo.RepoID != 14 {
+			summary := storage.AISummary{RepoID: row.repo.RepoID, SummaryStatus: consts.StatusReady, SourceQuality: consts.SourceSufficient,
+				SummaryZh: "项目导读。", FeaturesJSON: "[]", AudienceJSON: "[]", ValueTagsJSON: "[]"}
+			if err := db.Create(&summary).Error; err != nil {
+				t.Fatal(err)
+			}
 		}
 		if row.values == nil {
 			continue
@@ -106,6 +115,9 @@ func TestSimilarRanksAndFiltersSQLiteVectors(t *testing.T) {
 	assertMatches(1, 2, 3)
 	assertMatches(4, 13)
 	assertMatches(12)
+	if _, err := Similar(db, cfg, 14); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("未发布仓库的相似入口应关闭，得到 %v", err)
+	}
 	if err := db.Model(&storage.Repository{}).Where(repos.RepoID+" = ?", 2).Update(repos.Blocked, true).Error; err != nil {
 		t.Fatal(err)
 	}

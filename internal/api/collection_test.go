@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/auth"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/settings"
@@ -25,9 +27,19 @@ import (
 	"github.com/lifei6671/github-radar/migrations"
 )
 
+const testAdminPassword = "test-admin-password"
+
+var testAdminHash = sync.OnceValue(func() string {
+	hash, err := auth.HashPassword(testAdminPassword)
+	if err != nil {
+		panic(err)
+	}
+	return hash
+})
+
 func testAdminConfig(cfg config.Config) config.Config {
 	cfg.Server.SiteURL = "http://example.com"
-	cfg.Auth = config.Auth{AdminPassword: "test-admin-password", SessionSecret: "test-session-signing-secret-at-least-32-bytes"}
+	cfg.Auth = config.Auth{AdminPassword: testAdminHash(), SessionSecret: "test-session-signing-secret-at-least-32-bytes"}
 	return cfg
 }
 
@@ -190,11 +202,12 @@ func TestRepositoryBlockAdminAndPublicContracts(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := storage.Repository{RepoID: 21, Owner: "owner", Name: "blocked", FullName: "owner/blocked",
-		NameIsCurrent: true, HTMLURL: "https://github.com/owner/blocked", TopicsJSON: "[]", Grade: "A", State: "active"}
+		NameIsCurrent: true, HTMLURL: "https://github.com/owner/blocked", TopicsJSON: "[]", Grade: "A", State: "active", LastSuccessAt: new(time.Now().UnixMilli())}
 	if err := db.Create(&repo).Error; err != nil {
 		t.Fatal(err)
 	}
 	path := "/api/v1/repos/21/block"
+	seedReadySummary(t, db, repo.RepoID, *repo.LastSuccessAt)
 	request(t, router, "PATCH", path, `{"blocked":true}`, "", 401)
 	request(t, router, "PATCH", path, `{}`, "admin", 400)
 	request(t, router, "PATCH", path, `{"blocked":true}`, "admin", 200)
@@ -222,17 +235,18 @@ func TestAITopicsClassificationAndGitHubPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 	repo := storage.Repository{RepoID: 1, Owner: "owner", Name: "repo", FullName: "owner/repo", NameIsCurrent: true,
-		HTMLURL: "https://github.com/owner/repo", TopicsJSON: "[]", Grade: "A", State: "active"}
+		HTMLURL: "https://github.com/owner/repo", TopicsJSON: "[]", Grade: "A", State: "active", LastSuccessAt: new(time.Now().UnixMilli())}
 	if err := db.Create(&repo).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: `["mcp"]`}).Error; err != nil {
 		t.Fatal(err)
 	}
+	seedReadySummary(t, db, repo.RepoID, *repo.LastSuccessAt)
 	for _, tc := range []struct {
 		topics, category string
 		inferred         bool
-	}{{"[]", "mcp", true}, {`["unmapped"]`, "other", false}} {
+	}{{"[]", "mcp", true}, {`["unmapped"]`, "other", true}, {`["mcp","mcp-server"]`, "mcp", false}} {
 		if err := db.Model(&repo).Update("topics_json", tc.topics).Error; err != nil {
 			t.Fatal(err)
 		}

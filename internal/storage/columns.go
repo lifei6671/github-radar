@@ -17,6 +17,7 @@ const (
 	RateLimitTable             = "rate_limits"
 	RepoAITopicsTable          = "repo_ai_topics"
 	RepoReadmeTranslationTable = "repo_readme_translations"
+	RepoReadmeDocumentTable    = "repo_readme_documents"
 	RepoSnapshotTable          = "repo_snapshots"
 	RepositoryTable            = "repositories"
 	SearchObservationTable     = "search_observations"
@@ -65,6 +66,7 @@ var AISummaryColumns = struct {
 	SourceFingerprint    string
 	SourceQuality        string
 	SourceLanguage       string
+	TitleZh              string
 	SummaryZh            string
 	RecommendationReason string
 	FeaturesJSON         string
@@ -82,6 +84,7 @@ var AISummaryColumns = struct {
 	SourceFingerprint:    "source_fingerprint",
 	SourceQuality:        "source_quality",
 	SourceLanguage:       "source_language",
+	TitleZh:              "title_zh",
 	SummaryZh:            "summary_zh",
 	RecommendationReason: "recommendation_reason",
 	FeaturesJSON:         "features_json",
@@ -154,6 +157,7 @@ var DiscoveryRuleColumns = struct {
 	SourceType      string
 	SourceKey       string
 	Query           string
+	MinStars        string
 	Enabled         string
 	IntervalMinutes string
 	NextRunAt       string
@@ -164,6 +168,7 @@ var DiscoveryRuleColumns = struct {
 	SourceType:      "source_type",
 	SourceKey:       "source_key",
 	Query:           "query",
+	MinStars:        "min_stars",
 	Enabled:         "enabled",
 	IntervalMinutes: "interval_minutes",
 	NextRunAt:       "next_run_at",
@@ -277,6 +282,8 @@ var PendingMetricColumns = struct {
 
 // ProjectThemeColumns 对应 ProjectTheme 的 GORM 字段。
 var ProjectThemeColumns = struct {
+	AliasesJSON string
+	OwnersJSON  string
 	GroupSlug   string
 	Icon        string
 	IconColor   string
@@ -286,6 +293,8 @@ var ProjectThemeColumns = struct {
 	TopicsJSON  string
 	Position    string
 }{
+	AliasesJSON: "aliases_json",
+	OwnersJSON:  "owners_json",
 	GroupSlug:   "group_slug",
 	Icon:        "icon",
 	IconColor:   "icon_color",
@@ -330,6 +339,8 @@ var RateLimitColumns = struct {
 
 // RepoAITopicsColumns 对应 RepoAITopics 的 GORM 字段。
 var RepoAITopicsColumns = struct {
+	ThemeSlugsJSON    string
+	ThemeCatalogKey   string
 	RepoID            string
 	TopicsJSON        string
 	SourceFingerprint string
@@ -338,6 +349,8 @@ var RepoAITopicsColumns = struct {
 	PromptVersion     string
 	GeneratedAt       string
 }{
+	ThemeSlugsJSON:    "theme_slugs_json",
+	ThemeCatalogKey:   "theme_catalog_key",
 	RepoID:            "repo_id",
 	TopicsJSON:        "topics_json",
 	SourceFingerprint: "source_fingerprint",

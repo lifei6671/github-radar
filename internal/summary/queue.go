@@ -19,6 +19,7 @@ import (
 
 const JobType = consts.JobRefreshSummary
 const TranslationJob = consts.JobTranslateReadme
+const ReportJob = consts.JobComposeReport
 
 var unresolved = "('" + consts.StatusPending + "','" + consts.StatusRunning + "','" + consts.StatusFailed + "','" + consts.StatusUnknown + "')"
 
@@ -31,11 +32,39 @@ type Queue struct {
 	DB           *gorm.DB
 	AI           config.AI
 	LeaseSeconds int
+	Pacing       storage.JobPacing
 }
 
 type payload struct {
-	Manual bool `json:"manual,omitempty"`
-	Force  bool `json:"force,omitempty"`
+	Manual     bool `json:"manual,omitempty"`
+	Force      bool `json:"force,omitempty"`
+	TopicsOnly bool `json:"topicsOnly,omitempty"`
+}
+
+func jobTopicsOnly(job storage.Job) bool {
+	var p payload
+	return json.Unmarshal([]byte(job.PayloadJSON), &p) == nil && p.TopicsOnly
+}
+
+func (q Queue) setTopicScope(ctx context.Context, job *storage.Job, topicsOnly bool) error {
+	var p payload
+	if err := json.Unmarshal([]byte(job.PayloadJSON), &p); err != nil {
+		return err
+	}
+	if p.TopicsOnly == topicsOnly {
+		return nil
+	}
+	p.TopicsOnly = topicsOnly
+	data, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	if err := checked(fence(q.DB.WithContext(ctx), *job, time.Now().UnixMilli()).
+		Update(storage.JobColumns.PayloadJSON, string(data))); err != nil {
+		return err
+	}
+	job.PayloadJSON = string(data)
+	return nil
 }
 
 type Decision struct {
@@ -110,14 +139,18 @@ func (q Queue) manual(ctx context.Context, jobType string, id int64, requestID s
 			}
 			if check.NextCheckAt > now.UnixMilli() && cached.SummaryStatus == consts.StatusReady &&
 				check.SourceFingerprint == fingerprint && q.matches(cached, fingerprint) &&
-				(!available || cached.RecommendationReason != nil) {
-				d.Cached = !available || len(repo.GitHubTopics()) > 0
+				(!available || hasStructuredSummary(cached)) {
+				catalog, err := storage.ReadThemeCatalog(tx)
+				if err != nil {
+					return err
+				}
+				d.Cached = !available || !catalog.NeedsAI(repo.GitHubTopics())
 				if !d.Cached {
 					var topics storage.RepoAITopics
 					if err := tx.Find(&topics, storage.RepoAITopicsColumns.RepoID+"=?", id).Error; err != nil {
 						return err
 					}
-					d.Cached = q.matchesTopicModel(topics) &&
+					d.Cached = q.matchesTopicModel(topics) && topics.ThemeCatalogKey == catalog.Key &&
 						strings.HasPrefix(topics.SourceFingerprint, fingerprint+"|")
 					if d.Cached && repo.LastSuccessAt != nil && *repo.LastSuccessAt >= check.LastCheckedAt {
 						description := ""
@@ -150,13 +183,16 @@ func (q Queue) RetryUnknown(ctx context.Context, id int64, requestID string, ava
 	var next storage.Job
 	err := q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var old storage.Job
-		if err := tx.Take(&old, storage.JobColumns.ID+"=? AND "+storage.JobColumns.Type+" IN (?,?)", id, JobType, TranslationJob).Error; err != nil {
+		if err := tx.Take(&old, storage.JobColumns.ID+"=? AND "+storage.JobColumns.Type+" IN (?,?,?)", id, JobType, TranslationJob, ReportJob).Error; err != nil {
 			return err
 		}
-		if old.RepoID == nil {
+		if old.RepoID == nil && old.Type != ReportJob {
 			return ErrRepoUnavailable
 		}
-		key := manualKey(old.Type, *old.RepoID, requestID)
+		key := fmt.Sprintf("%s:retry:%d:%s", ReportJob, id, requestID)
+		if old.Type != ReportJob {
+			key = manualKey(old.Type, *old.RepoID, requestID)
+		}
 		if err := tx.Find(&next, storage.JobColumns.DedupKey+"=?", key).Error; err != nil {
 			return err
 		}
@@ -172,15 +208,17 @@ func (q Queue) RetryUnknown(ctx context.Context, id int64, requestID string, ava
 		if !available {
 			return ErrUnavailable
 		}
-		var repo storage.Repository
-		if err := tx.Take(&repo, storage.RepositoryColumns.RepoID+"=?", *old.RepoID).Error; err != nil {
-			return err
-		}
-		if repo.Blocked {
-			return storage.ErrRepositoryBlocked
-		}
-		if repo.Disabled || !repo.NameIsCurrent || repo.State == consts.StatusUnavailable {
-			return ErrRepoUnavailable
+		if old.Type != ReportJob {
+			var repo storage.Repository
+			if err := tx.Take(&repo, storage.RepositoryColumns.RepoID+"=?", *old.RepoID).Error; err != nil {
+				return err
+			}
+			if repo.Blocked {
+				return storage.ErrRepositoryBlocked
+			}
+			if repo.Disabled || !repo.NameIsCurrent || repo.State == consts.StatusUnavailable {
+				return ErrRepoUnavailable
+			}
 		}
 		ms := now.UnixMilli()
 		if err := tx.Model(&storage.AICall{}).Where(storage.AICallColumns.JobID+"=? AND "+storage.AICallColumns.Status+"='"+consts.StatusUnknown+"'", id).
@@ -190,8 +228,21 @@ func (q Queue) RetryUnknown(ctx context.Context, id int64, requestID string, ava
 		if err := tx.Model(&old).Updates(map[string]any{storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LastErrorCode: consts.CodeUnknownAcknowledged, storage.JobColumns.UpdatedAt: ms}).Error; err != nil {
 			return err
 		}
+		if old.Type == ReportJob {
+			var p reportPayload
+			if err := json.Unmarshal([]byte(old.PayloadJSON), &p); err != nil {
+				return err
+			}
+			p.Manual = true
+			var err error
+			next, err = q.reportJob(p, key, 200, ms)
+			if err != nil {
+				return err
+			}
+			return tx.Create(&next).Error
+		}
 		var err error
-		next, err = q.insert(tx, old.Type, *old.RepoID, key, payload{Manual: true, Force: true}, 200, ms)
+		next, err = q.insert(tx, old.Type, *old.RepoID, key, payload{Manual: true, Force: true, TopicsOnly: jobTopicsOnly(old)}, 200, ms)
 		return err
 	})
 	return next, err
@@ -215,13 +266,13 @@ func (q Queue) Recover(ctx context.Context, now time.Time) error {
 		if err := tx.Exec(fmt.Sprintf(`
 UPDATE %[1]s SET %[2]s='%[3]s',%[4]s='%[5]s',%[6]s=?
 WHERE %[2]s='%[7]s' AND %[8]s IN (
- SELECT %[9]s FROM %[10]s WHERE %[11]s IN (?,?) AND %[12]s='%[13]s' AND %[14]s<=?
+ SELECT %[9]s FROM %[10]s WHERE %[11]s IN (?,?,?) AND %[12]s='%[13]s' AND %[14]s<=?
 )`,
-			storage.AICallTable, storage.AICallColumns.Status, consts.StatusUnknown, storage.AICallColumns.ErrorCode, consts.CodeAIDeliveryUnknown, storage.AICallColumns.UpdatedAt, consts.StatusSending, storage.AICallColumns.JobID, storage.JobColumns.ID, storage.JobTable, storage.JobColumns.Type, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.LeaseUntil), ms, JobType, TranslationJob, ms).Error; err != nil {
+			storage.AICallTable, storage.AICallColumns.Status, consts.StatusUnknown, storage.AICallColumns.ErrorCode, consts.CodeAIDeliveryUnknown, storage.AICallColumns.UpdatedAt, consts.StatusSending, storage.AICallColumns.JobID, storage.JobColumns.ID, storage.JobTable, storage.JobColumns.Type, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.LeaseUntil), ms, JobType, TranslationJob, ReportJob, ms).Error; err != nil {
 			return err
 		}
-		unknown := tx.Model(&storage.Job{}).Where(fmt.Sprintf("%[1]s IN (?,?) AND %[2]s='%[3]s' AND %[4]s<=? AND EXISTS (SELECT 1 FROM %[5]s a WHERE a.%[6]s=%[7]s.%[8]s AND a.%[9]s='%[10]s')",
-			storage.JobColumns.Type, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.LeaseUntil, storage.AICallTable, storage.AICallColumns.JobID, storage.JobTable, storage.JobColumns.ID, storage.AICallColumns.Status, consts.StatusUnknown), JobType, TranslationJob, ms)
+		unknown := tx.Model(&storage.Job{}).Where(fmt.Sprintf("%[1]s IN (?,?,?) AND %[2]s='%[3]s' AND %[4]s<=? AND EXISTS (SELECT 1 FROM %[5]s a WHERE a.%[6]s=%[7]s.%[8]s AND a.%[9]s='%[10]s')",
+			storage.JobColumns.Type, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.LeaseUntil, storage.AICallTable, storage.AICallColumns.JobID, storage.JobTable, storage.JobColumns.ID, storage.AICallColumns.Status, consts.StatusUnknown), JobType, TranslationJob, ReportJob, ms)
 		var affected []storage.Job
 		if err := unknown.Find(&affected).Error; err != nil {
 			return err
@@ -231,7 +282,7 @@ WHERE %[2]s='%[7]s' AND %[8]s IN (
 				return err
 			}
 			if job.Type == JobType {
-				if err := q.recordFailure(tx, *job.RepoID, consts.CodeAIDeliveryUnknown, now); err != nil {
+				if err := q.recordFailure(tx, *job.RepoID, consts.CodeAIDeliveryUnknown, now, !jobTopicsOnly(job)); err != nil {
 					return err
 				}
 			}
@@ -240,13 +291,13 @@ WHERE %[2]s='%[7]s' AND %[8]s IN (
 		if err := tx.Exec(fmt.Sprintf(`
 UPDATE %[1]s SET %[2]s='%[3]s',%[4]s='%[5]s',%[6]s=?
 WHERE %[2]s='%[7]s' AND %[8]s IN (
- SELECT %[9]s FROM %[10]s WHERE %[11]s IN (?,?) AND %[12]s='%[13]s' AND %[14]s<=? AND %[15]s>=%[16]s
+ SELECT %[9]s FROM %[10]s WHERE %[11]s IN (?,?,?) AND %[12]s='%[13]s' AND %[14]s<=? AND %[15]s>=%[16]s
 )`,
-			storage.AICallTable, storage.AICallColumns.Status, consts.StatusFailed, storage.AICallColumns.ErrorCode, consts.CodeLeaseExpired, storage.AICallColumns.UpdatedAt, consts.StatusReserved, storage.AICallColumns.JobID, storage.JobColumns.ID, storage.JobTable, storage.JobColumns.Type, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.LeaseUntil, storage.JobColumns.Attempts, storage.JobColumns.MaxAttempts), ms, JobType, TranslationJob, ms).Error; err != nil {
+			storage.AICallTable, storage.AICallColumns.Status, consts.StatusFailed, storage.AICallColumns.ErrorCode, consts.CodeLeaseExpired, storage.AICallColumns.UpdatedAt, consts.StatusReserved, storage.AICallColumns.JobID, storage.JobColumns.ID, storage.JobTable, storage.JobColumns.Type, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.LeaseUntil, storage.JobColumns.Attempts, storage.JobColumns.MaxAttempts), ms, JobType, TranslationJob, ReportJob, ms).Error; err != nil {
 			return err
 		}
 		var expired []storage.Job
-		if err := tx.Where(storage.JobColumns.Type+" IN (?,?) AND "+storage.JobColumns.Status+"='"+consts.StatusRunning+"' AND "+storage.JobColumns.LeaseUntil+"<=? AND "+storage.JobColumns.Attempts+">="+storage.JobColumns.MaxAttempts, JobType, TranslationJob, ms).Find(&expired).Error; err != nil {
+		if err := tx.Where(storage.JobColumns.Type+" IN (?,?,?) AND "+storage.JobColumns.Status+"='"+consts.StatusRunning+"' AND "+storage.JobColumns.LeaseUntil+"<=? AND "+storage.JobColumns.Attempts+">="+storage.JobColumns.MaxAttempts, JobType, TranslationJob, ReportJob, ms).Find(&expired).Error; err != nil {
 			return err
 		}
 		for _, job := range expired {
@@ -254,7 +305,7 @@ WHERE %[2]s='%[7]s' AND %[8]s IN (
 				return err
 			}
 			if job.Type == JobType {
-				if err := q.recordFailure(tx, *job.RepoID, consts.CodeLeaseExpired, now); err != nil {
+				if err := q.recordFailure(tx, *job.RepoID, consts.CodeLeaseExpired, now, !jobTopicsOnly(job)); err != nil {
 					return err
 				}
 			}
@@ -263,19 +314,44 @@ WHERE %[2]s='%[7]s' AND %[8]s IN (
 	})
 }
 
-func (q Queue) claim(ctx context.Context, now time.Time) (*storage.Job, error) {
+func (q Queue) claim(ctx context.Context, now time.Time, withModel, withRepo bool) (*storage.Job, error) {
+	return q.Pacing.Claim(q.DB.WithContext(ctx), now, func(db *gorm.DB, deferred []string) (*storage.Job, error) {
+		return q.claimReady(db, now, withModel, withRepo, deferred)
+	})
+}
+
+func (q Queue) claimReady(db *gorm.DB, now time.Time, withModel, withRepo bool, deferred []string) (*storage.Job, error) {
 	var job storage.Job
-	err := q.DB.WithContext(ctx).Raw(fmt.Sprintf(`
+	err := db.Raw(fmt.Sprintf(`
 UPDATE %[1]s SET %[2]s='%[3]s',%[4]s=%[4]s+1,%[5]s=?,%[6]s=?,%[7]s=?
-WHERE %[8]s=(SELECT %[8]s FROM %[1]s WHERE %[9]s IN (?,?) AND %[4]s<%[10]s AND %[11]s<=?
+WHERE %[8]s=(SELECT %[8]s FROM %[1]s WHERE %[9]s IN (?,?,?) AND %[4]s<%[10]s AND %[11]s<=?
+AND (? OR %[9]s=?)
+AND (? OR (%[9]s=? AND COALESCE(json_extract(%[18]s,'$.manual'),0)=0))
 AND (%[2]s IN ('%[12]s','%[13]s') OR (%[2]s='%[3]s' AND %[6]s<=?))
-AND EXISTS(SELECT 1 FROM %[14]s r WHERE r.%[15]s=%[1]s.%[16]s AND r.%[17]s=0)
+AND (%[9]s=? OR EXISTS(SELECT 1 FROM %[14]s r WHERE r.%[15]s=%[1]s.%[16]s AND r.%[17]s=0))
 AND (json_extract(%[1]s.%[18]s,'$.manual')=1 OR NOT EXISTS(
  SELECT 1 FROM %[19]s s WHERE s.%[20]s=? AND json_extract(s.%[21]s,'$')=1))
+AND (json_extract(%[1]s.%[18]s,'$.manual')=1 OR COALESCE(%[9]s IN ?,0)=0)
 AND NOT EXISTS(SELECT 1 FROM %[22]s a WHERE a.%[23]s=%[1]s.%[8]s AND a.%[24]s IN ('%[25]s','%[26]s'))
-ORDER BY %[27]s DESC,%[11]s,%[8]s LIMIT 1) RETURNING *`,
+AND NOT EXISTS(SELECT 1 FROM %[1]s sibling WHERE (
+ (sibling.%[16]s=%[1]s.%[16]s AND sibling.%[9]s IN (?,?) AND sibling.%[9]s<>%[1]s.%[9]s)
+ OR (%[1]s.%[9]s=? AND sibling.%[9]s=%[1]s.%[9]s AND sibling.%[8]s<>%[1]s.%[8]s
+  AND json_extract(sibling.%[18]s,'$.kind')=json_extract(%[1]s.%[18]s,'$.kind')
+  AND json_extract(sibling.%[18]s,'$.key')=json_extract(%[1]s.%[18]s,'$.key')))
+ AND ((sibling.%[2]s='%[3]s' AND (sibling.%[6]s>? OR EXISTS(
+  SELECT 1 FROM %[22]s a WHERE a.%[23]s=sibling.%[8]s AND a.%[24]s='%[25]s')))
+ OR (%[1]s.%[9]s=? AND sibling.%[2]s='%[26]s'
+  AND json_extract(sibling.%[18]s,'$.fingerprint')=json_extract(%[1]s.%[18]s,'$.fingerprint'))))
+ORDER BY (%[27]s>=200) DESC,
+CASE WHEN %[9]s=? AND EXISTS (
+ SELECT 1 FROM ai_summaries s LEFT JOIN repo_readme_documents d ON d.repo_id=s.repo_id
+ LEFT JOIN summary_checks c ON c.repo_id=s.repo_id
+ WHERE s.repo_id=%[1]s.%[16]s AND s.summary_status='ready' AND d.repo_id IS NULL
+ AND c.source_language='zh'
+) THEN 1 ELSE 0 END DESC,
+%[27]s DESC,%[11]s,%[8]s LIMIT 1) RETURNING *`,
 		storage.JobTable, storage.JobColumns.Status, consts.StatusRunning, storage.JobColumns.Attempts, storage.JobColumns.LeaseToken, storage.JobColumns.LeaseUntil, storage.JobColumns.UpdatedAt, storage.JobColumns.ID, storage.JobColumns.Type, storage.JobColumns.MaxAttempts, storage.JobColumns.AvailableAt, consts.StatusPending, consts.StatusFailed, storage.RepositoryTable, storage.RepositoryColumns.RepoID, storage.JobColumns.RepoID, storage.RepositoryColumns.Blocked, storage.JobColumns.PayloadJSON, storage.SystemSettingTable, storage.SystemSettingColumns.Key, storage.SystemSettingColumns.ValueJSON, storage.AICallTable, storage.AICallColumns.JobID, storage.AICallColumns.Status, consts.StatusSending, consts.StatusUnknown, storage.JobColumns.Priority),
-		rand.Text(), now.Add(time.Duration(q.LeaseSeconds)*time.Second).UnixMilli(), now.UnixMilli(), JobType, TranslationJob, now.UnixMilli(), now.UnixMilli(), storage.AutoAIResumeKey).Scan(&job).Error
+		rand.Text(), now.Add(time.Duration(q.LeaseSeconds)*time.Second).UnixMilli(), now.UnixMilli(), JobType, TranslationJob, ReportJob, now.UnixMilli(), withRepo, ReportJob, withModel, JobType, now.UnixMilli(), ReportJob, storage.AutoAIResumeKey, deferred, JobType, TranslationJob, ReportJob, now.UnixMilli(), ReportJob, JobType).Scan(&job).Error
 	if err != nil || job.ID == 0 {
 		return nil, err
 	}
@@ -313,9 +389,12 @@ func jobFields(status, code string, now, next int64, attempts int) map[string]an
 		storage.JobColumns.UpdatedAt: now, storage.JobColumns.AvailableAt: next, storage.JobColumns.Attempts: attempts}
 }
 
-func (q Queue) recordFailure(tx *gorm.DB, repoID int64, code string, now time.Time) error {
-	if err := tx.Model(&storage.AISummary{}).Where(storage.AISummaryColumns.RepoID+"=?", repoID).Update(storage.AISummaryColumns.SummaryStatus, consts.StatusStale).Error; err != nil {
-		return err
+func (q Queue) recordFailure(tx *gorm.DB, repoID int64, code string, now time.Time, staleSummary bool) error {
+	if staleSummary {
+		if err := tx.Model(&storage.AISummary{}).Where(storage.AISummaryColumns.RepoID+"=?", repoID).
+			Update(storage.AISummaryColumns.SummaryStatus, consts.StatusStale).Error; err != nil {
+			return err
+		}
 	}
 	next := now.Add(time.Duration(q.AI.Summary.HighCheckHours) * time.Hour).UnixMilli()
 	row := storage.SummaryCheck{RepoID: repoID, LastErrorCode: &code, NextCheckAt: next}

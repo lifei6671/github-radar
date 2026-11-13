@@ -65,6 +65,8 @@ func (CategorySetting) TableName() string { return CategorySettingTable }
 
 // ProjectTheme 显式映射专题表，主题匹配词与展示顺序由后台维护。
 type ProjectTheme struct {
+	AliasesJSON string `gorm:"column:aliases_json;default:'[]'"`
+	OwnersJSON  string `gorm:"column:owners_json;default:'[]'"`
 	GroupSlug   string `gorm:"column:group_slug"`
 	Icon        string `gorm:"column:icon"`
 	IconColor   string `gorm:"column:icon_color"`

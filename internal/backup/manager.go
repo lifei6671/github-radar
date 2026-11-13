@@ -31,6 +31,11 @@ type Workers interface {
 	Resume()
 }
 
+type RuntimeReloader interface {
+	RestoreRuntime(config.Runtime) error
+	RestartRequired() bool
+}
+
 type Operation struct {
 	ID              string     `json:"id"`
 	Kind            string     `json:"kind"`
@@ -67,6 +72,7 @@ type receipt struct {
 
 type liveState struct {
 	settings        Settings
+	runtime         config.Runtime
 	initialized     bool
 	aiPaused        bool
 	restartRequired bool
@@ -88,6 +94,7 @@ type Manager struct {
 	db            *gorm.DB
 	cfg           config.Config
 	workers       Workers
+	runtime       RuntimeReloader
 	store         factory
 	staging       string
 	mu            sync.Mutex
@@ -107,7 +114,7 @@ type Manager struct {
 	wg            sync.WaitGroup
 }
 
-func New(ctx context.Context, pool *sql.DB, db *gorm.DB, cfg config.Config, workers Workers) (*Manager, error) {
+func New(ctx context.Context, pool *sql.DB, db *gorm.DB, cfg config.Config, workers Workers, runtime ...RuntimeReloader) (*Manager, error) {
 	path, err := filepath.Abs(cfg.Storage.Path)
 	if err != nil {
 		return nil, ErrDatabase
@@ -115,6 +122,9 @@ func New(ctx context.Context, pool *sql.DB, db *gorm.DB, cfg config.Config, work
 	m := &Manager{root: ctx, pool: pool, db: db, cfg: cfg, workers: workers, store: newR2,
 		staging:    filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".radar-backup-staging"),
 		operations: make(map[string]Operation), sessions: make(map[string]setupSession), wake: make(chan struct{}, 1)}
+	if len(runtime) > 0 {
+		m.runtime = runtime[0]
+	}
 	if err := m.prepareStaging(); err != nil {
 		return nil, err
 	}
@@ -179,7 +189,10 @@ func (m *Manager) readLive(ctx context.Context) (liveState, error) {
 	if err != nil || runtime.Settings.Validate() != nil {
 		return state, ErrDatabase
 	}
-	state.restartRequired = !reflect.DeepEqual(runtime.Settings, m.cfg.RuntimeSettings())
+	state.runtime = runtime.Settings
+	if m.runtime == nil {
+		state.restartRequired = !reflect.DeepEqual(runtime.Settings, m.cfg.RuntimeSettings())
+	}
 	rows := []storage.MaintenanceState{}
 	if err := m.db.WithContext(ctx).Where(storage.MaintenanceStateColumns.Key+" IN ?", []string{receiptKey, lastBackupKey, backupDayKey, cleanupDayKey}).Find(&rows).Error; err != nil {
 		return state, ErrDatabase
@@ -261,10 +274,14 @@ func (m *Manager) Status() Status {
 	if restore == nil && m.state.receipt.OperationID != "" {
 		restore, _ = m.operationLocked(m.state.receipt.OperationID)
 	}
+	restart := m.state.restartRequired
+	if m.runtime != nil {
+		restart = m.runtime.RestartRequired()
+	}
 	return Status{Initialized: m.state.initialized, Restoring: m.busy == consts.OperationRestore, Maintenance: m.blocked,
 		LastBackup: m.state.lastBackup, LastBackupOperation: backup, LastCleanup: cleanup, LastRestore: restore,
 		NextBackupAt: view.NextBackupAt, NextCleanupAt: view.NextCleanupAt,
-		AutoAIResumeRequired: m.state.aiPaused, RestartRequired: m.state.restartRequired}
+		AutoAIResumeRequired: m.state.aiPaused, RestartRequired: restart}
 }
 
 func (m *Manager) operationLocked(id string) (*Operation, error) {

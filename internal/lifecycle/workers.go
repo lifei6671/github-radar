@@ -36,12 +36,47 @@ func RecordSettlement(ctx context.Context, err error) {
 }
 
 type cycle struct {
-	cancel context.CancelCauseFunc
-	done   chan struct{}
-	drain  *Drain
+	cancel   context.CancelCauseFunc
+	done     chan struct{}
+	drain    *Drain
+	stop     chan struct{}
+	retiring bool
 }
 
-// Workers 使用同一组服务实例切换运行状态。排空超时后的恢复也不会启动重复 Worker。
+type stopSchedulingKey struct{}
+
+// SchedulingDone 停止领取新任务，正在执行的任务继续使用未取消的上下文。
+func SchedulingDone(ctx context.Context) <-chan struct{} {
+	done, _ := ctx.Value(stopSchedulingKey{}).(<-chan struct{})
+	return done
+}
+
+func Stopping(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	case <-SchedulingDone(ctx):
+		return true
+	default:
+		return false
+	}
+}
+
+// Wait 在到达下次执行时间时返回 true，配置切换和服务退出均可唤醒空闲 Worker。
+func Wait(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-SchedulingDone(ctx):
+		return false
+	case <-timer.C:
+		return !Stopping(ctx)
+	}
+}
+
+// Workers 切换后台任务组，前一组退出后才会启动下一组。
 type Workers struct {
 	root     context.Context
 	run      func(context.Context) error
@@ -63,12 +98,23 @@ func (w *Workers) Resume() {
 	w.startLocked()
 }
 
+// Refresh 让当前任务组自然收尾，然后使用最新配置启动下一组。
+func (w *Workers) Refresh() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if running := w.current; running != nil && !running.retiring {
+		running.retiring = true
+		close(running.stop)
+	}
+}
+
 func (w *Workers) startLocked() {
 	if !w.wanted || w.current != nil || w.root.Err() != nil {
 		return
 	}
 	ctx, cancel := context.WithCancelCause(w.root)
-	running := &cycle{cancel: cancel, done: make(chan struct{})}
+	running := &cycle{cancel: cancel, done: make(chan struct{}), stop: make(chan struct{})}
+	ctx = context.WithValue(ctx, stopSchedulingKey{}, (<-chan struct{})(running.stop))
 	w.current = running
 	w.wg.Add(1)
 	go func() {
@@ -81,7 +127,7 @@ func (w *Workers) startLocked() {
 		defer w.mu.Unlock()
 		w.current = nil
 		close(running.done)
-		if paused {
+		if paused || (running.retiring && err == nil) {
 			w.startLocked()
 		} else if w.root.Err() == nil && err != nil {
 			w.failures <- err

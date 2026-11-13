@@ -7,9 +7,9 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -144,7 +144,7 @@ func cleanTrending(db *gorm.DB, cutoff int64, limit int) error {
 					Delete(&storage.TrendingObservation{}).Error; err != nil {
 					return err
 				}
-				if err := tx.Where(storage.MaintenanceStateColumns.Key+"=? AND json_extract("+storage.MaintenanceStateColumns.Value+",'$.observedSlot')=?", collector.BatchKey(batch.SourceKey, batch.Window), batch.ObservedSlot).
+				if err := tx.Where(storage.MaintenanceStateColumns.Key+"=? AND json_extract("+storage.MaintenanceStateColumns.Value+",'$.observedSlot')=?", collection.BatchKey(batch.SourceKey, batch.Window), batch.ObservedSlot).
 					Delete(&storage.MaintenanceState{}).Error; err != nil {
 					return err
 				}

@@ -30,6 +30,7 @@ type Snapshot struct {
 	Settings           config.Runtime     `json:"settings"`
 	DiscoveryTabs      []DiscoveryTab     `json:"discoveryTabs"` // nil 跟随分类映射，空数组只显示「全部」。
 	DiscoverySelection DiscoverySelection `json:"discoverySelection"`
+	DiscoveryRanking   DiscoveryRanking   `json:"discoveryRanking"`
 }
 
 type Store struct{ DB *gorm.DB }
@@ -46,7 +47,9 @@ func read(tx *gorm.DB) (Snapshot, error) {
 	snapshot.Settings.AI.Summary = config.DefaultSummary()
 	snapshot.Settings.Embedding = config.DefaultEmbedding()
 	snapshot.Settings.Recommendations = config.DefaultRecommendations()
+	snapshot.Settings.ReportPublication = config.DefaultReportPublication()
 	snapshot.DiscoverySelection = defaultDiscoverySelection()
+	snapshot.DiscoveryRanking = defaultDiscoveryRanking()
 	if err := json.Unmarshal([]byte(row.ValueJSON), &snapshot); err != nil {
 		return Snapshot{}, fmt.Errorf("解析数据库运行设置: %w", err)
 	}
@@ -110,7 +113,7 @@ func (s Store) Initialize(ctx context.Context, seed config.Config) (Snapshot, er
 				return err
 			}
 		}
-		snapshot = Snapshot{Revision: 1, Settings: values, DiscoverySelection: defaultDiscoverySelection()}
+		snapshot = Snapshot{Revision: 1, Settings: values, DiscoverySelection: defaultDiscoverySelection(), DiscoveryRanking: defaultDiscoveryRanking()}
 		return write(tx, snapshot)
 	})
 	return snapshot, err
@@ -120,7 +123,7 @@ func (s Store) Get(ctx context.Context) (Snapshot, error) {
 	return read(s.DB.WithContext(ctx))
 }
 
-// SaveRuntime 保存下一次启动使用的进程级设置。
+// SaveRuntime 校验并保存运行设置。调用方在提交后发布可热更新的部分。
 func (s Store) SaveRuntime(ctx context.Context, revision int64, values config.Runtime) (Snapshot, error) {
 	if err := values.Validate(); err != nil {
 		return Snapshot{}, &Invalid{Err: err}

@@ -22,7 +22,7 @@
 3. 非中文仓库到底做什么？能否直接阅读 200～500 字的准确中文总结？
 4. 哪些项目值得进一步复现和用于公众号选题？
 
-**核心链路：发现候选 → 仓库建档 → 分级跟踪 Star → 计算趋势 → 筛选非中文候选 → 临时获取 README → AI 总结 → 展示/收藏选题。**
+**核心链路：发现候选 → 仓库建档 → 分级跟踪 Star → 计算趋势 → 筛选待分析项目 → 临时获取 README → AI 总结 → 展示/收藏选题。**
 
 本系统是单用户的热点发现与选题辅助工具，优先保证数据时效、解释性、低运行成本和简单部署。
 
@@ -32,7 +32,7 @@
 - 每次仓库元数据采集读取当前 **stargazers_count**，按实际时间写入短期 Star 快照。
 - 自动计算 24 小时、7 天等窗口的增长数据，并显示数据覆盖质量。
 - 使用 Star 动量、加速度、上榜情况、持续性等信号发现热点；项目适用性与热度分别评分。
-- 非中文仓库按条件触发大模型摘要，产出**中文 200～500 字的自然语言项目介绍**及少量结构化标签。
+- 仓库按条件触发大模型摘要，产出**中文 200～500 字的自然语言项目介绍**及少量结构化标签。
 - **README 原文仅在分析任务和详情读取时保存在进程内存；SQLite 只缓存当前版本的译文片段。**
 - 数据库只保留仓库元信息、短期 Star 快照、聚合趋势、榜单观测、中文摘要、选题元数据和任务状态。
 - 原始 Star 快照到期删除；趋势聚合有限期保留；每天自动备份 SQLite 到 R2，并保留最近 5 个自然日的每日备份，超期自动清理；后台可编辑备份配置及一键恢复。
@@ -106,11 +106,12 @@ github-radar/
 │   ├── trending/              HTML 抓取、字段规范化、解析器
 │   ├── discovery/             发现源与候选去重
 │   ├── scheduler/             Cron、任务领取、租约与重试
-│   ├── collector/             仓库元数据和短期 Star 采样
-│   ├── metrics/               增量、加速度、持续性、评分、覆盖质量
+│   ├── domain/                仓库采样、增长热度、选题等领域规则
+│   ├── collector/             GitHub 发现、采样和任务执行用例
+│   ├── metrics/               读取采样、计算并发布一轮指标的用例
 │   ├── summary/               语言识别、README 临时解析、大模型 Provider、结构化输出
 │   ├── topics/                选题生成、状态与人工反馈
-│   ├── storage/               SQLite、GORM 显式映射、查询和事务
+│   ├── storage/               SQLite、GORM 显式映射及采集、指标、选题仓储适配器
 │   ├── settings/              数据库配置、首次导入及修订校验
 │   ├── maintenance/           聚合、清理与数据库优化
 │   ├── backup/                SQLite 在线快照、R2 上传清理、同进程恢复协调
@@ -127,6 +128,8 @@ github-radar/
 │   └── backup-and-restore.md
 └── tests/
 ~~~
+
+采集、指标和选题的领域规则位于 `internal/domain`，可独立计算。应用用例定义仓储接口，SQLite 适配器负责具体查询、写入和事务。采集结果提交与租约校验共用一个事务，指标、采样等级与计算水位一同发布，选题和每日水位一同发布。
 
 依赖建议：
 - Go 近期稳定版，Gin，database/sql。
@@ -620,17 +623,17 @@ H = 0.35 * Velocity24
 按 recommendations 的时刻和时区生成候选池，默认 Asia/Shanghai 每天 08:30：
 - 过滤无效仓库、重复选题和明显缺乏使用价值的项目。
 - 选择高增长、新上榜、持续增长和人工关注四类候选，保持多样性。
-- 对非中文且尚无有效摘要的高优先级项目先入 AI 任务队列。
+- 对尚无有效摘要的高优先级项目先入 AI 任务队列。
 - 将评分、证据链接、中文摘要和推荐理由保存为候选记录。
 - 手工状态：candidate / shortlisted / accepted / ignored / published。
 - 已处理项目只在重大更新、明显新增长拐点或人工触发时重新进入推荐。
 - 不自动将模型生成的功能描述当作实测结果。
 
-## 7. 非中文项目的 AI 中文摘要
+## 7. 项目的 AI 中文摘要
 
 ### 7.1 唯一持久化内容
 
-- 摘要保存 200～500 字的中文总结（资料不足时可更短）、可选的一句中文推荐理由、精简的功能/受众/用途标签、README SHA、源链接、模型/提示词版本、生成时间和处理状态。AI Topics 另存于 `repo_ai_topics`。推荐理由在同一次摘要调用中生成，只写一项有来源依据的阅读价值。旧摘要在下一次符合生成条件时补齐。
+- 摘要保存独立中文小标题、200～500 字的中文总结（资料不足时可更短）、可选的一句中文推荐理由、精简的功能/受众/用途标签、README SHA、源链接、模型/提示词版本、生成时间和处理状态。AI Topics 另存于 `repo_ai_topics`。小标题和推荐理由在同一次摘要调用中生成。旧摘要在下一次符合生成条件时补齐。
 - repo 的 description 可作为主表元数据保留。译文片段按 README SHA 与模型提示词标识保存，当前仓库只保留一版。
 - README 内容只作为临时内存数据：读取 → 清洗 → 模型调用 → 验证 → 保存总结 → 释放引用。
 - 任何临时文本不得写入 SQLite jobs.payload_json、数据库日志、结构化日志、磁盘缓存、失败追踪、任务审计详情或崩溃转储附件。
@@ -640,7 +643,7 @@ H = 0.35 * Velocity24
 ### 7.2 自动触发条件
 
 默认采用以下条件：
-1. 新仓库进入 S 或 A 级，或热点排名前 100，且来源文本为非中文。
+1. 新仓库进入 S 或 A 级，或热点排名前 100。
 2. 用户手动点击“生成中文总结”。
 3. 已有总结但 README SHA 发生变化，且仓库仍处于高优先级或被关注。
 4. 模型提示词版本升级后，仅对符合预算与热度门槛的项目刷新。
@@ -655,9 +658,9 @@ README 更新检查频率：
 - 有 ETag 时可条件检查 README。304 表示 README 未变，AI Topics 仍需核对 About。需要生成的结果须有匹配的源指纹、供应商、模型和提示词版本才能复用。缺少所需结果或强制重新生成时，重新获取 README 正文。
 - 无 README 的仓库可依据仓库 description 生成简短介绍，但要标明来源不足，且不能虚构功能。
 
-启用模型后，自动队列也处理缺少 GitHub Topics 的活跃仓库。需要同时生成摘要和主题词时合并一次调用，中文仓库或已有有效摘要的仓库可单独提取主题词。主题词和摘要共用检查间隔和 AI 调用额度，已有仓库按检查计划补齐。低优先级的主题词补齐使用剩余自动额度。
+启用模型后，自动队列也处理缺少 GitHub Topics 的活跃仓库。需要同时生成摘要和主题词时合并一次调用，已有有效摘要或只命中主题词调度条件的仓库可单独提取主题词。主题词和摘要共用检查间隔和 AI 调用额度，已有仓库按检查计划补齐。低优先级的主题词补齐使用剩余自动额度。
 
-AI Topics 从公开 About 和 README 提取，使用至多五个小写主题词，并保存源指纹、模型、提示词版本和生成时间。检查确认来源已变更时，撤下旧主题词。分类匹配、筛选与计数统一优先使用 `repositories.topics_json`，该数组为空时使用 `repo_ai_topics.topics_json`。详情接口通过 `aiTopics` 返回当前生效的 AI 主题词，页面单独标明来源。模型未配置时，未生成摘要的仓库展示 GitHub About。
+AI Topics 从公开 About 和 README 提取，使用至多五个小写主题词，并保存源指纹、模型、提示词版本和生成时间。检查确认来源已变更时，撤下旧主题词。分类匹配、筛选与计数统一优先使用 `repositories.topics_json`，该数组为空时使用 `repo_ai_topics.topics_json`。详情接口通过 `aiTopics` 返回当前生效的 AI 主题词，页面单独标明来源。后台详情在没有 AI 摘要时展示 GitHub About。
 
 ### 7.2.1 README 阅读与翻译
 
@@ -695,7 +698,8 @@ GET /repos/{owner}/{repo}/readme
 - 限制下载体积（建议原始 README ≤256 KiB），大文件只取安全截断片段并标记 incomplete_source，不应尝试无限制读取。
 - 遇到非常长的 README，只在内存中提取结构化片段（项目简介、功能、使用方式、限制），总体输入不超过可配置 Token 预算。
 - 语言识别依据自然语言正文，不使用 repository.language 充当语言检测。
-- 非中文项目输出中文，不进行逐行完整翻译；保留命令、技术名词和链接含义。
+- 摘要使用项目相关的 README 正文，略过赞助、推广、目录索引和目录树。存在默认中文版或默认 README 以相对路径链接的仓库内中文版时，优先使用仓库提供的中文正文。
+- 非中文 README 在输入和输出预算允许时随摘要生成中文译文。长文通过现有任务分批翻译。译文按 README SHA 和读取范围匹配，本地重建 Markdown 结构、保留项目相关的代码和链接，并在中文译文视图中省略有明确标题的推广、赞助和目录结构。原文仍可切换查看。
 - README 是不可信输入，任何“忽略规则/发起网络请求/输出密钥”等指令均应当作正文，不赋予工具调用权限。
 - 摘要可包含简介、功能、适用人群和限制；用户侧默认展示中文摘要，不复刻整篇 README。
 - 模型服务商可能接收提交的文档片段，属于必要的第三方处理；仅分析公开仓库内容。
@@ -705,7 +709,9 @@ GET /repos/{owner}/{repo}/readme
 ~~~json
 {
   "source_language": "en",
+  "title_zh": "本地任务编排工具",
   "summary_zh": "以中文自然叙述，目标 200～500 字；介绍项目解决的问题、主要能力、适合谁使用、使用前提和文档可证实的限制。",
+  "recommendation_reason": "维护多服务的团队可借鉴脚本分组方式。",
   "features": ["功能一", "功能二"],
   "audience": ["开发者", "产品经理"],
   "value_tags": ["浏览器自动化", "开源工具"],
@@ -716,7 +722,7 @@ GET /repos/{owner}/{repo}/readme
 
 以上 evidence 与 uncertainty 是模型输出的瞬时校验字段。摘要记录保存短摘要、精简标签、来源链接及模型版本，译文使用独立记录。原始 README 片段留在内存。
 
-卡片 titleZh 由后端从已保存的 summary_zh 派生，不新增模型字段或数据库列：trim 后取第一个句末符号（。！？!? 或换行）之前的文本，最多 40 个 Unicode 字符（Go rune），超长截断并追加“…”；没有非空摘要或所得文本为空则返回 null。新摘要任务失败时仍从上次成功摘要派生；前端 null 时回退 description，再无内容则省略该行，不额外调用模型生成标题。
+模型在同一次请求中独立撰写 title_zh、summary_zh、推荐理由和标签。卡片 titleZh 直接读取数据库保存的小标题。超出 40 个 Unicode 字符、重复摘要开头或缺少有效小标题时，卡片显示摘要正文。旧摘要在下一次正常刷新或后台手动生成时补齐小标题。
 
 校验要求：
 - summary_zh 为中文，目标 200～500 个 Unicode 字符（按 Go rune 数统计）。文档信息不足时允许不足 200 字并显式标注 insufficient_source。
@@ -729,7 +735,7 @@ GET /repos/{owner}/{repo}/readme
 ### 7.5 大模型预算与 Provider
 
 - 使用统一 Provider 接口（兼容 OpenAI 风格的 Chat Completions 结构化输出；具体供应商可替换）。
-- Base URL、Model、超时、最大输入/输出 Token 和额度通过后台保存到数据库，重启后生效。API Key 通过环境变量提供。
+- Base URL、Model、超时、最大输入/输出 Token 和额度通过后台保存到数据库，下一批任务使用新配置。API Key 从部署 YAML 的 `credentials.ai_api_key` 读取，留空时读取运行配置指定的环境变量。
 - 默认 AI 工作池并发 1～2，单日最多 50 次自动模型请求、20 次手动模型请求；包含结构修复调用，计数按下文持久化规则执行。
 - 为每次成功分析记录输入/输出 Token、估算成本与耗时（不记录原文）。
 - 高热度候选优先于普通项目；失败指数退避，达到上限转 dead 并可人工重试。
@@ -756,6 +762,7 @@ GET /repos/{owner}/{repo}/readme
 | metrics_daily 日聚合 | 180 天 | 超期分批删除 |
 | trending_observations | 30 天 | 超期分批删除 |
 | search_observations | 30 天 | 与 Trending 共用发现记录保留天数 |
+| repo_discovery_sources | 随仓库保存 | 记录命中过的 Search 规则和曾经上榜的事实，支撑历史项目的发布复核 |
 | jobs 已完成/取消/终止的普通失败记录 | 14 天 | 不删除仍待重试或 unknown 任务，关联 ai_calls 先清理 |
 | jobs dead 记录 | 30 天 | 保留错误类别便于排查 |
 | ai_summaries | 只保留每个仓库最新成功摘要 | 项目被彻底移除时清理 |
@@ -827,6 +834,7 @@ WHERE (repo_id, sample_slot) IN (
 | GET /api/v1/categories | 数据库分类、active 仓库数量与最新仓库预览 |
 | GET /api/v1/repos/:id | 仓库详情、中文摘要、采集状态 |
 | GET /api/v1/public/repos/by-name/:owner/:name | 按当前完整仓库名读取公开详情 |
+| GET /api/v1/public/repos/published | 批量确认本地收藏中的仓库是否已发布，接受最多 100 个 `id` 参数，返回 `{items:[仓库 ID]}` |
 | GET /api/v1/repos/:id/trend?range=24h/7d/30d/180d | 自适应返回原始/小时/日级点位和质量 |
 | POST /api/v1/repos/:id/refresh | 手动调度采集，遵守配额 |
 | POST /api/v1/repos/:id/summary | 手动安排/复用 AI 总结 |
@@ -849,7 +857,7 @@ WHERE (repo_id, sample_slot) IN (
 | GET/PUT /api/v1/system/discovery-rules | 读取或替换 Trending 和 Search 规则 |
 | GET/PUT /api/v1/system/discovery-tabs | 读取或保存发现页分类标签及精选门槛 |
 | GET /api/v1/public/discovery-tabs | 读取发现页分类标签，按展示顺序返回分类标识和显示名称 |
-| GET /api/v1/public/discovery | 精选仓库，支持分类和游标，返回命中信号的时间 `discoveryAt`。`sort=hotness` 返回精选中的热度前五 |
+| GET /api/v1/public/discovery | 精选仓库，支持分类和游标，按首次发现时间 `discoveredAt` 分组，另返回最新命中信号的时间 `discoveryAt`。`sort=hotness` 返回精选中的热度前五。与公开 `/repos` 共用精选判定，卡片返回 `selected`，精选项有有效的 AI 理由时返回 `recommendationReason`。列表卡片的 `valueTags` 来自已保存的 AI 摘要，可用于全部项目的 `tag` 筛选 |
 | GET /api/v1/public/project-themes、/project-themes/:slug | 专题目录和详情，返回简介、可选图标和颜色、项目总数、30 天新增数及最近发现的项目。详情额外返回 `groupName` 和 `milestones` |
 | GET/PUT /api/v1/system/project-themes | 后台读取和保存专题，使用共享修订号 |
 | GET /api/v1/system/storage | SQLite 大小、快照条数、清理水位 |
@@ -866,15 +874,19 @@ WHERE (repo_id, sample_slot) IN (
 
 首次安装另提供 POST /api/v1/setup/r2/test、r2/session、restore、initialize，GET /api/v1/setup/backups、status、operations/:id，均使用管理员会话。R2 会话仅保存在内存，恢复后的数据库包含本次新配置；已初始化时关闭 setup 写接口，状态和操作查询仍可用。维护期间健康检查、setup/status 和操作进度只读内存；重载入口仅在复制已结束且 databaseApplied=true 的加载失败状态下，受恢复互斥保护读取数据库。鉴权优先；恢复期间设置写入及冲突操作先返回 409，其余业务 API 返回 503。详见[专项方案](./backup-and-restore.md)。
 
-这些配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}`，`sourceType` 可为 search 或 trending。Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空。分类和发现规则接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
+这些配置接口共用数据库修订号。写入提交上次读取的 `revision`，冲突返回 409 `settings_conflict`。进程级配置 PUT 传 `{revision,settings}`，响应含 `restartRequired`。分类 PUT 传 `{revision,items:[{slug,name,anyTopics}]}`。规则 PUT 传 `{revision,items:[{sourceType,sourceKey,query,minStars,enabled,intervalMinutes,priority}]}`。Search 的 `minStars` 为非负整数，省略时为 200，0 表示不加额外门槛。规则原有 Star 限定词与门槛、分页分片范围取交集。Trending 键为 `all:daily` 或 `language:go:weekly` 等，`query` 留空并省略 `minStars`。分类和发现规则接口接受空数组，用于清空对应规则。分类 `other` 由查询派生。
 
 发现页标签 PUT 传 `{revision,items:[{slug,label}]}`，按数组顺序展示，空 `label` 沿用分类名称。可选 `newCategories` 使用分类接口的条目格式，将新分类与标签在同一事务保存。分类映射新增条目后出现在可选列表，管理员可单独加入发现页。已有库首次修改分类映射时保留原有标签顺序。前台固定显示「全部」，保存空数组只保留「全部」。
 
-发现页只收录公开且处于监控中的仓库。近 7 天首次发现的 S/A 级项目需在近 48 小时采样成功。精确 24h 净增达到现有热度升档阈值的项目，以窗口终点是否在近 24 小时内为准。最近一次成功采集的全站日榜在近 24 小时内时，榜单前 10 也可入选。三项命中任意一项即可，同一仓库取最新命中时间，按北京时间日期、热度、命中时间倒序排列。后台通过 `selection` 保存 `recentDays`、`recentSampleHours`、`growthSampleHours`、`trendingHours` 和 `trendingTop`，保存立即生效。
+公开列表、搜索、发现、榜单、分类和专题聚合、详情及其子资源共用发布条件。仓库来源可公开、已有成功采样且存在状态为 `ready` 的非空 AI 导读时，再检查当前 Star 数是否达到历史命中的任意一条现存 Search 规则的门槛。可核实的历史 Trending 上榜记录免于这一门槛。无法匹配到现存 Search 规则的仓库沿用原公开条件。收藏使用数字 ID 校验同一条件。未发布仓库继续在后台管理和准备数据。增长窗口在具备有效观测后展示。
 
-专题独立保存在 `project_themes`，通过匹配词筛选项目。GitHub Topics 非空时以原生主题为准，原生主题为空时使用 AI Topics。公开 `/discovery` 和 `/repos` 接受 `theme` 标识，分页游标绑定该专题。
+发现页在已发布仓库中选择处于监控中的项目。近 7 天首次发现的 S/A 级项目需在近 48 小时采样成功。精确 24h 净增达到现有热度升档阈值的项目，以窗口终点是否在近 24 小时内为准。最近一次成功采集的全站日榜在近 24 小时内时，榜单前 10 也可入选。满足任一信号时取最新命中时间。后台通过 `selection` 保存 `recentDays`、`recentSampleHours`、`growthSampleHours`、`trendingHours` 和 `trendingTop`，保存立即生效。
 
-仓库详情通过 `GET /api/v1/public/repos/:id/similar` 读取最多五个相似项目。后台 `settings.embedding` 单独配置 OpenAI 兼容的 Embedding 地址、模型、密钥环境变量、扫描频率和相似度门槛，重启后生效。后台分批组合 About、原生或 AI Topics、公开 README 摘录及有效摘要，将 float32 BLOB、模型空间标识和内容指纹存入 `repo_embeddings`。成功后每七天复查，内容未变时复用向量，失败后延迟一小时重试。SQLite 使用驱动随附的 sqlite-vec 计算余弦距离，同模型、同维数和可公开性条件在查询中生效。向量随数据库备份，README 摘录仅保留在本轮 Worker 内存中。
+发现时间线按首次发现的北京时间日期、展示分、首次发现时刻倒序排列。重复上榜或增长信号更新时，项目仍归在首次发现当天。同一天的展示分按热度和新鲜度权重计算，默认由综合热度的 70% 加上最多 30 分的新鲜度组成。新鲜度从首次收录当日起按 `recentDays` 个自然日线性递减。超过保护窗口后，前一个自然日连续入选一天扣 10 分，两天或以上扣 20 分。默认连续三个自然日入选后冷却两天。后台「发现页标签」通过 `ranking` 保存 `heatWeight`、`freshnessWeight`、`consecutiveDays` 和 `cooldownDays`。权重为整数百分比且合计 100，冷却天数为 0 时关闭冷却。保存后下一次读取使用新配置和已有入选记录，配置变更前的分页游标需要刷新。后台每个自然日最多记录一次有效入选，跳过冷却和停机未观测的日期。发现页「当前热点」在冷却筛选后的精选项目中取真实热度最高的前五名。独立热点榜继续使用真实增长和热度。
+
+专题独立保存在 `project_themes`。后台可配置一个或多个 GitHub 所有者，按组织或个人账号精确匹配仓库归属，忽略大小写。所有者留空时使用主题词分类，原生 Topics 未命中专题词表时使用 AI 分类。公开 `/discovery` 和 `/repos` 接受 `theme` 标识，分页游标绑定该专题。
+
+仓库详情通过 `GET /api/v1/public/repos/:id/similar` 读取最多五个相似项目。后台 `settings.embedding` 单独配置 OpenAI 兼容的 Embedding 地址、模型、密钥环境变量、扫描频率和相似度门槛，保存后在进程内生效。后台分批组合 About、原生或 AI Topics、公开 README 摘录及有效摘要，将 float32 BLOB、模型空间标识和内容指纹存入 `repo_embeddings`。成功后每七天复查，内容未变时复用向量，失败后延迟一小时重试。SQLite 使用驱动随附的 sqlite-vec 计算余弦距离，同模型、同维数和可公开性条件在查询中生效。向量随数据库备份，README 摘录仅保留在本轮 Worker 内存中。
 
 专题方向保存在 `project_theme_groups`，每个方向有名称、简介和显示顺序。后台通过 `/api/v1/system/project-theme-groups` 管理方向，在专题表单选择归属。移除仍有专题的方向前，须先迁移这些专题。公开目录返回 `groups`，每个专题以 `groupSlug` 指定所属方向。
 
@@ -882,9 +894,9 @@ WHERE (repo_id, sample_slot) IN (
 
 分类映射和发现规则按提交数组持久化后台列表顺序。发现规则的 `display_position` 仅用于后台列表排序，规则的采集优先级、下次计划时间与任务租约按既有调度机制维护。
 
-阶段 2 的计算周期、窗口容差、采样分级门槛、评分参数及清理计划由 `settings.scheduler.metricsIntervalMinutes`、`settings.metrics` 和 `settings.maintenance` 管理，保存后重启生效。评分权重按 24h 增长、7d 增长、加速度、持续性和 Trending 排列。维护接口返回 202，持久化请求由后台下次扫描领取。已初始化的库也可以用 `maintenance-once` 离线执行维护。
+阶段 2 的计算周期、窗口容差、采样分级门槛、评分参数及清理计划由 `settings.scheduler.metricsIntervalMinutes`、`settings.metrics` 和 `settings.maintenance` 管理，保存后由下一轮任务使用。评分权重按 24h 增长、7d 增长、加速度、持续性和 Trending 排列。维护接口返回 202，持久化请求由后台下次扫描领取。已初始化的库也可以用 `maintenance-once` 离线执行维护。
 
-阶段 3 使用 `settings.ai` 和 `settings.ai.summary` 配置供应商、模型、预算、提示词版本、来源检查和重试。`settings.recommendations` 配置每日选题时刻、时区、数量、重入阈值及保留期，保存后重启生效。选题通过 `GET /topics?status=&day=&limit=&cursor=` 分页。提供 `day=YYYY-MM-DD` 时按选题时区和入池时间列出当天选题，游标绑定状态与日期。`GET /topics/days` 提供同一时区下的日期、首条标题和条目数。`PATCH /topics/:id` 支持 `{status,feedback}`，将状态设回 `candidate` 可人工重新打开。每日任务以仓库和选题角度去重，README 指纹和功能证据同时变化或精确 24h 净增相对上次推荐达到重入门槛时，可重新进入候选并保留人工反馈。
+阶段 3 使用 `settings.ai` 和 `settings.ai.summary` 配置供应商、模型、预算、提示词版本、来源检查和重试。`settings.recommendations` 配置每日选题时刻、时区、数量、重入阈值及保留期，保存后在进程内生效。选题通过 `GET /topics?status=&day=&limit=&cursor=` 分页。提供 `day=YYYY-MM-DD` 时按选题时区和入池时间列出当天选题，游标绑定状态与日期。`GET /topics/days` 提供同一时区下的日期、首条标题和条目数。`PATCH /topics/:id` 支持 `{status,feedback}`，将状态设回 `candidate` 可人工重新打开。每日任务以仓库和选题角度去重，README 指纹和功能证据同时变化或精确 24h 净增相对上次推荐达到重入门槛时，可重新进入候选并保留人工反馈。
 
 异步任务契约：refresh 请求 `{requestId}`，接受后返回 `202 {jobId,statusUrl}`；summary 请求 `{force:false,requestId:"客户端生成的唯一值"}`，先查手动 dedup_key，相同请求返回原任务；其他请求遇到未决摘要任务返回 `409 {code:"summary_in_progress",existingJobId,statusUrl}`。无冲突且缓存命中返回 `200 {cached:true,summaryStatus:"ready"}`，否则返回同样的 202 结构；`force:true` 明确要求重新生成并计入手动额度。摘要执行条件未满足时返回 503 `summary_unavailable`，已保存的摘要仍可读取。unknown 任务通过 `POST /api/v1/jobs/:id/retry`、请求 `{requestId,acceptPossibleCharge:true}` 在管理鉴权下关闭未决调用、取消旧任务并创建新的手动任务；上述变化在同一事务中完成。重试接口先按新手动 dedup_key 查重，已存在则直接返回，随后才检查旧任务必须为 unknown，保证响应丢失后的重试仍返回同一新任务。
 
@@ -894,7 +906,7 @@ Trending 专用契约：GET /api/v1/trending 的 period 为 daily/weekly/monthly
 
 ### 9.1 单管理员认证
 
-部署 YAML 必填 `server.site_url`、`auth.admin_password` 和 `auth.session_secret`，缺失时 HTTP 服务报错退出。管理接口通过签名会话 Cookie 鉴权，包括 setup 和恢复进度。前台通过 /api/v1/public 的独立 GET 路由获取仓库列表、详情、Star 趋势、分类、官方榜单及来源标识。公开读取仅展示当前可发布仓库，摘要仅展示已生成内容与来源，关注记录、摘要任务编号及模型配置留在管理接口。两组业务路由共用初始化与恢复门禁。静态资源、/healthz、/readyz 可公开，健康响应只提供就绪状态。
+部署 YAML 必填 `server.site_url`、`auth.admin_password` 和 `auth.session_secret`，缺失时 HTTP 服务报错退出。`auth.admin_password` 保存 `hash-password` 生成的 Argon2id 哈希，登录时提交原密码。`generate-session-secret` 生成 Cookie 签名密钥。管理接口通过签名会话 Cookie 鉴权，包括 setup 和恢复进度。前台通过 /api/v1/public 的独立 GET 路由获取仓库列表、详情、Star 趋势、分类、官方榜单及来源标识。公开读取仅展示当前可发布仓库，摘要仅展示已生成内容与来源，关注记录、摘要任务编号及模型配置留在管理接口。两组业务路由共用初始化与恢复门禁。静态资源、/healthz、/readyz 可公开，健康响应只提供就绪状态。
 
 首次进入后台时提交密码到 `POST /api/v1/auth/login`。Cookie 设为 HttpOnly、SameSite=Strict，有效期 24 小时，网站对外地址使用 HTTPS 时追加 Secure。后台写请求检查来源。刷新时通过 `GET /api/v1/auth/session` 确认状态，管理接口返回 401 时清理管理缓存并返回登录页。`POST /api/v1/auth/logout` 清除当前浏览器的 Cookie。会话校验独立于数据库，修改密码或签名密钥并重启会使既有会话失效，SQLite 恢复继续使用当前实例的部署配置。
 
@@ -902,7 +914,11 @@ Trending 专用契约：GET /api/v1/trending 的 period 为 daily/weekly/monthly
 
 /repos 默认仅列 state=active；watchlist 使用 followed=true，包含所有已关注状态，按 followedAt 降序。可显式传 state 枚举查询其他状态；q 匹配 full_name/description，language 精确匹配，重复 category 参数按 OR 匹配第 3.4 节的数据库分类。/categories 返回全部分类及 active 计数；未知分类/排序/状态返回 400。
 
-sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分别以 discovered_at、hotness_score、exact 的 delta_24h、exact 的 delta_7d、stars、followed_at 降序，repo_id 升序作唯一次键；可用性不足的排序值为 null，统一排最后。followed 排序要求 followed=true。热度榜和增长榜的 updatedAt 为最近成功计算时间，首轮成功前为 null。cursor 是无填充 Base64URL 编码的 UTF-8 JSON：`{v:1,sort,filters,last:{value,repoId}}`；filters 为标准化 q/language/state/followed/grade/tag 和排序去重后的 category 数组，不含 limit。比较当前过滤条件及版本，非法编码/字段/不匹配返回 400 invalid_cursor。后续页以该排序键执行 keyset 查询，包括 null 段的 repo_id 续页，不使用 offset。
+sort 可取 discovered、hotness、growth24h、growth7d、stars、followed、relevance。有 q 时默认 relevance，其他排序依次以 discovered_at、hotness_score、exact 的 delta_24h、exact 的 delta_7d、stars、followed_at 降序。repo_id 升序作唯一次键，null 排最后。followed 排序要求 followed=true。热度榜和增长榜的 updatedAt 为最近成功计算时间，首轮成功前为 null。
+
+相关度搜索沿用语言、分类、状态及其他列表筛选。开启且可用时，仅查询词在 SQLite 读事务外发送给已有 Embedding 供应商。与公开仓库的同模型、同维数向量计算余弦距离。排序依次为仓库全名精确命中、短名精确命中、仓库名或 About 字面命中、达到门槛的语义命中。同一等级按距离排序。向量不可用、恢复后自动 AI 仍暂停或查询请求超限时，沿用字面匹配，同一命中等级按发现时间排序。
+
+cursor 是无填充 Base64URL 编码的 UTF-8 JSON：`{v:1,sort,filters,last:{value,repoId}}`。filters 为标准化 q/language/state/followed/grade/tag 和排序去重后的 category 数组，不含 limit。相关度游标的 last 另带命中等级 rank，语义游标还带查询向量指纹 `vector`。字面回退的游标沿用回退排序。非法编码或当前排序、筛选、向量不匹配时返回 400 invalid_cursor。后续页使用 keyset 查询，包括 null 段的 repo_id 续页。
 
 游标只描述查询位置，不承载授权；不需要签名或服务端分页会话。热度、关注及采集数据会变动，分页为实时弱一致，前端按 repoId 去重，刷新列表重新从首页取；不承诺跨页固定快照。响应为 `{items,nextCursor,updatedAt}`，无下一页时 nextCursor=null。
 
@@ -957,12 +973,12 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 
 参见 [本地部署配置示例](../configs/example.yaml) 和 [容器部署配置示例](../deploy/container.yaml)。配置包含监听地址、网站对外地址、数据库路径、管理员密码和会话签名密钥。
 
-首次用新版服务启动时，先用临时连接执行迁移，再把初始运行参数、分类及缺失的规则集写入数据库。运行参数与统一修订号存于 `system_settings` 的 `runtime.settings.v1` 键，分类存于 `categories`，发现规则存于 `discovery_rules`。升级保留已有发现规则的 ID、定义及下次执行时间。旧 YAML 的业务值、分类文件和 AI 地址/模型环境变量可用于这次导入；已写入运行设置后，启动直接读取数据库。可编辑的 HTTP 超时、SQLite 连接参数、GitHub 请求预算和并发、采样周期和容量、AI 开关、地址及模型由下一次启动应用。分类与发现规则的生效方式见第 3 章和第 9 章。
+首次用新版服务启动时，先用临时连接执行迁移，再把初始运行参数、分类及缺失的规则集写入数据库。运行参数与统一修订号存于 `system_settings` 的 `runtime.settings.v1` 键，分类存于 `categories`，发现规则存于 `discovery_rules`。升级保留已有发现规则的 ID、定义及下次执行时间。旧 YAML 的业务值、分类文件和 AI 地址/模型环境变量可用于这次导入。已写入运行设置后，启动直接读取数据库。HTTP 超时和 SQLite 连接参数由下一次启动应用。保存采集、AI、调度等业务配置后，新请求读取新配置，后台在已开始的任务完成后切换。分类与发现规则的生效方式见第 3 章和第 9 章。
 
 后续阶段新增的推荐时刻、增长计算周期、AI 预算、保留期和清理计划随各自功能存入数据库。采样槽、聚合和 AI 日预算的 UTC 口径属于数据契约。
 
 部署要求：
-- GITHUB_TOKEN、AI_API_KEY 通过环境变量提供。后台密码与会话签名由部署 YAML 提供，示例文件使用空凭据，Compose 以只读方式挂载实际配置。
+- GitHub 令牌和 AI 摘要密钥可由部署 YAML 的 `credentials.github_token` 和 `credentials.ai_api_key` 提供，留空时分别读取 `GITHUB_TOKEN` 和 `AI_API_KEY` 等配置指定的环境变量。后台密码与会话签名由部署 YAML 提供，Compose 以只读方式挂载实际配置。
 - GitHub API 接口使用 api.github.com，Trending 使用 github.com；网络超时/重试分别设置。
 - Docker 镜像可多阶段编译 Go + React；SQLite 数据目录 ./data 挂载持久化卷。
 - 运行单实例；可选 Caddy/Nginx 反向代理并配置 HTTPS/访问控制。
@@ -1080,7 +1096,7 @@ sort 可取 discovered、hotness、growth24h、growth7d、stars、followed，分
 
 45. **新增契约**：分类多重匹配及 other 回退一致；同槽手动/自动/304 去重、重试跨槽仍沿原槽；非法状态被 CHECK 拒绝；关注时间幂等；License 缺失可空；游标同值/null 续页与筛选不匹配处理正确；后台及 setup 共用会话鉴权与 401 清理。
 
-46. **计算与榜单契约**：模拟 15 分钟边界验证指标、热度及评级更新，不依赖日汇总；无新采样仍处理窗口过期，积压不补算旧窗口。titleZh 的空值、短句及 40 字截断一致；Trending 无批次/成功空榜/失败保留旧榜的响应可区分，单批次成员与 rank 一致。
+46. **计算与榜单契约**：模拟 15 分钟边界验证指标、热度及评级更新，不依赖日汇总；无新采样仍处理窗口过期，积压不补算旧窗口。titleZh 应使用已保存的模型输出，允许空值；Trending 无批次/成功空榜/失败保留旧榜的响应可区分，单批次成员与 rank 一致。
 
 核心监控指标及初始目标：
 - S 级在 API 可用与配额正常时，采样延迟通常 <20 分钟；A 级通常 <70 分钟。

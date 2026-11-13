@@ -2,13 +2,19 @@ package settings
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
@@ -21,9 +27,13 @@ type ProjectTheme struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description"`
 	AnyTopics   []string `json:"anyTopics"`
+	Aliases     []string `json:"aliases"`
+	Owners      []string `json:"owners"`
 	Icon        string   `json:"icon"`
 	IconColor   string   `json:"iconColor"`
 }
+
+var githubOwner = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 var projectThemeIcons = []string{
 	consts.ThemeIconBot, consts.ThemeIconCodeXML, consts.ThemeIconDatabase, consts.ThemeIconFlask,
@@ -83,6 +93,12 @@ func (s Store) ProjectThemeSettings(ctx context.Context) (ProjectThemeSettings, 
 			if err := json.Unmarshal([]byte(row.TopicsJSON), &item.AnyTopics); err != nil {
 				return err
 			}
+			if err := json.Unmarshal([]byte(row.AliasesJSON), &item.Aliases); err != nil {
+				return err
+			}
+			if err := json.Unmarshal([]byte(row.OwnersJSON), &item.Owners); err != nil {
+				return err
+			}
 			result.Items = append(result.Items, item)
 		}
 		return nil
@@ -98,8 +114,9 @@ func (s Store) SaveProjectThemes(ctx context.Context, revision int64, items []Pr
 	for position, item := range items {
 		item.Name = strings.TrimSpace(item.Name)
 		item.Description = strings.TrimSpace(item.Description)
-		if !config.ValidSourceSlug(item.Slug) || slugs[item.Slug] || item.Name == "" || item.Description == "" || len(item.AnyTopics) == 0 {
-			return ProjectThemeSettings{}, &Invalid{Err: fmt.Errorf("专题 %q 须有唯一标识、名称、简介和匹配词", item.Slug)}
+		if !config.ValidSourceSlug(item.Slug) || slugs[item.Slug] || item.Name == "" || item.Description == "" ||
+			(len(item.AnyTopics) == 0 && len(item.Aliases) == 0 && len(item.Owners) == 0) {
+			return ProjectThemeSettings{}, &Invalid{Err: fmt.Errorf("专题 %q 须有唯一标识、名称、简介和至少一项匹配条件", item.Slug)}
 		}
 		if item.Icon != "" && !slices.Contains(projectThemeIcons, item.Icon) ||
 			item.IconColor != "" && !slices.Contains(projectThemeColors, item.IconColor) {
@@ -122,13 +139,43 @@ func (s Store) SaveProjectThemes(ctx context.Context, revision int64, items []Pr
 			}
 		}
 		item.AnyTopics = topics
+		aliases := make([]string, 0, len(item.Aliases))
+		for _, alias := range item.Aliases {
+			alias = strings.ToLower(strings.TrimSpace(alias))
+			if alias == "" || utf8.RuneCountInString(alias) > 60 || strings.ContainsFunc(alias, unicode.IsControl) {
+				return ProjectThemeSettings{}, &Invalid{Err: fmt.Errorf("专题 %q 的别名无效", item.Slug)}
+			}
+			if !slices.Contains(aliases, alias) {
+				aliases = append(aliases, alias)
+			}
+		}
+		item.Aliases = aliases
+		owners := make([]string, 0, len(item.Owners))
+		for _, owner := range item.Owners {
+			owner = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(owner)), "@")
+			if len(owner) > 39 || !githubOwner.MatchString(owner) {
+				return ProjectThemeSettings{}, &Invalid{Err: fmt.Errorf("专题 %q 的 GitHub 所有者 %q 无效", item.Slug, owner)}
+			}
+			if !slices.Contains(owners, owner) {
+				owners = append(owners, owner)
+			}
+		}
+		item.Owners = owners
+		ownersJSON, err := json.Marshal(owners)
+		if err != nil {
+			return ProjectThemeSettings{}, err
+		}
+		aliasJSON, err := json.Marshal(aliases)
+		if err != nil {
+			return ProjectThemeSettings{}, err
+		}
 		data, err := json.Marshal(topics)
 		if err != nil {
 			return ProjectThemeSettings{}, err
 		}
 		rows = append(rows, storage.ProjectTheme{
-			Slug: item.Slug, Name: item.Name, Description: item.Description, TopicsJSON: string(data),
-			Position: position, Icon: item.Icon, IconColor: item.IconColor,
+			Slug: item.Slug, Name: item.Name, Description: item.Description, TopicsJSON: string(data), AliasesJSON: string(aliasJSON),
+			Position: position, Icon: item.Icon, IconColor: item.IconColor, OwnersJSON: string(ownersJSON),
 		})
 		result.Items = append(result.Items, item)
 	}
@@ -169,9 +216,25 @@ func (s Store) SaveProjectThemes(ctx context.Context, revision int64, items []Pr
 			return err
 		}
 		if len(rows) > 0 {
-			return tx.CreateInBatches(&rows, 100).Error
+			if err := tx.CreateInBatches(&rows, 100).Error; err != nil {
+				return err
+			}
 		}
-		return nil
+		catalog, err := storage.ReadThemeCatalog(tx)
+		if err != nil {
+			return err
+		}
+		// 只对影响分类的词表内容生成版本，移动方向或换图标不会触发回填。
+		for i := range catalog.Terms {
+			slices.Sort(catalog.Terms[i].Terms)
+			catalog.Terms[i].Terms = slices.Compact(catalog.Terms[i].Terms)
+		}
+		data, err := json.Marshal(catalog.Terms)
+		if err != nil {
+			return err
+		}
+		key := storage.SystemSetting{Key: storage.ThemeCatalogKey, ValueJSON: fmt.Sprintf("\"%x\"", sha256.Sum256(data)), UpdatedAt: time.Now().UnixMilli()}
+		return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&key).Error
 	})
 	result.Revision = snapshot.Revision
 	return result, err

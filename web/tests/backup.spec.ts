@@ -183,7 +183,7 @@ test('受理响应丢失后从服务端补回恢复，离开备份页也刷新�
   await session(page)
   await page.goto('/repos/vercel/ai')
   await expect(page.getByRole('heading', { name: 'vercel/ai', exact: true })).toBeVisible()
-  await page.getByRole('link', { name: '后台管理', exact: true }).click()
+  await page.goto('/admin')
   await page.getByRole('link', { name: '备份与恢复' }).click()
   await page.getByRole('button', { name: '恢复 2026-11-10' }).click()
   await page.getByRole('button', { name: '确认恢复' }).click()

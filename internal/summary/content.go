@@ -15,6 +15,7 @@ import (
 	"github.com/yuin/goldmark/text"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -22,18 +23,55 @@ const sufficient = consts.SourceSufficient
 const insufficient = consts.SourceInsufficient
 const incomplete = consts.SourceIncomplete
 
+const (
+	minShortSummaryChars = 20
+	minFullSummaryChars  = 80
+	maxSummaryChars      = 200
+)
+
 type source struct {
 	fullName                                                          string
 	sha, etag, url, fingerprint, language, quality, body, description string
-	hasGitHubTopics                                                   bool
+	githubTopics                                                      []string
+	themePrompt                                                       string
+	readme                                                            gh.ReadmeResult
 }
 
 var bareURL = regexp.MustCompile(`https?://[^\s<>]+`)
+var nonProjectHeading = regexp.MustCompile(`^(table of contents|contents|目录|目錄|内容索引|directory (structure|tree)|folder structure|目录结构|目錄結構|目录树|文件夹结构|(our )?sponsors?|sponsorship|donat(e|ions?)|赞助(商|者|我们|信息)?|贊助(商|者)?|捐赠|捐贈|advertisements?|推广|广告|廣告)$`)
+
+func nonProjectSection(heading *ast.Heading, data []byte) bool {
+	label := strings.ToLower(strings.TrimFunc(string(heading.Text(data)), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	}))
+	return nonProjectHeading.MatchString(label)
+}
+
+func removeNonProjectSections(root ast.Node, data []byte, sourceHeadings map[int]bool) {
+	skippedLevel, headingIndex := 0, 0
+	for node := root.FirstChild(); node != nil; {
+		next := node.NextSibling()
+		if heading, ok := node.(*ast.Heading); ok {
+			if skippedLevel >= heading.Level {
+				skippedLevel = 0
+			}
+			if skippedLevel == 0 && (sourceHeadings[headingIndex] || nonProjectSection(heading, data)) {
+				skippedLevel = heading.Level
+			}
+			headingIndex++
+		}
+		if skippedLevel != 0 {
+			root.RemoveChild(root, node)
+		}
+		node = next
+	}
+}
 
 // prose 使用 Markdown AST 提取正文，跳过代码、图片、徽标和链接地址。
 func prose(data []byte) string {
 	var b strings.Builder
 	root := goldmark.DefaultParser().Parse(text.NewReader(data))
+	removeNonProjectSections(root, data, nil)
 	_ = ast.Walk(root, func(n ast.Node, enter bool) (ast.WalkStatus, error) {
 		switch n.Kind() {
 		case ast.KindCodeBlock, ast.KindFencedCodeBlock, ast.KindCodeSpan, ast.KindImage, ast.KindAutoLink, ast.KindHTMLBlock, ast.KindRawHTML:
@@ -133,9 +171,19 @@ func (s source) prompt(budget int, summary, topics bool) (string, source) {
 	} else if topics {
 		task = "主题词"
 	}
-	prefix := "任务：" + task + "\n公开仓库：" + limitText(s.fullName, 160) + "\n检测语言：" + s.language + "\n"
+	task = "任务：" + task
+	const fullLength = "（摘要正文目标 80 至 160 个字符，最多 200 个字符，不超过三句）"
+	const shortLength = "（摘要正文目标 50 至 80 个字符，信息很少时可短至 20 个字符，最多 200 个字符，不超过三句）"
+	instructionBytes := 0
+	if summary {
+		instructionBytes = max(len(fullLength), len(shortLength))
+	}
+	prefix := "\n公开仓库：" + limitText(s.fullName, 160) + "\n检测语言：" + s.language + "\n"
+	if topics {
+		prefix += s.themePrompt
+	}
 	const descriptionLabel, readmeLabel = "仓库 Description：\n", "仓库 README：\n"
-	available := max(0, budget-len(systemPrompt)-len(prefix)-128)
+	available := max(0, budget-len(systemPrompt)-len(task)-instructionBytes-len(prefix)-128)
 	descriptionLimit := min(512, available-len(descriptionLabel)-1)
 	if s.body != "" {
 		descriptionLimit = min(descriptionLimit, available/4)
@@ -153,10 +201,16 @@ func (s source) prompt(budget int, summary, topics bool) (string, source) {
 	if body != "" {
 		prefix += readmeLabel + body
 	}
-	return prefix, s
+	if summary && s.quality == sufficient {
+		task += fullLength
+	} else if summary {
+		task += shortLength
+	}
+	return task + prefix, s
 }
 
 type answer struct {
+	Title                json.RawMessage `json:"title_zh"`
 	Language             string          `json:"source_language"`
 	Summary              string          `json:"summary_zh"`
 	RecommendationReason json.RawMessage `json:"recommendation_reason"`
@@ -215,13 +269,13 @@ func resultSummary(raw string, s source, repoID int64, provider, model string, v
 		}
 	}
 	quality := s.quality
-	if size < 200 {
+	if size < minFullSummaryChars {
 		if quality == sufficient {
 			return storage.AISummary{}, false
 		}
 		quality = insufficient
 	}
-	if size < 20 || size > 500 || han < 12 || 3*han < letters || copiesSource(a.Summary, s.body) || copiesSource(a.Summary, s.description) {
+	if size < minShortSummaryChars || size > maxSummaryChars || han < 12 || 3*han < letters || copiesSource(a.Summary, s.body) || copiesSource(a.Summary, s.description) {
 		return storage.AISummary{}, false
 	}
 	validEvidence := false
@@ -246,12 +300,31 @@ func resultSummary(raw string, s source, repoID int64, provider, model string, v
 	var proposedReason string
 	_ = json.Unmarshal(a.RecommendationReason, &proposedReason)
 	reason := recommendationReason(proposedReason, a.Summary, s)
+	var proposedTitle string
+	_ = json.Unmarshal(a.Title, &proposedTitle)
+	title := summaryTitle(proposedTitle, a.Summary)
 	return storage.AISummary{
 		RepoID: repoID, ReadmeSHA: optional(s.sha), SourceFingerprint: s.fingerprint, SourceQuality: quality,
-		SourceLanguage: s.language, SummaryZh: a.Summary, RecommendationReason: &reason, FeaturesJSON: tags(a.Features), AudienceJSON: tags(a.Audience),
+		SourceLanguage: s.language, TitleZh: &title, SummaryZh: a.Summary, RecommendationReason: &reason,
+		FeaturesJSON: tags(a.Features), AudienceJSON: tags(a.Audience),
 		ValueTagsJSON: tags(a.Tags), SourceReadmeURL: optional(s.url), ModelProvider: provider, ModelName: model,
 		PromptVersion: version, SummaryStatus: consts.StatusReady, GeneratedAt: now,
 	}, true
+}
+
+func summaryTitle(raw, brief string) string {
+	title := strings.Join(strings.Fields(raw), " ")
+	size := utf8.RuneCountInString(title)
+	if size < 4 || size > 40 || !containsChinese(title) || strings.ContainsAny(title, "。！？!?<>…") ||
+		strings.HasSuffix(title, ".") || strings.HasPrefix(strings.Join(strings.Fields(brief), " "), title) {
+		return ""
+	}
+	return title
+}
+
+// NULL 区分尚未刷新过的旧摘要，空字符串表示已尝试但没有有效值。
+func hasStructuredSummary(row storage.AISummary) bool {
+	return row.TitleZh != nil && row.RecommendationReason != nil
 }
 
 // 推荐理由是可选字段，无效理由不影响已通过校验的摘要。
@@ -317,17 +390,4 @@ func tags(values []string) string {
 	}
 	raw, _ := json.Marshal(out)
 	return string(raw)
-}
-
-// Title 从摘要首句生成卡片标题，不增加模型调用。
-func Title(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexAny(s, "。！？!?\n"); i >= 0 {
-		s = s[:i]
-	}
-	runes := []rune(strings.TrimSpace(s))
-	if len(runes) > 40 {
-		return string(runes[:40]) + "…"
-	}
-	return string(runes)
 }

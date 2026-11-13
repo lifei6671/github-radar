@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"slices"
 	"time"
@@ -12,14 +12,16 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
-	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/metrics"
-	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/discoverystore"
 )
 
 type discoveryCursor struct {
+	Version    int      `json:"v"`
+	Revision   int64    `json:"revision"`
+	Day        int64    `json:"day"`
 	Categories []string `json:"categories"`
 	Theme      string   `json:"theme,omitempty"`
 	At         int64    `json:"at"`
@@ -27,7 +29,10 @@ type discoveryCursor struct {
 	RepoID     int64    `json:"repoId"`
 }
 
+const discoveryCursorVersion = 3
+
 func (a *collectionAPI) discovery(c *gin.Context) {
+	now := time.Now()
 	limit, ok := pageLimit(c)
 	if !ok {
 		return
@@ -42,7 +47,8 @@ func (a *collectionAPI) discovery(c *gin.Context) {
 	hot := c.Query("sort") == consts.SortHotness
 	if raw, exists := c.GetQuery("cursor"); exists {
 		data, err := base64.RawURLEncoding.DecodeString(raw)
-		if hot || err != nil || json.Unmarshal(data, &cursor) != nil || cursor.RepoID <= 0 || cursor.At <= 0 ||
+		if hot || err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Version != discoveryCursorVersion ||
+			cursor.Day != discoverystore.BeijingDay(now.UnixMilli()) || cursor.RepoID <= 0 || cursor.At <= 0 ||
 			cursor.Theme != theme || !slices.Equal(cursor.Categories, categories) {
 			c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidCursor})
 			return
@@ -52,9 +58,13 @@ func (a *collectionAPI) discovery(c *gin.Context) {
 	var page gin.H
 	err = a.db.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
 		var err error
-		page, err = a.discoveryPage(c, tx, categories, theme, cursor, limit, hot, time.Now())
+		page, err = a.discoveryPage(c, tx, categories, theme, cursor, limit, hot, now)
 		return err
 	}, &sql.TxOptions{ReadOnly: true})
+	if errors.Is(err, errInvalidCursor) {
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidCursor})
+		return
+	}
 	if err != nil {
 		a.fail(c, err)
 		return
@@ -63,55 +73,34 @@ func (a *collectionAPI) discovery(c *gin.Context) {
 }
 
 func (a *collectionAPI) discoveryPage(c *gin.Context, tx *gorm.DB, categories []string, theme string, cursor discoveryCursor, limit int, hot bool, now time.Time) (gin.H, error) {
-	snapshot, err := (settings.Store{DB: tx}).Get(c.Request.Context())
+	matches, revision, err := discoverystore.Matches(tx, now)
 	if err != nil {
 		return nil, err
 	}
-	rules := snapshot.DiscoverySelection
-	asOf := now.UnixMilli()
-	since := func(hours int) int64 { return asOf - (time.Duration(hours) * time.Hour).Milliseconds() }
-	// 使用指标对应的 24h 窗口终点，避免一次新采样让旧增长重新入选。
-	growthAt := metricWindowSQL(consts.Window24h, "endAt")
-	// 最新成功批次即使是空榜也会覆盖旧榜，已移除的榜单来源不参与入选。
-	batch := tx.Model(&storage.MaintenanceState{}).
-		Select("json_extract("+storage.MaintenanceStateColumns.Value+",'$.observedSlot') AS observed_slot, json_extract("+storage.MaintenanceStateColumns.Value+",'$.observedAt') AS observed_at").
-		Where(storage.MaintenanceStateColumns.Key+"=? AND EXISTS (SELECT 1 FROM "+storage.DiscoveryRuleTable+" WHERE "+storage.DiscoveryRuleColumns.SourceType+"='"+consts.SourceTrending+"' AND "+storage.DiscoveryRuleColumns.SourceKey+"='"+consts.TrendingAllDaily+"')", collector.BatchKey(consts.TrendingAll, consts.PeriodDaily))
-	// 三个信号取最大时间。批次观测以仓库和来源为键，每个仓库只生成一行。
-	matches := publicRepos(c, tx.Model(&storage.Repository{})).
-		Select(fmt.Sprintf(`%[1]s.*, coalesce(m.%[2]s,-1) AS discovery_score,
-MAX(
-  CASE WHEN %[1]s.%[3]s IN ('%[4]s','%[5]s') AND %[1]s.%[6]s BETWEEN ? AND ?
-    AND %[1]s.%[7]s BETWEEN ? AND ? THEN %[1]s.%[6]s ELSE 0 END,
-  CASE WHEN %[8]s='%[9]s' AND m.%[10]s>=?
-    AND `,
-			storage.RepositoryTable, storage.LatestMetricColumns.HotnessScore, storage.RepositoryColumns.Grade, consts.GradeS, consts.GradeA, storage.RepositoryColumns.DiscoveredAt, storage.RepositoryColumns.LastSuccessAt, metricWindowSQL(consts.Window24h, "quality"), consts.QualityExact, storage.LatestMetricColumns.Delta24h)+growthAt+` BETWEEN ? AND ? THEN `+growthAt+` ELSE 0 END,
-  CASE WHEN t.`+storage.TrendingObservationColumns.RepoID+` IS NOT NULL THEN batch.observed_at ELSE 0 END
-) AS discovery_at`, since(rules.RecentDays*24), asOf, since(rules.RecentSampleHours), asOf,
-			a.cfg.Metrics.HotGrowth, since(rules.GrowthSampleHours), asOf).
-		Joins("LEFT JOIN "+storage.LatestMetricTable+" m ON m."+storage.LatestMetricColumns.RepoID+"="+storage.RepositoryTable+"."+storage.RepositoryColumns.RepoID).
-		Joins("LEFT JOIN (?) batch ON batch.observed_at BETWEEN ? AND ?", batch, since(rules.TrendingHours), asOf).
-		Joins(fmt.Sprintf("LEFT JOIN %[1]s t ON t.%[2]s=%[3]s.%[4]s AND t.%[5]s='%[6]s' AND t.%[7]s='%[8]s' AND t.%[9]s=batch.observed_slot AND t.%[10]s BETWEEN 1 AND ?",
-			storage.TrendingObservationTable, storage.TrendingObservationColumns.RepoID, storage.RepositoryTable, storage.RepositoryColumns.RepoID, storage.TrendingObservationColumns.SourceKey, consts.TrendingAll, storage.TrendingObservationColumns.Window, consts.PeriodDaily, storage.TrendingObservationColumns.ObservedSlot, storage.TrendingObservationColumns.Rank), rules.TrendingTop).
-		Where(storage.RepositoryTable + "." + storage.RepositoryColumns.State + "='" + consts.StatusActive + "'")
+	if cursor.RepoID != 0 && cursor.Revision != revision {
+		return nil, errInvalidCursor
+	}
 	matches = a.filterCategories(c, matches, categories)
 	matches, err = filterProjectTheme(tx, matches, theme)
 	if err != nil {
 		return nil, err
 	}
 
-	// 日期按北京时间分组，缺少热度分的仓库排在同一天有分的仓库之后。
-	const day = "((discovery_at + 28800000) / 86400000)"
-	page := tx.Table("(?) AS selected", matches).Where("discovery_at > 0")
+	// 时间线按首次发现的北京时间日期分组，同一天按展示分排序。
+	firstDiscovered := storage.RepositoryColumns.DiscoveredAt
+	day := discoverystore.BeijingDaySQL(firstDiscovered)
+	withTime := tx.Table("(?) AS matches", matches).Select("matches.*, " + discoverystore.TimeSQL + " AS discovery_at")
+	page := tx.Table("(?) AS selected", withTime).Where("discovery_at > 0")
 	if hot {
 		// 当前热点与时间线共用入选范围，只取其中热度最高的五项。
-		page = page.Where("discovery_score >= 0").Order("discovery_score DESC, " + storage.RepositoryColumns.RepoID + " ASC").Limit(min(limit, 5))
+		page = page.Where("raw_hotness >= 0").Order("raw_hotness DESC, " + storage.RepositoryColumns.RepoID + " ASC").Limit(min(limit, 5))
 	} else {
 		if cursor.RepoID != 0 {
-			cursorDay := (cursor.At + (8 * time.Hour).Milliseconds()) / (24 * time.Hour).Milliseconds()
-			page = page.Where("("+day+", discovery_score, discovery_at, -"+storage.RepositoryColumns.RepoID+") < (?, ?, ?, ?)",
+			cursorDay := discoverystore.BeijingDay(cursor.At)
+			page = page.Where("("+day+", discovery_score, "+firstDiscovered+", -"+storage.RepositoryColumns.RepoID+") < (?, ?, ?, ?)",
 				cursorDay, cursor.Score, cursor.At, -cursor.RepoID)
 		}
-		page = page.Order(day + " DESC, discovery_score DESC, discovery_at DESC, " + storage.RepositoryColumns.RepoID + " ASC").Limit(limit + 1)
+		page = page.Order(day + " DESC, discovery_score DESC, " + firstDiscovered + " DESC, " + storage.RepositoryColumns.RepoID + " ASC").Limit(limit + 1)
 	}
 	var rows []struct {
 		storage.Repository `gorm:"embedded"`
@@ -125,7 +114,10 @@ MAX(
 	if len(rows) > limit {
 		rows = rows[:limit]
 		last := rows[limit-1]
-		data, err := json.Marshal(discoveryCursor{Categories: categories, Theme: theme, At: last.At, Score: last.Score, RepoID: last.RepoID})
+		data, err := json.Marshal(discoveryCursor{
+			Version: discoveryCursorVersion, Revision: revision, Day: discoverystore.BeijingDay(now.UnixMilli()), Categories: categories,
+			Theme: theme, At: last.DiscoveredAt, Score: last.Score, RepoID: last.RepoID,
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +134,9 @@ MAX(
 	}
 	for i, row := range rows {
 		items[i]["discoveryAt"] = iso(row.At)
+		items[i]["selected"] = true
 	}
+	asOf := now.UnixMilli()
 	updatedAt := optionalISO(&asOf)
 	if hot {
 		var marker storage.MaintenanceState

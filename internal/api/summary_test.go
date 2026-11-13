@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/topicstore"
 	"github.com/lifei6671/github-radar/internal/summary"
 	"github.com/lifei6671/github-radar/internal/topics"
 )
@@ -83,7 +85,9 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	}
 	sourceURL := "https://github.com/owner/repo-1/blob/main/README.md"
 	row := storage.AISummary{RepoID: 1, SourceFingerprint: "readme:test", ReadmeSHA: new("test"), SourceQuality: "sufficient",
-		SourceLanguage: "en", SummaryZh: "这个项目用于自动化。文档描述了工作流。", FeaturesJSON: `["工作流"]`,
+		SourceLanguage: "en", TitleZh: new("本地工作流编排工具"),
+		SummaryZh:            strings.Repeat("这个项目提供命令编排、状态追踪和可复用的配置示例。", 9) + "\n团队可以按需要接入已有的开发流程。",
+		FeaturesJSON:         `["工作流"]`,
 		RecommendationReason: new("工作流维护者可以参考它的自动化编排方式。"),
 		AudienceJSON:         "[]", ValueTagsJSON: `["自动化"]`, SourceReadmeURL: &sourceURL, SummaryStatus: "ready", ModelProvider: summary.ProviderKey(cfg.AI),
 		ModelName: cfg.AI.Model, PromptVersion: cfg.AI.Summary.PromptVersion, GeneratedAt: now.UnixMilli()}
@@ -96,12 +100,12 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	}
 	// 此处验证已补齐主题词的摘要仍能走缓存。
 	if err := db.Create(&storage.RepoAITopics{RepoID: 1, TopicsJSON: "[]", SourceFingerprint: row.SourceFingerprint + "|description:test",
-		ModelProvider: row.ModelProvider, ModelName: row.ModelName, PromptVersion: row.PromptVersion}).Error; err != nil {
+		ModelProvider: row.ModelProvider, ModelName: row.ModelName, PromptVersion: row.PromptVersion, ThemeCatalogKey: "initial"}).Error; err != nil {
 		t.Fatal(err)
 	}
 	request(t, router, "POST", path, `{"requestId":"cached"}`, "admin", 200)
 	detail := request(t, router, "GET", "/api/v1/repos/1", "", "admin", 200)
-	if detail["titleZh"] != "这个项目用于自动化" || detail["summaryZh"] != row.SummaryZh || detail["summaryModel"] != cfg.AI.Model ||
+	if detail["titleZh"] != *row.TitleZh || detail["summaryZh"] != row.SummaryZh || detail["summaryModel"] != cfg.AI.Model ||
 		detail["summaryAvailable"] != true || detail["recommendationReason"] != *row.RecommendationReason {
 		t.Fatalf("摘要详情契约错误: %+v", detail)
 	}
@@ -109,10 +113,13 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 	if len(page["items"].([]any)) != 1 {
 		t.Fatal("已保存主题标签应可筛选仓库")
 	}
+	if item := page["items"].([]any)[0].(map[string]any); item["titleZh"] != *row.TitleZh || item["summaryPreview"] != row.SummaryZh {
+		t.Fatalf("卡片应使用独立保存的小标题和摘要: %+v", item)
+	}
 	if err := db.Create(&storage.MaintenanceState{Key: metrics.ComputeKey, Value: "1", UpdatedAt: now.UnixMilli()}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := topics.Generate(t.Context(), db, cfg.Recommendations, now); err != nil {
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, now); err != nil {
 		t.Fatal(err)
 	}
 	items := request(t, router, "GET", "/api/v1/topics?limit=1", "", "admin", 200)
@@ -131,6 +138,13 @@ func TestSummaryAndTopicContracts(t *testing.T) {
 		t.Fatal("选题状态筛选错误")
 	}
 	request(t, router, "PATCH", patchPath, `{"status":"candidate"}`, "admin", 200)
+	if err := db.Model(&row).Update(storage.AISummaryColumns.TitleZh, nil).Error; err != nil {
+		t.Fatal(err)
+	}
+	legacy := request(t, router, "GET", "/api/v1/repos/1", "", "admin", 200)
+	if legacy["titleZh"] != nil || legacy["summaryZh"] != row.SummaryZh {
+		t.Fatalf("旧摘要应照常显示正文: %+v", legacy)
+	}
 }
 
 func TestManuallyAddTopicPreservesEditorialStatus(t *testing.T) {

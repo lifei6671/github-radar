@@ -8,10 +8,10 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/lifei6671/github-radar/internal/auth"
 	"github.com/lifei6671/github-radar/internal/consts"
 )
 
@@ -19,19 +19,21 @@ var yamlErrorLine = regexp.MustCompile(`\bline ([0-9]+)\b`)
 
 // Config 包含部署入口和首次导入使用的旧版 YAML 字段。
 type Config struct {
-	Server          Server          `yaml:"server"`
-	Storage         Storage         `yaml:"storage"`
-	GitHub          GitHub          `yaml:"github"`
-	Scheduler       Scheduler       `yaml:"scheduler"`
-	Discovery       Discovery       `yaml:"discovery"`
-	CategoriesFile  string          `yaml:"categories_file"`
-	Auth            Auth            `yaml:"auth" json:"-"`
-	AI              AI              `yaml:"ai"`
-	Embedding       Embedding       `yaml:"-"`
-	Metrics         Metrics         `yaml:"-"`
-	Maintenance     Maintenance     `yaml:"-"`
-	Recommendations Recommendations `yaml:"-"`
-	path            string
+	Server            Server            `yaml:"server"`
+	Storage           Storage           `yaml:"storage"`
+	GitHub            GitHub            `yaml:"github"`
+	Scheduler         Scheduler         `yaml:"scheduler"`
+	Discovery         Discovery         `yaml:"discovery"`
+	CategoriesFile    string            `yaml:"categories_file"`
+	Auth              Auth              `yaml:"auth" json:"-"`
+	Credentials       Credentials       `yaml:"credentials" json:"-"`
+	AI                AI                `yaml:"ai"`
+	Embedding         Embedding         `yaml:"-"`
+	Metrics           Metrics           `yaml:"-"`
+	Maintenance       Maintenance       `yaml:"-"`
+	Recommendations   Recommendations   `yaml:"-"`
+	ReportPublication ReportPublication `yaml:"-"`
+	path              string
 }
 
 // Server 保存监听地址和 HTTP 超时。
@@ -46,6 +48,12 @@ type Server struct {
 type Auth struct {
 	AdminPassword string `yaml:"admin_password" json:"-"`
 	SessionSecret string `yaml:"session_secret" json:"-"`
+}
+
+// Credentials 保存部署 YAML 中的上游访问密钥。
+type Credentials struct {
+	GitHubToken string `yaml:"github_token" json:"-"`
+	AIAPIKey    string `yaml:"ai_api_key" json:"-"`
 }
 
 // Storage 保存数据库路径和 SQLite 连接池配置。
@@ -81,6 +89,7 @@ func Load(path string) (Config, error) {
 	cfg.Metrics, cfg.Maintenance = DefaultMetrics(), DefaultMaintenance()
 	cfg.AI.Summary, cfg.Recommendations = DefaultSummary(), DefaultRecommendations()
 	cfg.Embedding = DefaultEmbedding()
+	cfg.ReportPublication = DefaultReportPublication()
 	cfg.AI.Enabled = true
 	cfg.AI.BaseURLEnv = "AI_BASE_URL"
 	cfg.AI.APIKeyEnv = "AI_API_KEY"
@@ -96,7 +105,8 @@ func Load(path string) (Config, error) {
 			Storage struct {
 				Path string `yaml:"path"`
 			} `yaml:"storage"`
-			Auth Auth `yaml:"auth"`
+			Auth        Auth        `yaml:"auth"`
+			Credentials Credentials `yaml:"credentials"`
 		}
 		deployment.Server.Listen, deployment.Storage.Path = cfg.Server.Listen, cfg.Storage.Path
 		if err := loadYAML(path, &deployment, false); err != nil {
@@ -104,6 +114,7 @@ func Load(path string) (Config, error) {
 		}
 		cfg.Server.Listen, cfg.Storage.Path = deployment.Server.Listen, deployment.Storage.Path
 		cfg.Server.SiteURL, cfg.Auth = deployment.Server.SiteURL, deployment.Auth
+		cfg.Credentials = deployment.Credentials
 	}
 	if strings.TrimSpace(cfg.Server.Listen) == "" || strings.TrimSpace(cfg.Storage.Path) == "" {
 		return Config{}, errors.New("监听地址和数据库路径不能为空")
@@ -158,16 +169,30 @@ func (cfg Config) ValidateAdmin() error {
 	if cfg.Server.SiteURL == "" {
 		return errors.New("请在 YAML 配置中设置 server.site_url")
 	}
-	password := cfg.Auth.AdminPassword
-	if utf8.RuneCountInString(strings.TrimSpace(password)) < consts.AdminPasswordMinChars ||
-		len(password) > consts.AdminPasswordMaxBytes || strings.ContainsAny(password, "\r\n") {
-		return fmt.Errorf("请在 YAML 配置中设置 auth.admin_password，单行至少 %d 个字符且不超过 %d 字节",
-			consts.AdminPasswordMinChars, consts.AdminPasswordMaxBytes)
+	if _, err := auth.ParsePasswordHash(cfg.Auth.AdminPassword); err != nil {
+		return fmt.Errorf("auth.admin_password: %w", err)
 	}
 	if len(strings.TrimSpace(cfg.Auth.SessionSecret)) < consts.AdminSessionSecretBytes {
 		return fmt.Errorf("请在 YAML 配置中设置 auth.session_secret，至少 %d 字节", consts.AdminSessionSecretBytes)
 	}
 	return nil
+}
+
+// GitHubToken 返回部署 YAML 或运行设置指定环境变量中的 GitHub 令牌。
+func (cfg Config) GitHubToken() string {
+	return credential(cfg.Credentials.GitHubToken, cfg.GitHub.TokenEnv)
+}
+
+// AIAPIKey 返回部署 YAML 或运行设置指定环境变量中的模型密钥。
+func (cfg Config) AIAPIKey() string {
+	return credential(cfg.Credentials.AIAPIKey, cfg.AI.APIKeyEnv)
+}
+
+func credential(value, env string) string {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv(env))
 }
 
 // MissingAISettings 返回启用 AI 时缺少的设置或密钥环境变量名。
@@ -182,7 +207,7 @@ func (cfg Config) MissingAISettings() []string {
 	if strings.TrimSpace(cfg.AI.Model) == "" {
 		missing = append(missing, "ai.model")
 	}
-	if strings.TrimSpace(os.Getenv(cfg.AI.APIKeyEnv)) == "" {
+	if cfg.AIAPIKey() == "" {
 		missing = append(missing, cfg.AI.APIKeyEnv)
 	}
 	return missing

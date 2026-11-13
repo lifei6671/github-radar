@@ -182,6 +182,15 @@ type drainFixture struct {
 func (d drainFixture) Pause(ctx context.Context) error { close(d.started); return nil }
 func (d drainFixture) Resume()                         {}
 
+type restoreRuntimeFixture struct{ applied chan config.Runtime }
+
+func (f restoreRuntimeFixture) RestoreRuntime(values config.Runtime) error {
+	f.applied <- values
+	return nil
+}
+
+func (restoreRuntimeFixture) RestartRequired() bool { return false }
+
 func TestR2BackupRetentionAndSetupRestore(t *testing.T) {
 	ctx := t.Context()
 	server := &s3Fixture{objects: make(map[string]s3FixtureObject)}
@@ -191,6 +200,15 @@ func TestR2BackupRetentionAndSetupRestore(t *testing.T) {
 	dir := t.TempDir()
 	source, db, _ := testManager(t, filepath.Join(dir, "source.db"), true, nil)
 	source.store = factory
+	store := settings.Store{DB: db}
+	runtime, err := store.Get(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.Settings.GitHub.SearchSoftBudgetPerMin = 9
+	if _, err := store.SaveRuntime(ctx, runtime.Revision, runtime.Settings); err != nil {
+		t.Fatal(err)
+	}
 	cfg := defaults()
 	cfg.R2 = connection("old")
 	if _, err := source.Save(ctx, SettingsUpdate{Enabled: false, Schedule: cfg.Schedule, RetentionDays: 5, R2: &cfg.R2}); err != nil {
@@ -259,6 +277,8 @@ func TestR2BackupRetentionAndSetupRestore(t *testing.T) {
 	workers := drainFixture{started: make(chan struct{})}
 	target, targetDB, targetCfg := testManager(t, filepath.Join(dir, "target.db"), false, workers)
 	target.store = factory
+	runtimeFixture := restoreRuntimeFixture{applied: make(chan config.Runtime, 1)}
+	target.runtime = runtimeFixture
 	targetConn := connection("new")
 	id, _, err := target.CreateSession(ctx, targetConn)
 	if err != nil {
@@ -296,6 +316,14 @@ func TestR2BackupRetentionAndSetupRestore(t *testing.T) {
 	restored := waitOperation(t, target, restore.ID, "completed")
 	if !restored.DatabaseApplied || !target.Initialized() || !target.Status().AutoAIResumeRequired {
 		t.Fatalf("restore: %+v", restored)
+	}
+	select {
+	case got := <-runtimeFixture.applied:
+		if got.GitHub.SearchSoftBudgetPerMin != 9 {
+			t.Fatal("恢复时应加载备份中的运行配置")
+		}
+	default:
+		t.Fatal("业务恢复前应加载运行配置")
 	}
 	requireValue(t, target.pool.QueryRow("SELECT value FROM maintenance_state WHERE key='fixture.saved'"), "from backup")
 	requireValue(t, target.pool.QueryRow("SELECT last_error_code FROM jobs WHERE id=?", job.ID), "restore_reset")

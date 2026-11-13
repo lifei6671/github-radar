@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, Wrench } from 'lucide-react'
+import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { api, errorText } from '../api/client'
 import type { Items, Job, Limits, StorageStatus } from '../api/types'
 import { AdminMetrics, AdminPanel } from '../components/admin'
 import { SystemHeader, systemPage } from '../components/system-navigation'
-import { ActionButton, Badge, Notice, PageError, Skeleton } from '../components/ui'
+import { ActionButton, Badge, Dialog, Notice, PageError, Skeleton } from '../components/ui'
 import { formatBytes, jobLabel, number, repoPath, timestamp } from '../lib/format'
 import { CategoryEditor, DiscoveryTabEditor, ProjectThemeEditor, RulesEditor, RuntimeEditor } from './settings'
 import { BackupPage } from './backup'
@@ -153,6 +154,7 @@ const jobTypes: Record<string, string> = {
   refresh_repo: '仓库采样', discover_trending: 'Trending 发现', discover_search: 'Search 发现',
   refresh_readme_summary: '中文摘要',
   translate_readme: 'README 翻译',
+  compose_report: '报刊组稿',
 }
 
 function useSystemJobs() {
@@ -190,9 +192,32 @@ function JobFeed({ query, items, empty }: { query: ReturnType<typeof useSystemJo
         {job.repoId !== null && job.repoFullName && <Link className="admin-link" to={repoPath(job.repoFullName, true, job.repoNameIsCurrent === false ? job.repoId : undefined)}
           state={{ repoId: job.repoId }} title="查看关联仓库" aria-label={'查看任务 ' + job.id + ' 的仓库'}><ArrowUpRight size={14} /></Link>}
       </div>{job.errorCode && <code className="minor tone-hot">{job.errorCode}</code>}</td>
-      <td><JobBadge status={job.status} /></td>
+      <td><JobBadge status={job.status} />{job.type === 'compose_report' && job.status === 'unknown' &&
+        <ReportRetry id={job.id} onQueued={() => { void query.refetch() }} />}</td>
       <td className="numeric">{job.attempts} / {job.maxAttempts}</td>
       <td><ObservedTime value={job.updatedAt} /></td>
     </tr>)}</tbody>
   </table></div>
+}
+
+function ReportRetry({ id, onQueued }: { id: number; onQueued: () => void }) {
+  const [confirm, setConfirm] = useState(false)
+  const [requestId] = useState(() => crypto.getRandomValues(new Uint32Array(4)).join('-'))
+  const retry = useMutation({
+    mutationFn: () => api('/jobs/' + id + '/retry', {
+      method: 'POST', body: { requestId, acceptPossibleCharge: true },
+    }),
+    onSuccess: () => { setConfirm(false); onQueued() },
+  })
+  return <>
+    <button className="button" onClick={() => setConfirm(true)} disabled={retry.isPending || retry.isSuccess}>确认并重试</button>
+    {confirm && <Dialog title="确认重新组稿" onClose={() => setConfirm(false)}>
+      <p>上一次调用可能已计费。继续会使用一次手动 AI 调用额度。</p>
+      {retry.error && <Notice error>{errorText(retry.error)}</Notice>}
+      <div className="action-row">
+        <button className="button" data-autofocus onClick={() => setConfirm(false)}>取消</button>
+        <ActionButton className="button primary" pending={retry.isPending} onClick={() => retry.mutate()}>接受可能再次计费</ActionButton>
+      </div>
+    </Dialog>}
+  </>
 }

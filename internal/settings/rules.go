@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -19,6 +21,7 @@ type Rule struct {
 	SourceType      string `json:"sourceType"`
 	SourceKey       string `json:"sourceKey"`
 	Query           string `json:"query"`
+	MinStars        *int   `json:"minStars,omitempty"`
 	Enabled         bool   `json:"enabled"`
 	IntervalMinutes int    `json:"intervalMinutes"`
 	Priority        int    `json:"priority"`
@@ -61,6 +64,7 @@ func initialRules(seed config.Config, now time.Time) ([]storage.DiscoveryRule, e
 	for _, rule := range seed.Discovery.SearchRules {
 		rules = append(rules, storage.DiscoveryRule{
 			SourceType: consts.SourceSearch, SourceKey: rule.Key, Query: strings.TrimSpace(rule.Query), Enabled: rule.Enabled,
+			MinStars:        searchMinStars(rule.MinStars),
 			IntervalMinutes: round * max(enabled, 1), Priority: rule.Priority,
 			NextRunAt: now.Add(time.Duration(offset*round) * time.Minute).UnixMilli(),
 		})
@@ -78,11 +82,19 @@ func rulesFromDB(tx *gorm.DB) ([]storage.DiscoveryRule, error) {
 }
 
 func ruleView(row storage.DiscoveryRule) Rule {
-	query := row.Query
-	if row.SourceType == consts.SourceTrending {
-		query = ""
+	item := Rule{SourceType: row.SourceType, SourceKey: row.SourceKey, Enabled: row.Enabled,
+		IntervalMinutes: row.IntervalMinutes, Priority: row.Priority}
+	if row.SourceType == consts.SourceSearch {
+		item.Query, item.MinStars = row.Query, &row.MinStars
 	}
-	return Rule{row.SourceType, row.SourceKey, query, row.Enabled, row.IntervalMinutes, row.Priority}
+	return item
+}
+
+func searchMinStars(value *int) int {
+	if value != nil {
+		return *value
+	}
+	return consts.DefaultSearchMinStars
 }
 
 func (s Store) DiscoveryRules(ctx context.Context) (int64, []Rule, error) {
@@ -126,10 +138,21 @@ func normalizeRules(items []Rule) ([]Rule, error) {
 			if item.Query != "" {
 				return nil, fmt.Errorf("Trending 规则使用来源键和周期，无需搜索查询")
 			}
+			if item.MinStars != nil {
+				return nil, fmt.Errorf("最低 Star 只适用于 Search 规则")
+			}
 		case consts.SourceSearch:
 			if !config.ValidSourceSlug(item.SourceKey) || item.Query == "" {
 				return nil, fmt.Errorf("Search 规则需要有效键和查询")
 			}
+			floor := searchMinStars(item.MinStars)
+			if floor < 0 {
+				return nil, fmt.Errorf("最低 Star 必须为非负整数")
+			}
+			if _, err := (collection.Payload{Query: item.Query, StarFloor: floor}).SearchQuery(); err != nil {
+				return nil, err
+			}
+			item.MinStars = &floor
 		default:
 			return nil, fmt.Errorf("发现规则类型必须为 search 或 trending")
 		}
@@ -155,12 +178,16 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 		}
 		now := time.Now().UnixMilli()
 		for position, item := range rules {
+			floor := 0
+			if item.MinStars != nil {
+				floor = *item.MinStars
+			}
 			key := ruleKey{item.SourceType, item.SourceKey}
 			row, found := existing[key]
 			delete(existing, key)
 			if !found {
 				row = storage.DiscoveryRule{
-					SourceType: item.SourceType, SourceKey: item.SourceKey, Query: item.Query,
+					SourceType: item.SourceType, SourceKey: item.SourceKey, Query: item.Query, MinStars: floor,
 					Enabled: item.Enabled, IntervalMinutes: item.IntervalMinutes, Priority: item.Priority, NextRunAt: now, DisplayPosition: position,
 				}
 				if err := tx.Create(&row).Error; err != nil {
@@ -168,7 +195,7 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 				}
 				continue
 			}
-			if ruleView(row) == item {
+			if reflect.DeepEqual(ruleView(row), item) {
 				// 只换展示顺序时保留任务计划、规则 ID 和现有租约。
 				if row.DisplayPosition != position {
 					if err := tx.Model(&row).Update(storage.DiscoveryRuleColumns.DisplayPosition, position).Error; err != nil {
@@ -178,7 +205,7 @@ func (s Store) SaveDiscoveryRules(ctx context.Context, revision int64, items []R
 				continue
 			}
 			if err := tx.Model(&row).Updates(map[string]any{
-				storage.DiscoveryRuleColumns.Query: item.Query, storage.DiscoveryRuleColumns.Enabled: item.Enabled, storage.DiscoveryRuleColumns.IntervalMinutes: item.IntervalMinutes,
+				storage.DiscoveryRuleColumns.Query: item.Query, storage.DiscoveryRuleColumns.MinStars: floor, storage.DiscoveryRuleColumns.Enabled: item.Enabled, storage.DiscoveryRuleColumns.IntervalMinutes: item.IntervalMinutes,
 				storage.DiscoveryRuleColumns.Priority: item.Priority, storage.DiscoveryRuleColumns.NextRunAt: now, storage.DiscoveryRuleColumns.DisplayPosition: position,
 			}).Error; err != nil {
 				return err

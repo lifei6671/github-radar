@@ -14,7 +14,7 @@ func (a *collectionAPI) similar(c *gin.Context) {
 	if !ok {
 		return
 	}
-	items, err := embedding.Similar(a.db.WithContext(c.Request.Context()), a.cfg.Embedding, id)
+	items, err := embedding.Similar(a.db.WithContext(c.Request.Context()), runtimeFor(c).Config.Embedding, id)
 	if err != nil {
 		a.fail(c, err)
 		return

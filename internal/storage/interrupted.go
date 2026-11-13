@@ -18,7 +18,7 @@ func InterruptJob(ctx context.Context, db *gorm.DB, job Job) error {
 		now := time.Now()
 		at := now.UnixMilli()
 		var call AICall
-		if job.Type == consts.JobRefreshSummary || job.Type == consts.JobTranslateReadme {
+		if job.Type == consts.JobRefreshSummary || job.Type == consts.JobTranslateReadme || job.Type == consts.JobComposeReport {
 			if err := tx.Find(&call, AICallColumns.JobID+"=? AND "+AICallColumns.Status+" IN ('"+consts.StatusReserved+"','"+consts.StatusSending+"','"+consts.StatusUnknown+"')", job.ID).Error; err != nil {
 				return err
 			}

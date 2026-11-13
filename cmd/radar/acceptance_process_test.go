@@ -18,10 +18,20 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/lifei6671/github-radar/internal/auth"
 )
 
 const acceptanceAdmin = "radar-acceptance-local-admin"
 const acceptanceSessionSecret = "radar-acceptance-session-signing-key"
+
+var acceptanceAdminHash = sync.OnceValue(func() string {
+	hash, err := auth.HashPassword(acceptanceAdmin)
+	if err != nil {
+		panic(err)
+	}
+	return hash
+})
 
 type acceptanceServer struct {
 	base    string
@@ -44,7 +54,7 @@ func acceptanceConfig(t *testing.T, dir string) string {
 func writeAcceptanceConfig(t *testing.T, path, listen, db string, mode os.FileMode) {
 	t.Helper()
 	content := fmt.Sprintf("server:\n  listen: %q\n  site_url: 'http://127.0.0.1'\nstorage:\n  path: %q\nauth:\n  admin_password: %q\n  session_secret: %q\n",
-		listen, db, acceptanceAdmin, acceptanceSessionSecret)
+		listen, db, acceptanceAdminHash(), acceptanceSessionSecret)
 	if err := os.WriteFile(path, []byte(content), mode); err != nil {
 		t.Fatal(err)
 	}

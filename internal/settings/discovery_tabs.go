@@ -30,6 +30,7 @@ type DiscoveryTabSettings struct {
 	Items     []DiscoveryTab       `json:"items"`
 	Options   []DiscoveryTabOption `json:"options"`
 	Selection DiscoverySelection   `json:"selection"`
+	Ranking   DiscoveryRanking     `json:"ranking"`
 }
 
 // DiscoverySelection 保存发现页的滚动时间窗口和全站日榜名次门槛。
@@ -39,6 +40,29 @@ type DiscoverySelection struct {
 	GrowthSampleHours int `json:"growthSampleHours"`
 	TrendingHours     int `json:"trendingHours"`
 	TrendingTop       int `json:"trendingTop"`
+}
+
+// DiscoveryRanking 控制发现页的展示分和老项目轮换。
+type DiscoveryRanking struct {
+	HeatWeight      int `json:"heatWeight"`
+	FreshnessWeight int `json:"freshnessWeight"`
+	ConsecutiveDays int `json:"consecutiveDays"`
+	CooldownDays    int `json:"cooldownDays"`
+}
+
+func defaultDiscoveryRanking() DiscoveryRanking {
+	return DiscoveryRanking{HeatWeight: 70, FreshnessWeight: 30, ConsecutiveDays: 3, CooldownDays: 2}
+}
+
+func (r DiscoveryRanking) validate() error {
+	if r.HeatWeight < 0 || r.HeatWeight > 100 || r.FreshnessWeight != 100-r.HeatWeight {
+		return fmt.Errorf("热度与新鲜度权重必须在 0%% 到 100%% 之间，合计为 100%%")
+	}
+	maxDays := config.DurationLimit(24 * time.Hour)
+	if r.ConsecutiveDays < 1 || int64(r.ConsecutiveDays) > maxDays || r.CooldownDays < 0 || int64(r.CooldownDays) > maxDays {
+		return fmt.Errorf("连续上榜天数须为正整数，冷却天数须为非负整数，两者最多 %d 天", maxDays)
+	}
+	return nil
 }
 
 func defaultDiscoverySelection() DiscoverySelection {
@@ -79,7 +103,8 @@ func discoveryTabSettings(snapshot Snapshot, categories []config.Category) Disco
 			items = append(items, DiscoveryTab{Slug: option.Slug})
 		}
 	}
-	return DiscoveryTabSettings{Revision: snapshot.Revision, Items: items, Options: options, Selection: snapshot.DiscoverySelection}
+	return DiscoveryTabSettings{Revision: snapshot.Revision, Items: items, Options: options, Selection: snapshot.DiscoverySelection,
+		Ranking: snapshot.DiscoveryRanking}
 }
 
 func (s Store) DiscoveryTabSettings(ctx context.Context) (DiscoveryTabSettings, error) {
@@ -100,9 +125,14 @@ func (s Store) DiscoveryTabSettings(ctx context.Context) (DiscoveryTabSettings, 
 }
 
 // SaveDiscoveryTabs 与分类修改共用修订号，避免保存已被移除的分类。
-func (s Store) SaveDiscoveryTabs(ctx context.Context, revision int64, items []DiscoveryTab, newCategories []config.Category, selection *DiscoverySelection) (DiscoveryTabSettings, error) {
+func (s Store) SaveDiscoveryTabs(ctx context.Context, revision int64, items []DiscoveryTab, newCategories []config.Category, selection *DiscoverySelection, ranking *DiscoveryRanking) (DiscoveryTabSettings, error) {
 	if selection != nil {
 		if err := selection.validate(); err != nil {
+			return DiscoveryTabSettings{}, &Invalid{Err: err}
+		}
+	}
+	if ranking != nil {
+		if err := ranking.validate(); err != nil {
 			return DiscoveryTabSettings{}, &Invalid{Err: err}
 		}
 	}
@@ -141,6 +171,9 @@ func (s Store) SaveDiscoveryTabs(ctx context.Context, revision int64, items []Di
 		snapshot.DiscoveryTabs = tabs
 		if selection != nil {
 			snapshot.DiscoverySelection = *selection
+		}
+		if ranking != nil {
+			snapshot.DiscoveryRanking = *ranking
 		}
 		return nil
 	})

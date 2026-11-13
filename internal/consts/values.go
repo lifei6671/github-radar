@@ -1,5 +1,7 @@
 package consts
 
+const DefaultSearchMinStars = 200
+
 // 仓库、任务、摘要和备份的状态值与接口或数据库约定一致。
 const (
 	StatusActive         = "active"
@@ -34,6 +36,7 @@ const (
 	JobDiscoverTrending = "discover_trending"
 	JobRefreshSummary   = "refresh_readme_summary"
 	JobTranslateReadme  = "translate_readme"
+	JobComposeReport    = "compose_report"
 	OriginAuto          = "auto"
 	OriginManual        = "manual"
 )
@@ -68,16 +71,19 @@ const (
 
 // 命令行子命令是启动入口的固定标识。
 const (
-	CommandServer          = "server"
-	CommandMigrate         = "migrate"
-	CommandCollectOnce     = "collect-once"
-	CommandMaintenanceOnce = "maintenance-once"
-	CommandBackup          = "backup"
+	CommandServer                = "server"
+	CommandMigrate               = "migrate"
+	CommandCollectOnce           = "collect-once"
+	CommandMaintenanceOnce       = "maintenance-once"
+	CommandBackup                = "backup"
+	CommandHashPassword          = "hash-password"
+	CommandGenerateSessionSecret = "generate-session-secret"
 )
 
 // 列表排序标识和分类回退标识。
 const (
 	SortDiscovered = "discovered"
+	SortRelevance  = "relevance"
 	SortStars      = "stars"
 	SortFollowed   = "followed"
 	SortHotness    = "hotness"

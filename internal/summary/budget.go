@@ -119,7 +119,7 @@ func (q Queue) settle(ctx context.Context, job storage.Job, o outcome) error {
 			}
 		}
 		if job.Type == JobType && (o.status == consts.StatusFailed || o.status == consts.StatusDead || o.status == consts.StatusUnknown) && o.attempts == job.Attempts {
-			if err := q.recordFailure(tx, *job.RepoID, o.code, now); err != nil {
+			if err := q.recordFailure(tx, *job.RepoID, o.code, now, !jobTopicsOnly(job)); err != nil {
 				return err
 			}
 		}

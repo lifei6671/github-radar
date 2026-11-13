@@ -1,5 +1,10 @@
 package storage
 
+// MetricWindowSQL 读取别名 m 的指标窗口，调用方使用固定窗口名和字段。
+func MetricWindowSQL(window, attribute string) string {
+	return `json_extract(m.` + LatestMetricColumns.WindowDetailsJSON + `,'$."` + window + `".` + attribute + `')`
+}
+
 // MetricAnchors 保存非空 UTC 桶的首末实际观测以及样本数。
 type MetricAnchors struct {
 	StarsOpen       int64 `gorm:"column:stars_open"`

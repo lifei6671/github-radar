@@ -15,6 +15,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/topicstore"
 	"github.com/lifei6671/github-radar/internal/topics"
 )
 
@@ -77,12 +78,12 @@ func (a *collectionAPI) addTopic(c *gin.Context) {
 	if !ok {
 		return
 	}
-	row, err := topics.Add(c.Request.Context(), a.db, id, time.Now())
+	row, err := topics.Add(c.Request.Context(), topicstore.Store{DB: a.db}, id, time.Now())
 	if err != nil {
 		a.fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, topicView(row))
+	c.JSON(http.StatusOK, topicView(storage.TopicCandidate(row)))
 }
 
 func (a *collectionAPI) topics(c *gin.Context) {
@@ -102,7 +103,7 @@ func (a *collectionAPI) topics(c *gin.Context) {
 	day := c.Query("day")
 	orderColumn := "t." + storage.TopicCandidateColumns.UpdatedAt
 	if day != "" {
-		loc, err := time.LoadLocation(a.cfg.Recommendations.Timezone)
+		loc, err := time.LoadLocation(runtimeFor(c).Config.Recommendations.Timezone)
 		if err != nil {
 			a.fail(c, err)
 			return
@@ -183,7 +184,7 @@ func (a *collectionAPI) topicDays(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidTopicStatus})
 		return
 	}
-	loc, err := time.LoadLocation(a.cfg.Recommendations.Timezone)
+	loc, err := time.LoadLocation(runtimeFor(c).Config.Recommendations.Timezone)
 	if err != nil {
 		a.fail(c, err)
 		return

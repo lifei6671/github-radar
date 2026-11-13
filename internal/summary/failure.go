@@ -8,13 +8,19 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
 func retryAt(job storage.Job, now time.Time) int64 {
-	return now.Add(time.Duration(1<<min(job.Attempts, 8))*time.Second + time.Duration(job.ID%17)*time.Second).UnixMilli()
+	return collection.RetryAt(job.ID, job.Attempts, now)
+}
+
+func budgetRetryAt(job storage.Job, now time.Time) int64 {
+	reset := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour).UnixMilli()
+	return collection.SpreadRetry(reset, job.ID, job.IsManual())
 }
 
 func (e *Engine) sourceFailed(ctx context.Context, job storage.Job, err error) error {
@@ -64,7 +70,8 @@ func (e *Engine) fail(ctx context.Context, job storage.Job, code string, retry b
 	if !retry || attempts >= job.MaxAttempts {
 		status = consts.StatusDead
 	}
-	return e.Queue.settle(ctx, job, outcome{status: status, code: code, attempts: attempts, next: max(until, retryAt(job, time.Now()))})
+	return e.Queue.settle(ctx, job, outcome{status: status, code: code, attempts: attempts,
+		next: max(collection.SpreadRetry(until, job.ID, job.IsManual()), retryAt(job, time.Now()))})
 }
 
 func (e *Engine) finishFailure(ctx context.Context, job storage.Job, call storage.AICall, result ModelResult, duration time.Duration,
@@ -94,6 +101,9 @@ func (e *Engine) recordCallFailure(ctx context.Context, job storage.Job, call st
 	}
 	return e.Queue.settle(ctx, job, outcome{status: status, code: result.Code, next: retryAt(job, time.Now()),
 		attempts: job.Attempts, call: &call, model: result, duration: duration, apply: func(tx *gorm.DB) error {
+			if check.RepoID == 0 {
+				return nil
+			}
 			return saveObserved(tx, old, check, topicsFingerprint)
 		}})
 }

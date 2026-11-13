@@ -1,20 +1,24 @@
 import { QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, ArrowDownRight, ArrowLeft, ArrowRight, Bookmark, ChartNoAxesCombined, Crosshair, Ellipsis, Github, Grid2X2, LayoutDashboard,
-  Layers3, ListFilter, LogOut, Monitor, Moon, Radar, Search, Sun, Workflow,
+  Activity, ArrowLeft, ArrowRight, Bookmark, ChartNoAxesCombined, Crosshair, Database, Ellipsis, Github, Grid2X2,
+  Layers3, ListFilter, LogOut, Monitor, Moon, Newspaper, Radar, Search, Sun, Workflow,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { Link, Navigate, NavLink, Outlet, ScrollRestoration, useLocation, useMatch, useNavigate, useOutletContext, useSearchParams } from 'react-router'
 import { api, ApiError, errorText, setAuthenticated, useSession } from '../api/client'
 import { ActionButton, BackToTop, Dialog, Notice, PageError, Skeleton } from '../components/ui'
-import { topicsPath } from '../lib/format'
+import { NavigationProgress } from '../components/navigation-feedback'
+import { discoveryCategoryRoute, repoCategoryRoute, topicsPath } from '../lib/format'
+import { reportKinds, reportNames, reportPath } from '../lib/report-period'
 import { SetupBackup, useBackupStatus, useRestoredData } from '../pages/backup'
 
+const dailyEntry = { path: '/daily', label: '日报', icon: Newspaper }
 const publicNav = [
   { path: '/', label: '发现', icon: Radar },
   { path: '/repos', label: '全部项目', icon: Layers3 },
   { path: '/trending', label: '热点榜', icon: ChartNoAxesCombined },
+  dailyEntry,
   { path: topicsPath, label: '主题', icon: Grid2X2 },
   { path: '/starred', label: '收藏', icon: Bookmark },
 ]
@@ -24,9 +28,8 @@ const adminNav = [
   { path: '/admin/topics', label: '选题池', icon: Workflow },
   { path: '/admin/runs', label: '运行状态', icon: Activity },
 ]
-const adminEntry = { path: '/admin', label: '后台管理', icon: LayoutDashboard }
-const publicMobile = [publicNav[0], { ...publicNav[1], label: '项目' }, publicNav[2], publicNav[4]]
-const publicMore = [publicNav[3], adminEntry]
+const publicMobile = [publicNav[0], { ...publicNav[1], label: '项目' }, publicNav[2], dailyEntry]
+const publicMore = [publicNav[4], publicNav[5]]
 
 function Brand({ admin = false }: { admin?: boolean }) {
   return <div className="brand">
@@ -163,9 +166,23 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
   const system = pathname === '/admin/runs'
   const repoDetail = pathname.startsWith(admin ? '/admin/repos/' : '/repos/')
   const topicDetail = !admin && pathname.startsWith(topicsPath + '/')
+  const discoveryCategory = useMatch(discoveryCategoryRoute) !== null
+  const repoCategory = useMatch(repoCategoryRoute) !== null
   const navigation = admin ? adminNav : publicNav
-  const page = repoDetail ? '仓库详情' : navigation.find(({ path }) => path !== '/' && (location.pathname === path || location.pathname.startsWith(path + '/')))?.label
+  const reportKind = admin ? undefined : reportKinds.find((kind) => pathname === reportPath(kind) || pathname.startsWith(reportPath(kind) + '/'))
+  const page = repoDetail ? '仓库详情' : repoCategory ? '全部项目' : reportKind ? reportNames[reportKind] :
+    navigation.find(({ path }) => path !== '/' && (location.pathname === path || location.pathname.startsWith(path + '/')))?.label
   const showMaintenance = maintenance && (!system || new URLSearchParams(location.search).get('tab') !== 'backup')
+  function navigationLink({ path, label, icon: Icon }: typeof publicNav[number], mobile = false) {
+    const content = <><Icon size={mobile ? 20 : 17} strokeWidth={1.7} /><span>{label}</span></>
+    const title = mobile ? undefined : label
+    if (path === '/' || path === '/repos' || path === dailyEntry.path) {
+      const active = path === '/' ? pathname === '' || discoveryCategory :
+        path === '/repos' ? pathname === '/repos' || repoCategory : Boolean(reportKind)
+      return <Link key={path} to={path} className={active ? 'active' : undefined} aria-current={active ? 'page' : undefined} title={title}>{content}</Link>
+    }
+    return <NavLink key={path} to={path} end={path.endsWith('/repos')} title={title}>{content}</NavLink>
+  }
   useEffect(() => {
     function shortcut(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
@@ -182,15 +199,13 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
       <Link to={admin ? '/admin/runs' : '/'} className="brand-link" aria-label={admin ? 'GitHub 雷达后台首页' : 'GitHub 雷达首页'}><Brand admin={admin} /></Link>
       <nav aria-label="主导航" className="side-nav">
         <div className="side-nav-group">
-          {navigation.map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/' || path.endsWith('/repos')} title={label}>
-            <Icon size={17} strokeWidth={1.7} /><span>{label}</span>
-          </NavLink>)}
+          {navigation.map((item) => navigationLink(item))}
         </div>
       </nav>
       <div className="side-bottom">
-        <Link to={admin ? '/' : adminEntry.path} className="side-action" aria-label={admin ? '返回前台' : adminEntry.label} title={admin ? '返回前台' : adminEntry.label}>
-          {admin ? <Radar size={16} /> : <LayoutDashboard size={16} />}<span>{admin ? '返回前台' : adminEntry.label}</span>
-        </Link>
+        {admin && <Link to="/" className="side-action" aria-label="返回前台" title="返回前台">
+          <Radar size={16} aria-hidden /><span>返回前台</span>
+        </Link>}
         <a href="https://github.com/lifei6671/github-radar" target="_blank" rel="noopener noreferrer" className="side-action"
           aria-label="GitHub 开源" title="GitHub 开源"><Github size={16} aria-hidden /><span>GitHub 开源</span></a>
         <div className="side-utility"><ThemeControl theme={theme} segmented />{admin && <LogoutButton />}</div>
@@ -212,9 +227,7 @@ function Shell({ admin = false, maintenance = false }: { admin?: boolean; mainte
       </section> : <Outlet />}
     </div></main>
     <nav aria-label="手机导航" className="mobile-nav">
-      {(admin ? adminNav : publicMobile).map(({ path, label, icon: Icon }) => <NavLink key={path} to={path} end={path === '/' || path.endsWith('/repos')}>
-        <Icon size={20} strokeWidth={1.7} /><span>{label}</span>
-      </NavLink>)}
+      {(admin ? adminNav : publicMobile).map((item) => navigationLink(item, true))}
       {!admin && <button className={publicMore.some(({ path }) => location.pathname.startsWith(path)) ? 'active' : undefined}
         aria-haspopup="dialog" onClick={() => setMore(true)}><Ellipsis size={20} /><span>更多</span></button>}
     </nav>
@@ -241,12 +254,10 @@ type SessionContext = { maintenance: boolean; sessionError: Error | null; retryS
 
 function SessionContent({ authenticated }: { authenticated: boolean | null }) {
   const adminArea = useMatch('/admin/*')
-  const repoDetail = useMatch('/repos/:owner/:name')
-  // 前台仓库详情只查询是否显示管理入口，其余公开页面无需探测会话。
   const check = useQuery({
     queryKey: ['auth-session'],
     queryFn: ({ signal }) => api<{ authenticated: boolean }>('/auth/session', { signal }),
-    enabled: authenticated === null && Boolean(adminArea || repoDetail),
+    enabled: authenticated === null && adminArea !== null,
   })
   const signedIn = check.data?.authenticated
   useEffect(() => {
@@ -257,7 +268,7 @@ function SessionContent({ authenticated }: { authenticated: boolean | null }) {
   const context: SessionContext = {
     maintenance: Boolean(backup.data?.maintenance), sessionError: check.error, retrySession: () => { void check.refetch() },
   }
-  return <Outlet context={context} />
+  return <><NavigationProgress /><Outlet context={context} /></>
 }
 
 function SessionPending({ sessionError, retrySession }: SessionContext) {
@@ -319,19 +330,34 @@ export function Setup() {
       }
     },
   })
-  return <main className="standalone">
-    <div className="setup-top"><Brand /><ThemeButton /><LogoutButton /></div>
-    <section className="panel setup-card">
-      <Radar size={30} className="tone-accent" />
-      <h1>{state?.initialized ? '系统已初始化' : '初始化雷达'}</h1>
-      {state?.initialized ? <Link to="/" className="button primary">进入发现<ArrowRight size={16} /></Link> : <>
-        {setup.error && <Notice error>{errorText(setup.error)}</Notice>}
-        <ActionButton className="button primary" disabled={restoring} pending={setup.isPending}
-          icon={<ArrowDownRight size={17} />} onClick={() => setup.mutate()}>初始化空库</ActionButton>
-      </>}
+  return <main className="setup-page">
+    <header className="setup-top"><Brand /><ThemeButton /><LogoutButton /></header>
+    <section className="setup-board" aria-labelledby="setup-title">
+      <header className="setup-hero">
+        <h1 id="setup-title">{state?.initialized ? '系统已初始化' : '初始化雷达'}</h1>
+        <div className="setup-radar" aria-hidden="true">
+          <div className="setup-radar-dial"><i /><i /><i /></div>
+        </div>
+      </header>
+      <div className="setup-options">
+        {state?.initialized ? <div className="setup-ready">
+          <Link to="/" className="button primary">进入发现<ArrowRight size={16} /></Link>
+        </div> : <section aria-labelledby="setup-empty-title">
+          <div className="setup-option">
+            <span className="setup-option-icon setup-option-icon-accent" aria-hidden="true"><Database size={20} /></span>
+            <div className="setup-option-copy">
+              <h2 id="setup-empty-title">新建数据库</h2>
+              <p>采集规则可在后台调整。</p>
+            </div>
+            <ActionButton className="button primary" disabled={restoring} pending={setup.isPending}
+              icon={<ArrowRight size={16} />} onClick={() => setup.mutate()}>初始化空库</ActionButton>
+          </div>
+          {setup.error && <div className="setup-option-body"><Notice error>{errorText(setup.error)}</Notice></div>}
+        </section>}
+        <SetupBackup initialized={Boolean(state?.initialized)} onRestoring={setRestoring}
+          onDone={() => { void navigate(destination, { replace: true }) }} />
+      </div>
     </section>
-    <SetupBackup initialized={Boolean(state?.initialized)} onRestoring={setRestoring}
-      onDone={() => { void navigate(destination, { replace: true }) }} />
   </main>
 }
 

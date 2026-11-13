@@ -7,7 +7,7 @@ const modules = [
   '@tanstack/react-query', '@tanstack/query-core',
   '@dnd-kit/accessibility', '@dnd-kit/core', '@dnd-kit/sortable', '@dnd-kit/utilities',
   '@radix-ui/colors', 'lucide-react', 'echarts', 'zrender', 'tslib', 'tailwindcss',
-  '@fontsource-variable/dm-sans', '@fontsource/ibm-plex-mono',
+  '@fontsource-variable/dm-sans', '@fontsource/ibm-plex-mono', 'uqr', 'turndown',
 ]
 const lines = ['GitHub 雷达前端第三方许可', '']
 for (const name of modules) {

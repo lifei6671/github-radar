@@ -14,7 +14,7 @@ const listeners = new Set<() => void>()
 function readFavorites(): Favorite[] {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(key) ?? '[]')
-    return Array.isArray(saved) ? saved.filter((item) => item && Number.isSafeInteger(item.id) &&
+    return Array.isArray(saved) ? saved.filter((item) => item && Number.isSafeInteger(item.id) && item.id > 0 &&
       typeof item.fullName === 'string' && typeof item.savedAt === 'string' &&
       (item.excerpt === null || typeof item.excerpt === 'string') && (item.language === null || typeof item.language === 'string')) : []
   } catch {
@@ -39,9 +39,9 @@ function subscribe(listener: () => void) {
   return () => { listeners.delete(listener) }
 }
 
-export function useFavorites() {
-  return useSyncExternalStore(subscribe, () => favorites)
-}
+export function getFavorites() { return favorites }
+
+export function useFavorites() { return useSyncExternalStore(subscribe, getFavorites) }
 
 export function toggleFavorite(item: FavoriteItem) {
   const current = readFavorites()

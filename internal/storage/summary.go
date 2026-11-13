@@ -7,6 +7,7 @@ type AISummary struct {
 	SourceFingerprint    string  `gorm:"column:source_fingerprint"`
 	SourceQuality        string  `gorm:"column:source_quality"`
 	SourceLanguage       string  `gorm:"column:source_language"`
+	TitleZh              *string `gorm:"column:title_zh"`
 	SummaryZh            string  `gorm:"column:summary_zh"`
 	RecommendationReason *string `gorm:"column:recommendation_reason"`
 	FeaturesJSON         string  `gorm:"column:features_json"`
@@ -24,6 +25,8 @@ func (AISummary) TableName() string { return AISummaryTable }
 
 // RepoAITopics 保存模型提取的主题词及其生成依据，空数组表示已分析但未提取到主题。
 type RepoAITopics struct {
+	ThemeSlugsJSON    string `gorm:"column:theme_slugs_json;default:'[]'"`
+	ThemeCatalogKey   string `gorm:"column:theme_catalog_key"`
 	RepoID            int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
 	TopicsJSON        string `gorm:"column:topics_json"`
 	SourceFingerprint string `gorm:"column:source_fingerprint"`
@@ -46,6 +49,20 @@ type RepoReadmeTranslation struct {
 }
 
 func (RepoReadmeTranslation) TableName() string { return RepoReadmeTranslationTable }
+
+// RepoReadmeDocument 保存当前已验证版本的站内中文正文。空 SHA 表示确认缺失。
+type RepoReadmeDocument struct {
+	RepoID      int64  `gorm:"column:repo_id;primaryKey;autoIncrement:false"`
+	ReadmeSHA   string `gorm:"column:readme_sha"`
+	ReadmeBytes int    `gorm:"column:readme_bytes"`
+	Language    string `gorm:"column:language"`
+	SourceURL   string `gorm:"column:source_url"`
+	ChineseHTML string `gorm:"column:chinese_html"`
+	Complete    bool   `gorm:"column:complete"`
+	Truncated   bool   `gorm:"column:truncated"`
+}
+
+func (RepoReadmeDocument) TableName() string { return RepoReadmeDocumentTable }
 
 type SummaryCheck struct {
 	RepoID            int64   `gorm:"column:repo_id;primaryKey;autoIncrement:false"`

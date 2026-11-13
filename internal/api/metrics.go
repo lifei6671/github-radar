@@ -10,7 +10,7 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/consts"
-	"github.com/lifei6671/github-radar/internal/metrics"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 

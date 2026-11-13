@@ -4,25 +4,42 @@ import { createBrowserRouter, Navigate } from 'react-router'
 import { RouterProvider } from 'react-router/dom'
 import { AdminLayout, AdminLogin, LegacyAdminPage, PageNotFound, PublicLayout, Root, Setup } from './app/shell'
 import { Skeleton } from './components/ui'
-import { topicsPath } from './lib/format'
-import { Detail } from './pages/detail'
-import { Categories, Discover, ProjectThemeDetail, ProjectThemes, Ranking, Repos } from './pages/repos'
-import { Starred } from './pages/starred'
+import { discoveryCategoryRoute, repoCategoryRoute, topicsPath } from './lib/format'
+import { reportKinds } from './lib/report-period'
+import { Categories, Discover, loadPublicRepos, ProjectThemeDetail, ProjectThemes, Ranking, Repos } from './pages/repos'
+import { loadStarred, Starred } from './pages/starred'
 import { Watchlist } from './pages/watchlist'
 import { Topics } from './pages/topics'
+import { loadPublicRepo, revalidatePublicRepo } from './api/queries'
 import './styles/index.css'
+
+const detailRoute = {
+  path: 'repos/:owner/:name',
+  HydrateFallback: Skeleton,
+  lazy: async () => ({ Component: (await import('./pages/detail')).Detail }),
+}
+
+const publicReposRoute = { element: <Repos />, loader: loadPublicRepos, HydrateFallback: Skeleton }
 
 const router = createBrowserRouter([{
   element: <Root />,
   children: [
     { element: <PublicLayout />, children: [
       { index: true, element: <Discover /> },
+      { path: discoveryCategoryRoute, element: <Discover /> },
       { path: 'trending', element: <Ranking /> },
-      { path: 'repos', element: <Repos /> },
-      { path: 'repos/:owner/:name', element: <Detail /> },
-      { path: 'starred', element: <Starred /> },
+      ...reportKinds.map((kind) => ({ path: kind + '/:date?', HydrateFallback: Skeleton, lazy: async () => {
+        const { ReportPage, loadReportPage } = await import('./pages/daily')
+        return {
+          Component: () => <ReportPage kind={kind} />,
+          loader: (args: Parameters<typeof loadReportPage>[1]) => loadReportPage(kind, args),
+        }
+      } })),
+      { path: 'repos', ...publicReposRoute },
+      { ...detailRoute, loader: loadPublicRepo, shouldRevalidate: revalidatePublicRepo },
+      { path: 'starred', element: <Starred />, loader: loadStarred, HydrateFallback: Skeleton },
       { path: 'categories', element: <Categories /> },
-      { path: 'categories/:slug', element: <Repos /> },
+      { path: repoCategoryRoute, ...publicReposRoute },
       { path: topicsPath, element: <ProjectThemes /> },
       { path: topicsPath + '/:slug', element: <ProjectThemeDetail /> },
       { path: '*', element: <PageNotFound /> },
@@ -33,7 +50,7 @@ const router = createBrowserRouter([{
       // 运行配置与拖动组件只在进入后台运行状态时加载。
       { path: 'runs', HydrateFallback: Skeleton, lazy: async () => ({ Component: (await import('./pages/system')).System }) },
       { path: 'repos', element: <Repos /> },
-      { path: 'repos/:owner/:name', element: <Detail /> },
+      detailRoute,
       { path: 'watchlist', element: <Watchlist /> },
       { path: 'topics', element: <Topics /> },
       { path: 'setup', element: <Setup /> },

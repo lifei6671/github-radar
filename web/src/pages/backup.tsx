@@ -1,5 +1,5 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CloudUpload, DatabaseBackup } from 'lucide-react'
+import { ChevronDown, CloudUpload, DatabaseBackup } from 'lucide-react'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { api, ApiError, errorText } from '../api/client'
@@ -432,7 +432,7 @@ export function BackupPage() {
     {status.error && <Notice error>{errorText(status.error)}</Notice>}
     {selection.pending && !run.isPending && !picked && <PendingOperation refresh={status.refetch} dismiss={selection.clear} />}
     {tracked && <OperationProgress key={tracked} id={tracked} published={published} />}
-    {state.restartRequired && <Notice>恢复的运行配置将在重启服务后全部生效。</Notice>}
+    {state.restartRequired && <Notice>HTTP 或 SQLite 配置将在重启服务后生效。</Notice>}
     {!state.maintenance && !state.restoring && state.autoAIResumeRequired && <ResumeAI />}
     <div className="admin-form-grid">
       <AdminPanel title="备份配置" action={settings.data && <Badge tone={settings.data.r2.configured ? 'ok' : 'neutral'}>
@@ -491,30 +491,43 @@ export function SetupBackup({ initialized, onDone, onRestoring }: {
   const tracked = restoring ? status.data?.lastRestore?.id : selection.id
   if (initialized && !tracked) return null
   const submitting = connect.isPending || test.isPending
-  return <section className="panel setup-card">
-    <header className="section-head"><h2><DatabaseBackup size={20} />从 R2 恢复</h2></header>
-    {selection.pending && !picked && <PendingOperation refresh={status.refetch} dismiss={selection.clear} />}
-    {tracked && <OperationProgress key={tracked} id={tracked} published={status.data?.lastRestore} setup onDone={onDone} />}
-    {!restoring && !initialized && (session ?
-      <>
-        <div className="action-row">
-          <button className="button" onClick={() => { setSession(null); connect.reset() }}>更换 R2 连接</button>
-          <span className="muted minor">会话有效至 {timestamp(session.expiresAt)}</span>
-        </div>
-        <BackupHistory sessionId={session.sessionId} disabled={selection.pending} onRestore={setPicked} />
-      </> : expanded ?
-      <form className="backup-stack" onSubmit={(event) => { event.preventDefault(); if (!submitting) connect.mutate() }}>
-        <fieldset className="backup-stack" disabled={submitting}>
-          <ConnectionFields value={r2} onChange={(value) => { setR2(value); test.reset() }} />
+  const canConnect = !restoring && !initialized
+  const pending = selection.pending && !picked
+  const showDetails = pending || Boolean(tracked) || (canConnect && (session !== null || expanded))
+  return <section aria-labelledby="setup-restore-title">
+    <header className="setup-option">
+      <span className="setup-option-icon" aria-hidden="true"><DatabaseBackup size={20} /></span>
+      <div className="setup-option-copy">
+        <h2 id="setup-restore-title">从 R2 恢复</h2>
+        <p>导入备份中的项目数据和运行配置。</p>
+      </div>
+      {canConnect && !session && <button type="button" className="button setup-disclosure" disabled={submitting}
+        aria-expanded={expanded} aria-controls={expanded ? 'setup-r2-form' : undefined}
+        onClick={() => setExpanded((open) => !open)}>配置 R2 连接<ChevronDown size={16} aria-hidden="true" /></button>}
+    </header>
+    {showDetails && <div className="backup-stack setup-option-body">
+      {pending && <PendingOperation refresh={status.refetch} dismiss={selection.clear} />}
+      {tracked && <OperationProgress key={tracked} id={tracked} published={status.data?.lastRestore} setup onDone={onDone} />}
+      {canConnect && (session ?
+        <>
           <div className="action-row">
-            <ActionButton pending={test.isPending} disabled={!r2.endpoint || !r2.bucket || !r2.accessKeyId || !r2.secretAccessKey}
-              onClick={() => test.mutate(r2)}>测试连接</ActionButton>
-            <ActionButton type="submit" className="button primary" pending={connect.isPending}>连接并查看备份</ActionButton>
+            <button className="button" onClick={() => { setSession(null); connect.reset() }}>更换 R2 连接</button>
+            <span className="muted minor">会话有效至 {timestamp(session.expiresAt)}</span>
           </div>
-        </fieldset>
-        {test.isSuccess && <Notice>R2 连接测试通过。</Notice>}
-        {(test.error || connect.error) && <Notice error>{errorText(connect.error || test.error)}</Notice>}
-      </form> : <button className="button" onClick={() => setExpanded(true)}>配置 R2 连接</button>)}
+          <BackupHistory sessionId={session.sessionId} disabled={selection.pending} onRestore={setPicked} />
+        </> : expanded && <form id="setup-r2-form" className="backup-stack" onSubmit={(event) => { event.preventDefault(); if (!submitting) connect.mutate() }}>
+          <fieldset className="backup-stack" disabled={submitting}>
+            <ConnectionFields value={r2} onChange={(value) => { setR2(value); test.reset() }} />
+            <div className="action-row">
+              <ActionButton pending={test.isPending} disabled={!r2.endpoint || !r2.bucket || !r2.accessKeyId || !r2.secretAccessKey}
+                onClick={() => test.mutate(r2)}>测试连接</ActionButton>
+              <ActionButton type="submit" className="button primary" pending={connect.isPending}>连接并查看备份</ActionButton>
+            </div>
+          </fieldset>
+          {test.isSuccess && <Notice>R2 连接测试通过。</Notice>}
+          {(test.error || connect.error) && <Notice error>{errorText(connect.error || test.error)}</Notice>}
+        </form>)}
+    </div>}
     {picked && session && <RestoreDialog backup={picked} sessionId={session.sessionId} close={() => setPicked(null)}
       begin={() => selection.begin('restore')} rejected={selection.clear}
       accepted={(value) => { selection.select(value); onRestoring(true); void client.invalidateQueries({ queryKey: statusKey }) }} />}

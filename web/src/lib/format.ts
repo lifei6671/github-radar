@@ -1,4 +1,5 @@
 import type { JobStatus, Quality, Repo, SourceQuality, SummaryStatus, TopicStatus } from '../api/types'
+import type { Location } from 'react-router'
 
 const digits = new Intl.NumberFormat('zh-CN')
 const shortDate = new Intl.DateTimeFormat('zh-CN', {
@@ -26,6 +27,19 @@ export function repoPath(fullName: string, admin = false, historicalId?: number)
   return (admin ? '/admin/repos/' : '/repos/') + encodedRepoName(fullName) +
     (admin && historicalId !== undefined ? '?repoId=' + historicalId : '')
 }
+
+export function repoListReturn({ pathname, search, hash }: Location) {
+  const index: unknown = window.history.state?.idx
+  return { from: pathname + search + hash, fromIndex: typeof index === 'number' && Number.isSafeInteger(index) ? index : undefined }
+}
+
+const discoveryPath = '/discover'
+export const discoveryCategoryRoute = discoveryPath + '/:slug'
+export function discoveryCategoryPath(slug?: string) { return slug ? discoveryPath + '/' + encodeURIComponent(slug) : '/' }
+
+const categoriesPath = '/categories'
+export const repoCategoryRoute = categoriesPath + '/:slug'
+export function repoCategoryPath(slug?: string) { return slug ? categoriesPath + '/' + encodeURIComponent(slug) : '/repos' }
 
 export const topicsPath = '/topics'
 export function topicPath(slug: string) { return topicsPath + '/' + encodeURIComponent(slug) }

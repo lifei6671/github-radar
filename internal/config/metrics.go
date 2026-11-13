@@ -4,33 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 )
 
-// BoundaryToleranceMinutes 定义窗口两端的实际采样容差。
-type BoundaryToleranceMinutes struct {
-	Exact int `json:"exact"`
-	Max   int `json:"max"`
-}
-
-type Metrics struct {
-	Hour                BoundaryToleranceMinutes `json:"hour"`
-	Day                 BoundaryToleranceMinutes `json:"day"`
-	Week                BoundaryToleranceMinutes `json:"week"`
-	Month               BoundaryToleranceMinutes `json:"month"`
-	HotGrowth           int                      `json:"hotGrowth"`
-	ActiveGrowth        int                      `json:"activeGrowth"`
-	HotDemotionHours    int                      `json:"hotDemotionHours"`
-	ActiveDemotionHours int                      `json:"activeDemotionHours"`
-	NormalDemotionHours int                      `json:"normalDemotionHours"`
-	TopGrowthRepos      int                      `json:"topGrowthRepos"`
-	RelativeStarFloor   int                      `json:"relativeStarFloor"`
-	Velocity24Cap       int                      `json:"velocity24Cap"`
-	Velocity7Cap        int                      `json:"velocity7Cap"`
-	AccelerationCap     int                      `json:"accelerationCap"`
-	MinPersistenceDays  int                      `json:"minPersistenceDays"`
-	// 权重顺序为 24h 增长、7d 增长、加速度、持续性和 Trending。
-	Weights [5]float64 `json:"weights"`
-}
+type BoundaryToleranceMinutes = metrics.BoundaryToleranceMinutes
+type Metrics = metrics.Policy
 
 // Maintenance 保存数据保留天数和 UTC 维护计划。
 type Maintenance struct {
@@ -48,8 +27,8 @@ type Maintenance struct {
 
 func DefaultMetrics() Metrics {
 	return Metrics{
-		Hour: BoundaryToleranceMinutes{10, 30}, Day: BoundaryToleranceMinutes{90, 360},
-		Week: BoundaryToleranceMinutes{180, 720}, Month: BoundaryToleranceMinutes{360, 1440},
+		Hour: BoundaryToleranceMinutes{Exact: 10, Max: 30}, Day: BoundaryToleranceMinutes{Exact: 90, Max: 360},
+		Week: BoundaryToleranceMinutes{Exact: 180, Max: 720}, Month: BoundaryToleranceMinutes{Exact: 360, Max: 1440},
 		HotGrowth: 200, ActiveGrowth: 50, HotDemotionHours: 12, ActiveDemotionHours: 48, NormalDemotionHours: 168,
 		TopGrowthRepos: 200, RelativeStarFloor: 100, Velocity24Cap: 1000, Velocity7Cap: 5000,
 		AccelerationCap: 3, MinPersistenceDays: 3, Weights: [5]float64{.35, .20, .15, .15, .15},

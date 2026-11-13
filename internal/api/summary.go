@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -19,13 +17,18 @@ import (
 	"github.com/lifei6671/github-radar/internal/summary"
 )
 
-func (a *collectionAPI) summaryQueue() summary.Queue {
-	return summary.Queue{DB: a.db, AI: a.cfg.AI, LeaseSeconds: a.cfg.Scheduler.LeaseSeconds}
+func (a *collectionAPI) summaryQueue(c *gin.Context) summary.Queue {
+	cfg := runtimeFor(c).Config
+	return summary.Queue{DB: a.db, AI: cfg.AI, LeaseSeconds: cfg.Scheduler.LeaseSeconds}
 }
 
-func (a *collectionAPI) summaryAvailable() bool {
-	return a.cfg.AI.Enabled && a.cfg.AI.Summary.ManualDailyCalls > 0 && len(a.cfg.MissingAISettings()) == 0 &&
-		strings.TrimSpace(os.Getenv(a.cfg.GitHub.TokenEnv)) != ""
+func (a *collectionAPI) summaryAvailable(c *gin.Context) bool {
+	return a.manualModelAvailable(c) && runtimeFor(c).Config.GitHubToken() != ""
+}
+
+func (a *collectionAPI) manualModelAvailable(c *gin.Context) bool {
+	cfg := runtimeFor(c).Config
+	return cfg.AI.Enabled && cfg.AI.Summary.ManualDailyCalls > 0 && len(cfg.MissingAISettings()) == 0
 }
 
 func validRequestID(id string) bool {
@@ -55,13 +58,13 @@ func (a *collectionAPI) requestAI(c *gin.Context, translate bool) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidRequestID})
 		return
 	}
-	queue, now := a.summaryQueue(), time.Now()
+	queue, now := a.summaryQueue(c), time.Now()
 	var decision summary.Decision
 	var err error
 	if translate {
-		decision, err = queue.ManualTranslation(c.Request.Context(), id, input.RequestID, a.summaryAvailable(), now)
+		decision, err = queue.ManualTranslation(c.Request.Context(), id, input.RequestID, a.summaryAvailable(c), now)
 	} else {
-		decision, err = queue.Manual(c.Request.Context(), id, input.RequestID, input.Force, a.summaryAvailable(), now)
+		decision, err = queue.Manual(c.Request.Context(), id, input.RequestID, input.Force, a.summaryAvailable(c), now)
 	}
 	if err != nil {
 		a.summaryError(c, err)
@@ -94,7 +97,17 @@ func (a *collectionAPI) retrySummary(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodePossibleChargeNotAccepted})
 		return
 	}
-	job, err := a.summaryQueue().RetryUnknown(c.Request.Context(), id, input.RequestID, a.summaryAvailable(), time.Now())
+	available := a.summaryAvailable(c)
+	if !available && a.manualModelAvailable(c) {
+		var count int64
+		if err := a.db.WithContext(c.Request.Context()).Model(&storage.Job{}).
+			Where("id=? AND type=?", id, summary.ReportJob).Count(&count).Error; err != nil {
+			a.fail(c, err)
+			return
+		}
+		available = count == 1
+	}
+	job, err := a.summaryQueue(c).RetryUnknown(c.Request.Context(), id, input.RequestID, available, time.Now())
 	if err != nil {
 		a.summaryError(c, err)
 		return
@@ -132,17 +145,6 @@ func (v summaryView) state() string {
 	return consts.StatusMissing
 }
 
-func (v summaryView) preview() *string {
-	if v.row.SummaryZh == "" {
-		return nil
-	}
-	value := v.row.SummaryZh
-	if utf8.RuneCountInString(value) > 120 {
-		value = string([]rune(value)[:120]) + "…"
-	}
-	return &value
-}
-
 func textPtr(s string) *string {
 	if s == "" {
 		return nil
@@ -150,13 +152,30 @@ func textPtr(s string) *string {
 	return &s
 }
 
-func (v summaryView) title() *string { return textPtr(summary.Title(v.row.SummaryZh)) }
+func (v summaryView) title() *string {
+	if v.row.TitleZh == nil {
+		return nil
+	}
+	return textPtr(*v.row.TitleZh)
+}
 
 func (v summaryView) reason() *string {
 	if v.row.SummaryStatus != consts.StatusReady || v.row.RecommendationReason == nil {
 		return nil
 	}
 	return textPtr(*v.row.RecommendationReason)
+}
+
+func (v summaryView) readyForPublication() bool {
+	return v.row.SummaryStatus == consts.StatusReady && strings.TrimSpace(v.row.SummaryZh) != ""
+}
+
+func (v summaryView) valueTags() []string {
+	var tags []string
+	if err := json.Unmarshal([]byte(v.row.ValueTagsJSON), &tags); err != nil || tags == nil {
+		return []string{}
+	}
+	return tags
 }
 
 // summaryViews 批量读取摘要、AI Topics 和当前任务，避免列表逐仓库查询。
@@ -166,12 +185,8 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 		return views, nil
 	}
 	ids := make([]int64, 0, len(repos))
-	var missingTopics []int64
 	for _, r := range repos {
 		ids = append(ids, r.RepoID)
-		if len(r.GitHubTopics()) == 0 {
-			missingTopics = append(missingTopics, r.RepoID)
-		}
 	}
 	var rows []storage.AISummary
 	if err := db.Where(storage.AISummaryColumns.RepoID+" IN ?", ids).Find(&rows).Error; err != nil {
@@ -180,9 +195,9 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 	for _, row := range rows {
 		views[row.RepoID] = summaryView{row: row}
 	}
-	if len(missingTopics) > 0 {
+	if len(ids) > 0 {
 		var rows []storage.RepoAITopics
-		if err := db.Where(storage.RepoAITopicsColumns.RepoID+" IN ?", missingTopics).Find(&rows).Error; err != nil {
+		if err := db.Where(storage.RepoAITopicsColumns.RepoID+" IN ?", ids).Find(&rows).Error; err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
@@ -199,10 +214,11 @@ func summaryViews(db *gorm.DB, repos []storage.Repository, includeJobs bool) (ma
 	var jobs []struct {
 		ID, RepoID int64
 		Status     string
+		TopicsOnly bool
 	}
 	if err := db.Raw(fmt.Sprintf(`
-SELECT %[1]s,%[2]s,%[3]s FROM (
- SELECT %[1]s,%[2]s,%[3]s,ROW_NUMBER() OVER(PARTITION BY %[2]s ORDER BY
+SELECT %[1]s,%[2]s,%[3]s,topics_only FROM (
+ SELECT %[1]s,%[2]s,%[3]s,COALESCE(json_extract(payload_json,'$.topicsOnly'),0) AS topics_only,ROW_NUMBER() OVER(PARTITION BY %[2]s ORDER BY
   CASE WHEN %[3]s IN ('%[4]s','%[5]s','%[6]s','%[7]s') THEN 0 ELSE 1 END,%[1]s DESC) AS latest
  FROM %[8]s WHERE %[9]s=? AND %[2]s IN ?
 ) WHERE latest=1`,
@@ -211,6 +227,11 @@ SELECT %[1]s,%[2]s,%[3]s FROM (
 	}
 	for _, job := range jobs {
 		v := views[job.RepoID]
+		if job.TopicsOnly && v.row.SummaryStatus == consts.StatusReady {
+			v.jobID = &job.ID
+			views[job.RepoID] = v
+			continue
+		}
 		switch job.Status {
 		case consts.StatusPending:
 			v.status = consts.StatusQueued
@@ -230,7 +251,7 @@ SELECT %[1]s,%[2]s,%[3]s FROM (
 	return views, nil
 }
 
-func (a *collectionAPI) aiLimits(db *gorm.DB, now time.Time) (gin.H, error) {
+func (a *collectionAPI) aiLimits(c *gin.Context, db *gorm.DB, now time.Time) (gin.H, error) {
 	type usage struct {
 		Origin string
 		Calls  int64
@@ -246,9 +267,10 @@ func (a *collectionAPI) aiLimits(db *gorm.DB, now time.Time) (gin.H, error) {
 	for _, row := range rows {
 		counts[row.Origin] = row.Calls
 	}
+	limits := runtimeFor(c).Config.AI.Summary
 	return gin.H{
-		consts.OriginAuto:   gin.H{"used": counts[consts.OriginAuto], "limit": a.cfg.AI.Summary.AutoDailyCalls},
-		consts.OriginManual: gin.H{"used": counts[consts.OriginManual], "limit": a.cfg.AI.Summary.ManualDailyCalls},
+		consts.OriginAuto:   gin.H{"used": counts[consts.OriginAuto], "limit": limits.AutoDailyCalls},
+		consts.OriginManual: gin.H{"used": counts[consts.OriginManual], "limit": limits.ManualDailyCalls},
 		"resetAt":           iso(reset.UnixMilli()),
 	}, nil
 }

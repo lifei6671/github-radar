@@ -9,10 +9,11 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
-	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/collector/port"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
@@ -31,7 +32,7 @@ type TrendingSource interface {
 }
 
 type Engine struct {
-	Queue    Queue
+	Queue    port.Queue
 	GitHub   GitHubSource
 	Trending TrendingSource
 	Cfg      config.Config
@@ -40,58 +41,66 @@ type Engine struct {
 
 // Run 仅在空库初始化完成后启动业务；退出时取消并等待全部 Worker。
 func (e *Engine) Run(ctx context.Context) error {
-	for {
-		initialized, err := storage.Initialized(ctx, e.Queue.DB)
-		if err != nil && !storage.IsBusy(err) {
+	for !lifecycle.Stopping(ctx) {
+		initialized, err := e.Queue.Initialized(ctx)
+		if err != nil && !e.Queue.IsBusy(err) {
 			return err
 		}
 		if initialized {
 			break
 		}
-		if err := wait(ctx, time.Second); err != nil {
-			return err
+		if !lifecycle.Wait(ctx, time.Second) {
+			return ctx.Err()
 		}
 	}
-	for {
+	for !lifecycle.Stopping(ctx) {
 		err := e.scan(ctx, time.Now())
-		if !storage.IsBusy(err) {
+		if !e.Queue.IsBusy(err) {
 			if err != nil {
 				return err
 			}
 			break
 		}
-		if err := wait(ctx, time.Second); err != nil {
-			return err
+		if !lifecycle.Wait(ctx, time.Second) {
+			return ctx.Err()
 		}
+	}
+	if lifecycle.Stopping(ctx) {
+		return ctx.Err()
 	}
 	group, workerCtx := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		ticker := time.NewTicker(time.Duration(e.Cfg.Scheduler.TickMinutes) * time.Minute)
 		defer ticker.Stop()
-		for {
+		for !lifecycle.Stopping(workerCtx) {
 			select {
 			case <-workerCtx.Done():
 				return workerCtx.Err()
+			case <-lifecycle.SchedulingDone(workerCtx):
+				return nil
 			case now := <-ticker.C:
-				if err := e.scan(workerCtx, now); err != nil && !storage.IsBusy(err) {
+				if lifecycle.Stopping(workerCtx) {
+					return workerCtx.Err()
+				}
+				if err := e.scan(workerCtx, now); err != nil && !e.Queue.IsBusy(err) {
 					return err
 				}
 			}
 		}
+		return workerCtx.Err()
 	})
 	for range e.Cfg.GitHub.WorkerConcurrency {
 		group.Go(func() error {
-			for {
+			for !lifecycle.Stopping(workerCtx) {
 				processed, err := e.Step(workerCtx)
-				if err != nil && !storage.IsBusy(err) {
+				if err != nil && !e.Queue.IsBusy(err) {
 					return err
 				}
-				if !processed || err != nil {
-					if err := wait(workerCtx, time.Second); err != nil {
-						return err
-					}
+				if (!processed || err != nil) && !lifecycle.Wait(workerCtx, time.Second) {
+					return workerCtx.Err()
 				}
 			}
+			return workerCtx.Err()
 		})
 	}
 	return group.Wait()
@@ -106,7 +115,7 @@ func (e *Engine) scan(ctx context.Context, now time.Time) error {
 
 // CollectOnce 最多处理一百个当前可领取任务，限流任务留在 SQLite 等待后续运行。
 func (e *Engine) CollectOnce(ctx context.Context) error {
-	initialized, err := storage.Initialized(ctx, e.Queue.DB)
+	initialized, err := e.Queue.Initialized(ctx)
 	if err != nil {
 		return err
 	}
@@ -142,7 +151,7 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 		if !settled {
 			if final, release, draining := lifecycle.Settlement(ctx); draining {
 				defer release()
-				lifecycle.RecordSettlement(ctx, storage.InterruptJob(final, e.Queue.DB, *job))
+				lifecycle.RecordSettlement(ctx, e.Queue.Interrupt(final, *job))
 			}
 		}
 	}()
@@ -176,32 +185,32 @@ func (e *Engine) Step(ctx context.Context) (bool, error) {
 		return true, ctx.Err()
 	}
 	if renewErr != nil {
-		if errors.Is(renewErr, ErrLeaseLost) {
+		if errors.Is(renewErr, collection.ErrLeaseLost) {
 			return true, nil
 		}
 		return true, renewErr
 	}
-	if errors.Is(operationErr, ErrLeaseLost) {
+	if errors.Is(operationErr, collection.ErrLeaseLost) {
 		return true, nil
 	}
 	if operationErr != nil {
 		e.Logger.Warn("采集任务失败", "jobId", job.ID, "type", job.Type, "error", operationErr)
 		err := e.Queue.Fail(ctx, *job, operationErr, time.Now())
 		settled = err == nil
-		if errors.Is(err, ErrLeaseLost) {
+		if errors.Is(err, collection.ErrLeaseLost) {
 			return true, nil
 		}
 		return true, err
 	}
-	if job.Type != consts.JobRefreshRepo {
+	if job.Type != consts.JobRefreshRepo && !lifecycle.Stopping(ctx) {
 		// 新发现的仓库立即安排首采，无需等待下一个五分钟扫描。
 		return true, e.Queue.Schedule(ctx, time.Now())
 	}
 	return true, nil
 }
 
-func (e *Engine) execute(ctx context.Context, job storage.Job) (func(*gorm.DB) error, error) {
-	var payload Payload
+func (e *Engine) execute(ctx context.Context, job storage.Job) (port.Change, error) {
+	var payload collection.Payload
 	if err := json.Unmarshal([]byte(job.PayloadJSON), &payload); err != nil {
 		return nil, fmt.Errorf("任务 payload 无效: %w", err)
 	}
@@ -214,16 +223,5 @@ func (e *Engine) execute(ctx context.Context, job storage.Job) (func(*gorm.DB) e
 		return e.discoverTrending(ctx, payload)
 	default:
 		return nil, errors.New("未支持的采集任务")
-	}
-}
-
-func wait(ctx context.Context, duration time.Duration) error {
-	timer := time.NewTimer(duration)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
 	}
 }

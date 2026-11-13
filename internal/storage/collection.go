@@ -6,14 +6,33 @@ import (
 	"fmt"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 )
 
 var ErrRepositoryBlocked = errors.New("仓库已屏蔽")
 
-// PublicRepositoryCondition 统一前台发布、相似项目及其后台生成任务的可见性规则。
+// PublicRepositoryCondition 约束可公开的 GitHub 来源，后台可以提前准备这些仓库的数据。
 var PublicRepositoryCondition = fmt.Sprintf("%[1]s.%[2]s = 1 AND %[1]s.%[3]s=0 AND %[1]s.%[4]s = 0 AND %[1]s.%[5]s IS NULL AND %[1]s.%[6]s IN ('%[7]s','%[8]s','%[9]s')",
 	RepositoryTable, RepositoryColumns.NameIsCurrent, RepositoryColumns.Blocked, RepositoryColumns.Disabled, RepositoryColumns.FirstNotFoundAt, RepositoryColumns.State,
 	consts.StatusActive, consts.StatusCandidate, consts.StatusPaused)
+
+// PublishableRepositoryCondition 同时检查数据就绪、当前 Search 门槛及历史 Trending 例外。
+var PublishableRepositoryCondition = PublicRepositoryCondition + fmt.Sprintf(
+	" AND %[1]s.%[2]s IS NOT NULL AND EXISTS (SELECT 1 FROM %[3]s publication_summary WHERE publication_summary.%[4]s = %[1]s.%[5]s AND publication_summary.%[6]s = '%[7]s' AND trim(publication_summary.%[8]s) <> '')",
+	RepositoryTable, RepositoryColumns.LastSuccessAt, AISummaryTable, AISummaryColumns.RepoID, RepositoryColumns.RepoID,
+	AISummaryColumns.SummaryStatus, consts.StatusReady, AISummaryColumns.SummaryZh) + publicationStarCondition
+
+// 任一匹配规则达标即可。找不到现存来源规则时，沿用原有公开条件。
+var publicationStarCondition = fmt.Sprintf(` AND (
+  %[1]s.%[2]s >= COALESCE((
+    SELECT MIN(rule.%[6]s) FROM repo_discovery_sources source
+    JOIN %[4]s rule ON rule.%[5]s = source.source_key AND rule.%[7]s = '%[8]s'
+    WHERE source.repo_id = %[1]s.%[3]s AND source.source_type = '%[8]s'
+  ), 0)
+  OR EXISTS (SELECT 1 FROM repo_discovery_sources source
+    WHERE source.repo_id = %[1]s.%[3]s AND source.source_type = '%[9]s')
+)`, RepositoryTable, RepositoryColumns.Stars, RepositoryColumns.RepoID, DiscoveryRuleTable, DiscoveryRuleColumns.SourceKey,
+	DiscoveryRuleColumns.MinStars, DiscoveryRuleColumns.SourceType, consts.SourceSearch, consts.SourceTrending)
 
 // Repository 保存仓库身份、当前元数据及采样调度状态。
 // 可空字段对应 SQL NULL，所有时间值使用 UTC Unix 毫秒。
@@ -52,6 +71,13 @@ type Repository struct {
 }
 
 func (Repository) TableName() string { return RepositoryTable }
+
+func (r Repository) MonitoringState() collection.RepositoryState {
+	return collection.RepositoryState{
+		FullName: r.FullName, State: r.State, Blocked: r.Blocked, Disabled: r.Disabled, NameIsCurrent: r.NameIsCurrent,
+		MetadataETag: r.MetadataETag, LastSuccessAt: r.LastSuccessAt, LastCheckedAt: r.LastCheckedAt, FirstNotFoundAt: r.FirstNotFoundAt,
+	}
+}
 
 // GitHubTopics 返回 GitHub 元数据中的原生主题词。
 func (r Repository) GitHubTopics() []string {
@@ -98,6 +124,7 @@ type DiscoveryRule struct {
 	SourceType      string `gorm:"column:source_type"`
 	SourceKey       string `gorm:"column:source_key"`
 	Query           string `gorm:"column:query"`
+	MinStars        int    `gorm:"column:min_stars"`
 	Enabled         bool   `gorm:"column:enabled"`
 	IntervalMinutes int    `gorm:"column:interval_minutes"`
 	NextRunAt       int64  `gorm:"column:next_run_at"`

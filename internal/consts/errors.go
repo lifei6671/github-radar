@@ -69,7 +69,6 @@ const (
 	CodeMonitoringCapacityFull          = "monitoring_capacity_full"
 	CodeNotFound                        = "not_found"
 	CodePossibleChargeNotAccepted       = "possible_charge_not_accepted"
-	CodeReadmeUnavailable               = "readme_unavailable"
 	CodeReloadNotAvailable              = "reload_not_available"
 	CodeRepoBlocked                     = "repo_blocked"
 	CodeReservationExpired              = "reservation_expired"

@@ -110,7 +110,7 @@ func fixture(t *testing.T) (*Engine, *sourceFixture, *bytes.Buffer, string) {
 }
 
 func modelAnswer(short bool) string {
-	value := strings.Repeat("项目用于组织本地开发任务，可以配置脚本分组并查看执行状态。它适合维护多服务工作区的团队，文档提供了本地配置示例，具体运行效果需要验证。", 4)
+	value := "项目用于组织本地开发任务，可以配置脚本分组、重复执行命令并查看每一步的状态。它适合维护多服务工作区的团队，文档提供了启动命令和配置示例，可据此搭建本地工作流并验证执行结果。"
 	evidence := "仓库 README"
 	if short {
 		value = "这个开源项目面向需要组织本地开发任务的团队，仓库简介只说明了基本用途，具体能力仍需查看文档确认。"
@@ -119,10 +119,129 @@ func modelAnswer(short bool) string {
 	raw, _ := json.Marshal(struct {
 		answer
 		Topics []string `json:"topics"`
-	}{answer{Language: "en", Summary: value, Features: []string{"脚本分组", "状态输出", "脚本分组"},
+		Themes []string `json:"theme_slugs"`
+	}{answer{Language: "en", Title: json.RawMessage(`"本地脚本编排工具"`), Summary: value, Features: []string{"脚本分组", "状态输出", "脚本分组"},
 		RecommendationReason: json.RawMessage(`"维护多服务工作区的团队可以借鉴它的脚本分组方式，统一组织本地任务。"`),
-		Tags:                 []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{marker}}, []string{"workflow", "dev-tools"}})
+		Tags:                 []string{"自动化"}, Evidence: []string{evidence}, Uncertainty: []string{marker}}, []string{"workflow", "dev-tools"}, []string{}})
 	return string(raw)
+}
+
+func TestThemeBackfillUsesREADMEAndResumesFromSQLite(t *testing.T) {
+	e, upstream, _, _ := fixture(t)
+	db := e.Queue.DB
+	upstream.topics = []string{"unrelated"}
+	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Update("topics_json", `["unrelated"]`).Error; err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	e.Provider = modelFixture(func(_ context.Context, prompt string) ModelResult {
+		calls++
+		if !strings.Contains(prompt, "主题词表") || !strings.Contains(prompt, "mcp-servers") || !strings.Contains(prompt, "仓库 README") {
+			t.Fatalf("缺少配置词表或 README: %q", prompt)
+		}
+		if calls == 1 {
+			if !strings.HasPrefix(prompt, "任务：摘要和主题词") {
+				t.Fatalf("导读和主题应使用同一请求: %q", prompt)
+			}
+			return ModelResult{Content: strings.Replace(modelAnswer(false), `"theme_slugs":[]`, `"theme_slugs":["mcp-servers","invented"]`, 1)}
+		}
+		if !strings.HasPrefix(prompt, "任务：主题词") || !strings.Contains(prompt, "已落库的 MCP 项目说明") {
+			t.Fatalf("已有项目应复用已保存的中文 README: %q", prompt)
+		}
+		return ModelResult{Content: `{"topics":["mcp-server"],"theme_slugs":["mcp-servers"]}`}
+	})
+	if _, err := e.Queue.Manual(t.Context(), 1, "generate-with-topics", true, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	step(t, e)
+	saved := row[storage.RepoAITopics](t, db, "repo_id=?", 1)
+	if saved.ThemeSlugsJSON != `["mcp-servers"]` || saved.ThemeCatalogKey == "" || calls != 1 {
+		t.Fatalf("仅能保存词表内标识: %+v", saved)
+	}
+	if err := db.Exec("UPDATE repo_readme_documents SET complete=1,chinese_html=? WHERE repo_id=1",
+		"<p>已落库的 MCP 项目说明。项目提供 MCP 服务端。</p>").Error; err != nil {
+		t.Fatal(err)
+	}
+	setting := storage.SystemSetting{Key: storage.ThemeCatalogKey, ValueJSON: `"changed"`}
+	if err := db.Create(&setting).Error; err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	job, err := e.Queue.insert(db, JobType, 1, "previous-github-budget", payload{}, 100, now.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(&job).Updates(jobFields("failed", "github_local_budget", now.UnixMilli(), now.Add(time.Hour).UnixMilli(), 0)).Error; err != nil {
+		t.Fatal(err)
+	}
+	reads := len(upstream.etags)
+	schedule(t, e)
+	step(t, e)
+	saved = row[storage.RepoAITopics](t, db, "repo_id=?", 1)
+	if calls != 2 || len(upstream.etags) != reads || saved.ThemeCatalogKey != "changed" || saved.TopicsJSON != `["mcp-server"]` {
+		t.Fatalf("回填应在原 GitHub 限流重试时间前完成: %+v, calls=%d reads=%v", saved, calls, upstream.etags)
+	}
+	catalog, err := storage.ReadThemeCatalog(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact := themePrompt(catalog, 2048/4)
+	for _, term := range catalog.Terms {
+		if !strings.Contains(compact, term.Slug) {
+			t.Fatalf("最小输入预算遗漏主题 %s: %q", term.Slug, compact)
+		}
+	}
+	if err := db.Model(&setting).Update("value_json", `"bad-response"`).Error; err != nil {
+		t.Fatal(err)
+	}
+	e.Provider = modelFixture(func(context.Context, string) ModelResult { return ModelResult{Content: `{"topics":[]}`} })
+	for _, kind := range []string{"cached", "upstream"} {
+		if kind == "upstream" {
+			if err := db.Exec("UPDATE repo_readme_documents SET complete=0 WHERE repo_id=1").Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+		job, err := e.Queue.insert(db, JobType, 1, "bad-topics-"+kind, payload{}, 170, time.Now().UnixMilli())
+		if err != nil {
+			t.Fatal(err)
+		}
+		step(t, e)
+		failed := row[storage.Job](t, db, "id=?", job.ID)
+		guide := row[storage.AISummary](t, db, "repo_id=?", 1)
+		if !jobTopicsOnly(failed) || failed.LastErrorCode == nil || *failed.LastErrorCode != "invalid_output" ||
+			guide.SummaryStatus != "ready" {
+			t.Fatalf("%s 回填失败不得撤下有效导读: job=%+v guide=%+v", kind, failed, guide)
+		}
+		if err := db.Model(&failed).Update("status", "canceled").Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	now = time.Now()
+	recovery, err := e.Queue.insert(db, JobType, 1, "crashed-topics", payload{TopicsOnly: true}, 170, now.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := e.Queue.claim(t.Context(), now, true, true)
+	if err != nil || running == nil || running.ID != recovery.ID {
+		t.Fatalf("未领取待模拟中断的主题回填: %v, %v", running, err)
+	}
+	call, err := e.Queue.reserve(t.Context(), *running, false, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Queue.sending(t.Context(), *running, call); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Model(running).Update("lease_until", now.Add(-time.Second).UnixMilli()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Queue.Recover(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	recovered := row[storage.Job](t, db, "id=?", running.ID)
+	if recovered.Status != "unknown" || row[storage.AISummary](t, db, "repo_id=?", 1).SummaryStatus != "ready" {
+		t.Fatalf("主题回填发送后中断应等待确认并保留导读: %+v", recovered)
+	}
 }
 
 func step(t *testing.T, e *Engine) {
@@ -326,7 +445,7 @@ func TestUnknownCallRecoveryAndAcknowledgement(t *testing.T) {
 	if err != nil || !conflict.Conflict || conflict.Job.ID != request.Job.ID {
 		t.Fatal("同仓库未决摘要应冲突")
 	}
-	job, err := q.claim(t.Context(), now)
+	job, err := q.claim(t.Context(), now, true, true)
 	if err != nil || job == nil {
 		t.Fatalf("领取失败: %v", err)
 	}
@@ -348,7 +467,7 @@ func TestUnknownCallRecoveryAndAcknowledgement(t *testing.T) {
 	if old.Status != "unknown" || bill.Status != "unknown" {
 		t.Fatal("已发送的过期租约应转未决")
 	}
-	if newJob, err := q.claim(t.Context(), now); err != nil || newJob != nil {
+	if newJob, err := q.claim(t.Context(), now, true, true); err != nil || newJob != nil {
 		t.Fatal("未决模型调用不得被重领")
 	}
 	if err := q.settle(t.Context(), *job, outcome{status: "succeeded", attempts: job.Attempts, call: &call}); !errors.Is(err, errLease) {
@@ -422,23 +541,24 @@ func TestChineseAndDescriptionFallback(t *testing.T) {
 	calls := 0
 	e.Provider = modelFixture(func(context.Context, string) ModelResult {
 		calls++
-		return ModelResult{Content: modelAnswer(true)}
+		return ModelResult{Content: modelAnswer(source.missing)}
 	})
 	source.body = strings.Repeat("这是用于管理本地开发工作流的开源工具。它可以组织脚本，显示执行状态，帮助开发团队检查操作结果。", 8)
 	schedule(t, e)
 	step(t, e)
 	check := row[storage.SummaryCheck](t, e.Queue.DB, "repo_id=1")
-	if check.SourceLanguage != "zh" || calls != 0 {
-		t.Fatalf("中文主导来源应跳过自动模型: %+v", check)
+	chinese := row[storage.AISummary](t, e.Queue.DB, "repo_id=1")
+	if check.SourceLanguage != "zh" || chinese.SummaryStatus != "ready" || calls != 1 {
+		t.Fatalf("符合条件的中文来源应自动生成导读: %+v", check)
 	}
 	source.missing = true
-	if _, err := e.Queue.Manual(t.Context(), 1, "no-readme", false, true, time.Now()); err != nil {
+	if _, err := e.Queue.Manual(t.Context(), 1, "no-readme", true, true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	step(t, e)
 	result := row[storage.AISummary](t, e.Queue.DB, "repo_id=1")
 	if result.SourceQuality != "insufficient_source" || result.ReadmeSHA != nil ||
-		result.SourceFingerprint != descriptionKey(source.description) || calls != 1 {
+		result.SourceFingerprint != descriptionKey(source.description) || calls != 2 {
 		t.Fatalf("缺 README 回退有误: %+v", result)
 	}
 	source.description = "A different public project description for workflow tests."
@@ -451,7 +571,7 @@ func TestChineseAndDescriptionFallback(t *testing.T) {
 		t.Fatal("新的 description 不应命中旧缓存")
 	}
 	step(t, e)
-	if calls != 2 {
+	if calls != 3 {
 		t.Fatal("description 变更后应重新生成")
 	}
 }
@@ -466,7 +586,7 @@ func TestAITopicsBackfillAndAboutRefresh(t *testing.T) {
 			t.Fatal("主题词模型输入缺少简介或 README")
 		}
 		if calls == 1 {
-			if !strings.HasPrefix(prompt, "任务：摘要和主题词\n") {
+			if !strings.HasPrefix(prompt, "任务：摘要和主题词（") {
 				t.Fatal("首次分析应合并摘要和主题词")
 			}
 			return ModelResult{Content: modelAnswer(false)}
@@ -474,7 +594,7 @@ func TestAITopicsBackfillAndAboutRefresh(t *testing.T) {
 		if !strings.HasPrefix(prompt, "任务：主题词\n") {
 			t.Fatal("已有有效摘要时只需生成主题词")
 		}
-		return ModelResult{Content: `{"topics":[" MCP ","mcp","dev-tools","无效主题","not a slug"]}`}
+		return ModelResult{Content: `{"topics":[" MCP ","mcp","dev-tools","无效主题","not a slug"],"theme_slugs":[]}`}
 	})
 	schedule(t, e)
 	step(t, e)
@@ -530,6 +650,9 @@ func TestAITopicsForChineseRepository(t *testing.T) {
 	if err := db.Model(&storage.Repository{}).Where("repo_id=1").Update("grade", "C").Error; err != nil {
 		t.Fatal(err)
 	}
+	if err := db.Model(&storage.Repository{}).Where("repo_id<>1").Update("topics_json", `["cli"]`).Error; err != nil {
+		t.Fatal(err)
+	}
 	source.body = strings.Repeat("这是用于管理本地开发工作流的开源工具。它可以组织脚本，显示执行状态，帮助开发团队检查操作结果。", 8)
 	calls := 0
 	e.Provider = modelFixture(func(_ context.Context, prompt string) ModelResult {
@@ -540,7 +663,7 @@ func TestAITopicsForChineseRepository(t *testing.T) {
 		if calls == 1 {
 			return ModelResult{Content: `{"topics":["自动化工具"]}`}
 		}
-		return ModelResult{Content: `{"topics":[]}`}
+		return ModelResult{Content: `{"topics":[],"theme_slugs":[]}`}
 	})
 	schedule(t, e)
 	step(t, e)
@@ -609,15 +732,45 @@ func TestReadmeVisibilityChangesBeforeModel(t *testing.T) {
 	}
 }
 
+func TestShortReadmeCanProduceGroundedRecommendation(t *testing.T) {
+	e, source, _, _ := fixture(t)
+	source.body = readmeText[:350]
+	e.Provider = modelFixture(func(_ context.Context, prompt string) ModelResult {
+		task, _, _ := strings.Cut(prompt, "\n")
+		if !strings.Contains(task, "目标 50 至 80 个字符") {
+			t.Fatalf("简短 README 应允许较短的摘要: %s", task)
+		}
+		return ModelResult{Content: `{"summary_zh":"这个项目能把本地脚本组织成可重复执行的工作流，方便开发者查看任务状态。","recommendation_reason":"维护多个本地服务的团队可以参考它通过项目配置统一组织脚本的方式。","evidence":["仓库 README"]}`}
+	})
+	if _, err := e.Queue.Manual(t.Context(), 1, "short-readme", false, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	step(t, e)
+	result := row[storage.AISummary](t, e.Queue.DB, "repo_id=1")
+	if result.SourceQuality != insufficient || result.ReadmeSHA == nil || result.RecommendationReason == nil || *result.RecommendationReason == "" {
+		t.Fatalf("应保存简短 README 的 AI 理由及来源: %+v", result)
+	}
+}
+
 func TestModelInputBudgetAndCopiedSource(t *testing.T) {
 	s := source{fullName: strings.Repeat("a", 39) + "/" + strings.Repeat("b", 100), language: "en",
-		description: strings.Repeat("description ", 200), body: readmeText, quality: sufficient}
+		description: strings.Repeat("description ", 200), body: strings.TrimSpace(readmeText), quality: sufficient}
 	prompt, sent := s.prompt(config.DefaultSummary().InputTokens, true, false)
+	task, _, _ := strings.Cut(prompt, "\n")
 	if sent.body == "" || sent.description == "" || !strings.Contains(prompt, sent.body) ||
+		!strings.Contains(task, "目标 80 至 160 个字符") ||
 		len(prompt)+len(systemPrompt)+128 > config.DefaultSummary().InputTokens {
 		t.Fatal("提示词须在预算内携带真实证据")
 	}
-	body := strings.Repeat("本文档说明开发团队如何配置并使用自动化工具，按实际项目要求组织和检查本地工作。", 7)
+	const lowBudget = 2048
+	s.body = strings.Repeat(readmeText, 10)
+	prompt, sent = s.prompt(lowBudget, true, true)
+	task, _, _ = strings.Cut(prompt, "\n")
+	if sent.body == "" || sent.quality != incomplete || !strings.Contains(task, "目标 50 至 80 个字符") ||
+		len(prompt)+len(systemPrompt)+128 > lowBudget {
+		t.Fatal("低输入预算截断正文时应保留证据并允许短摘要")
+	}
+	body := strings.Repeat("本文档说明开发团队如何配置并使用自动化工具，按实际项目要求组织和检查本地工作。", 3)
 	raw, _ := json.Marshal(answer{Language: "zh", Summary: "这是一份项目使用说明。\n" + body + "\n实际运行仍需核实。", Evidence: []string{"仓库 README"}})
 	if _, ok := resultSummary(string(raw), source{body: "## " + body, quality: sufficient}, 1, "fixture", "test", 1, 0); ok {
 		t.Fatal("摘要加上前后缀后仍不得保存完整原文")
@@ -628,32 +781,82 @@ func TestModelInputBudgetAndCopiedSource(t *testing.T) {
 	}
 	quote := "读者可按照仓库文档的调试步骤复现这套本地开发流程"
 	generated.RecommendationReason, _ = json.Marshal(quote + "。")
+	generated.Title = json.RawMessage(`"项目用于组织本地开发任务"`)
 	raw, _ = json.Marshal(generated)
 	saved, ok := resultSummary(string(raw), source{body: readmeText + "\n" + quote, quality: sufficient}, 1, "fixture", "test", 1, 0)
-	if !ok || saved.RecommendationReason == nil || *saved.RecommendationReason != "" {
-		t.Fatalf("推荐理由引用原句时应丢弃理由并保留有效摘要: %v %+v", ok, saved)
+	if !ok || saved.RecommendationReason == nil || *saved.RecommendationReason != "" || saved.TitleZh == nil || *saved.TitleZh != "" {
+		t.Fatalf("小标题或推荐理由重复时应保留有效摘要: %v %+v", ok, saved)
 	}
 }
 
-func TestLegacySummaryReasonRefreshWithModelOnly(t *testing.T) {
+func TestGeneratedSummaryLengthBounds(t *testing.T) {
+	for _, tc := range []struct {
+		size    int
+		quality string
+		valid   bool
+	}{{19, insufficient, false}, {20, insufficient, true}, {79, sufficient, false},
+		{80, sufficient, true}, {200, sufficient, true}, {201, sufficient, false}} {
+		body := strings.Repeat("文", tc.size)
+		raw, _ := json.Marshal(answer{Summary: body, Evidence: []string{"仓库 README"}})
+		saved, ok := resultSummary(string(raw), source{body: readmeText, quality: tc.quality}, 1, "fixture", "test", 1, 0)
+		if ok != tc.valid || (ok && saved.SummaryZh != body) {
+			t.Fatalf("导读篇幅校验错误，字符数 %d，来源 %s，有效 %v", tc.size, tc.quality, ok)
+		}
+	}
+}
+
+func TestSummarySourceKeepsProjectContentAcrossNoiseSections(t *testing.T) {
+	body := `# CLI workflow runner
+
+Run grouped local scripts and review their status.
+
+## Sponsors
+Promotional text
+
+### Partner program
+Join this unrelated promotion.
+
+## Usage
+Run the tool from the workspace.
+
+## Directory structure
+An exhaustive file listing.
+
+## Limitations
+Tasks require a configured shell.
+`
+	value := prose([]byte(body))
+	for _, keep := range []string{"CLI workflow runner", "grouped local scripts", "Run the tool", "configured shell"} {
+		if !strings.Contains(value, keep) {
+			t.Fatalf("归一化丢失项目正文 %q: %s", keep, value)
+		}
+	}
+	for _, remove := range []string{"Sponsors", "Promotional", "Partner program", "unrelated promotion", "Directory structure", "exhaustive file listing"} {
+		if strings.Contains(value, remove) {
+			t.Fatalf("归一化保留了无关内容 %q: %s", remove, value)
+		}
+	}
+}
+
+func TestLegacySummaryTitleRefreshWithModelOnly(t *testing.T) {
 	e, _, _, _ := fixture(t)
 	e.Provider = modelFixture(func(context.Context, string) ModelResult { return ModelResult{Content: modelAnswer(false)} })
 	schedule(t, e)
 	step(t, e)
-	if err := e.Queue.DB.Model(&storage.AISummary{RepoID: 1}).Update(storage.AISummaryColumns.RecommendationReason, nil).Error; err != nil {
+	if err := e.Queue.DB.Model(&storage.AISummary{RepoID: 1}).Update(storage.AISummaryColumns.TitleZh, nil).Error; err != nil {
 		t.Fatal(err)
 	}
 	offline, err := e.Queue.Manual(t.Context(), 1, "offline-cache", false, false, time.Now())
 	if err != nil || !offline.Cached {
 		t.Fatalf("模型不可用时应复用有效的旧摘要: %+v %v", offline, err)
 	}
-	refresh, err := e.Queue.Manual(t.Context(), 1, "reason-refresh", false, true, time.Now())
+	refresh, err := e.Queue.Manual(t.Context(), 1, "title-refresh", false, true, time.Now())
 	if err != nil || refresh.Cached || refresh.Job.ID == 0 {
-		t.Fatalf("模型可用时旧摘要应安排补齐推荐理由: %+v %v", refresh, err)
+		t.Fatalf("模型可用时旧摘要应安排补齐小标题: %+v %v", refresh, err)
 	}
 	step(t, e)
 	saved := row[storage.AISummary](t, e.Queue.DB, storage.AISummaryColumns.RepoID+"=1")
-	if saved.RecommendationReason == nil || *saved.RecommendationReason == "" {
-		t.Fatal("摘要任务未补齐推荐理由")
+	if saved.TitleZh == nil || *saved.TitleZh != "本地脚本编排工具" {
+		t.Fatal("摘要任务未保存模型提供的小标题")
 	}
 }

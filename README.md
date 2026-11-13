@@ -12,15 +12,22 @@ npm --prefix web run build
 Copy-Item configs/example.yaml configs/radar.local.yaml
 ```
 
-参照 [带注释的配置示例](configs/example.yaml)，在 `configs/radar.local.yaml` 中填入网站对外地址、管理员密码和会话签名密钥。密码和签名密钥分别生成，例如运行 `openssl rand -hex 24` 和 `openssl rand -hex 32`。本地配置包含真实凭据，请限制文件读取权限。
+参照 [带注释的配置示例](configs/example.yaml)，填写网站源地址，并生成后台凭据。
+
+```powershell
+go run ./cmd/radar hash-password
+go run ./cmd/radar generate-session-secret
+```
+
+第一个命令隐藏输入的原密码，将输出的 Argon2id 哈希填入 `auth.admin_password`。第二个命令输出由 32 个随机字节编码而成的十六进制字符串，填入 `auth.session_secret`。后台登录时输入原密码。两个命令都可在创建配置和数据库前执行。
 
 ```powershell
 go run ./cmd/radar server -config configs/radar.local.yaml
 ```
 
-示例监听 `127.0.0.1:8080`，在 `./data/github-radar.db` 建库并自动迁移。相对路径以命令的工作目录为准。升级已有部署时沿用原数据库路径，在原 YAML 中补齐 `server.site_url`、`auth.admin_password`、`auth.session_secret`，移除旧的 `auth.admin_token_env`，重启后用新密码登录。
+示例监听 `127.0.0.1:8080`，在 `./data/github-radar.db` 建库并自动迁移。相对路径以命令的工作目录为准。升级已有部署时沿用原数据库路径。若 `auth.admin_password` 当前是明文，先用 `hash-password` 为原密码生成哈希并替换配置值，再重启服务并重新登录。
 
-在浏览器打开 `http://127.0.0.1:8080` 即可浏览前台。从「后台管理」或 `/admin` 进入后台，输入 YAML 中设置的管理员密码。空库首次登录后进入 `/admin/setup`。Gin 从 `web/dist` 提供页面与静态资源，运行时只需 Go 服务。开发前端时可另开终端执行 `npm --prefix web run dev`，Vite 默认将 API 转发到本地 8080 端口。
+在浏览器打开 `http://127.0.0.1:8080` 即可浏览前台。直接访问 `/admin` 进入后台，输入生成哈希时使用的原密码。空库首次登录后进入 `/admin/setup`。Gin 从 `web/dist` 提供页面与静态资源，运行时只需 Go 服务。开发前端时可另开终端执行 `npm --prefix web run dev`，Vite 默认将 API 转发到本地 8080 端口。
 
 | 接口 | 行为 |
 | --- | --- |
@@ -33,11 +40,21 @@ go run ./cmd/radar server -config configs/radar.local.yaml
 | `GET /api/v1/setup/status` | 需要管理员会话，新库返回 `{"initialized":false}` |
 | `POST /api/v1/setup/initialize` | 使用同一会话初始化空库，重复初始化返回 409 |
 
-网站对外地址、管理员密码和会话签名密钥为 HTTP 服务的必填项。会话有效期为 24 小时，修改密码或签名密钥并重启后需要重新登录。缺少 `GITHUB_TOKEN` 时提示采集待配置。AI 地址、模型和开关通过管理接口配置，API 密钥由环境变量提供。
+网站对外地址、管理员密码和会话签名密钥为 HTTP 服务的必填项。会话有效期为 24 小时，修改密码或签名密钥并重启后需要重新登录。AI 地址、模型和开关通过后台配置。
 
 ## 启用采集
 
-使用可读取公共仓库的 GitHub 令牌，在启动服务的终端设置 `GITHUB_TOKEN`。后台「运行状态 → 运行配置 → GitHub 采集」可查看或修改环境变量名。设置后重启服务。新部署可在后台初始化空库，或用同一 HTTP 会话调用初始化接口。以下 PowerShell 7 示例适用于本地 HTTP 部署。
+将可读取公共仓库的 GitHub 令牌填入服务使用的 `*.local.yaml`。如果要启用 AI 中文摘要，同时填写模型供应商的 API Key。
+
+```yaml
+credentials:
+  github_token: ""
+  ai_api_key: ""
+```
+
+两项分别以 YAML 中的非空值为准，留空时读取环境变量，默认分别为 `GITHUB_TOKEN` 和 `AI_API_KEY`。后台「运行状态 → 运行配置」可修改环境变量名。更改密钥后重启后端。密钥只保存在本地部署文件或环境变量中，请勿提交到版本库。
+
+新部署可在后台初始化空库，或用同一 HTTP 会话调用初始化接口。以下 PowerShell 7 示例适用于本地 HTTP 部署。
 
 ```powershell
 $password = Read-Host "管理员密码" -MaskInput
@@ -51,7 +68,9 @@ Remove-Variable password
 后台提供仓库管理、重点监控、选题池和运行状态。旧 `/system`、`/watchlist`、`/setup` 链接继续跳转到对应后台页。前台专题目录位于 `/topics`。重点监控、任务、配置与备份需管理员会话。
 
 - 默认采集全站和 Go、Python、TypeScript、Rust 的 Trending 日榜、周榜、月榜，保存每个来源的完整成功批次。解析失败保留上次榜单及其真实时间。
-- 每 30 分钟轮换一个 AI 主题 Search。默认限制为近 90 天更新且至少 20 Star 的公共仓库，查询中显式提供的 `pushed:`、`stars:` 条件优先。超过一千条的查询按 Star 和创建时间拆分，分页请求单独排队。
+- 每 30 分钟轮换一个 AI 主题 Search。默认限制为近 90 天更新且至少 200 Star 的公共仓库。后台可按规则设置最低 Star，填 0 取消这条规则的额外门槛。搜索表达式中的 `stars:` 与该门槛同时生效，显式 `pushed:` 可替代默认更新时间条件。超过一千条的查询按 Star 和创建时间拆分，分页请求单独排队。
+- 升级时现有 Search 规则启用 200 Star 门槛，尚未完成的旧 Search 批次按新规则重新排队。
+- 前台也按来源规则的当前门槛复核已入库项目。命中过多条 Search 规则时，达到任意一条即可。历史记录中上过 GitHub Trending 的仓库按上榜资格保留。未达标项目仍可在后台查看。
 - 仓库按数字 ID 合并。新候选按容量进入 A/B/C 档，已有 S/A/B/C 按配置周期采集。基于增长指标的升降档在阶段 2 接入。
 - 只有仓库详情的成功 200 或匹配已有 ETag 基线的认证 304 会产生 Star 快照。同一个五分钟计划槽保留第一条成功样本，重试沿用原槽。
 - 本地预算、上游 core/search 窗口和次级限流等待都保存在 SQLite。手动采集也经过同一限流器。
@@ -68,11 +87,15 @@ Remove-Variable password
 | `/api/v1/system/categories` | `{revision,items:[{slug,name,anyTopics}]}` | 保存后，分类列表、计数和仓库筛选在下一次请求使用新映射。空列表仅保留自动归类的 `other` |
 | `/api/v1/system/discovery-rules` | `{revision,items:[{sourceType,sourceKey,query,enabled,intervalMinutes,priority}]}` | 修改、关闭或删除规则会撤销该规则的旧任务；新的启用规则由下次调度扫描安排 |
 
-Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为 GitHub 搜索式。Trending 的 `sourceType` 为 `trending`，`sourceKey` 如 `all:daily` 或 `language:go:weekly`，`query` 留空。设置 `enabled: false` 暂停单条规则，提交空列表可清空所有发现规则。
+Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为 GitHub 搜索式，`minStars` 为最低 Star 数。Trending 的 `sourceType` 为 `trending`，`sourceKey` 如 `all:daily` 或 `language:go:weekly`，`query` 留空，按榜单收录。设置 `enabled: false` 暂停单条规则，提交空列表可清空所有发现规则。
 
-在「运行状态 → 运行配置 → 相似项目」单独配置 OpenAI 兼容的 Embedding API 根地址、模型和密钥环境变量名。默认密钥名为 `EMBEDDING_API_KEY`。配置后重启，服务在后台逐批生成向量。详情最多显示五个同模型、同维数、达到门槛的公开未屏蔽仓库。向量随 SQLite 备份，README 摘录仅用于当次生成。首次生成完成前，相似项目区保持隐藏。
+在「运行状态 → 运行配置 → 相似项目」单独配置 OpenAI 兼容的 Embedding API 根地址、模型和密钥环境变量名。默认密钥名为 `EMBEDDING_API_KEY`。保存后，服务按新配置在后台逐批生成向量。详情最多显示五个同模型、同维数、达到门槛的公开未屏蔽仓库。向量随 SQLite 备份，README 摘录仅用于当次生成。首次生成完成前，相似项目区保持隐藏。
+
+全部项目和仓库管理的相关度搜索复用这批向量。仓库全名或短名精确命中优先，其次是字面命中，再补入符合语言、分类等筛选的语义结果。仅查询词发送给 Embedding 供应商，查询向量短期缓存在内存。缺少 Embedding 配置、没有可用向量、请求超时或限流时，沿用字面搜索。后台手动指定 Star、热度或发现时间排序时，使用相应的字面搜索排序。
 
 首次用新版服务启动时导入默认设置、[默认分类](configs/categories.yaml)和初始规则。旧 YAML 的运行参数、`categories_file` 及旧 AI 地址和模型环境变量可参与这次导入。Compose 保留旧 AI 环境变量的转发用于升级。已有的发现规则、ID 和下次运行时间优先保留。导入完成后，重启直接使用数据库，旧文件中的业务值和首次导入字段不再生效。
+
+后台保存 GitHub、调度、AI、相似项目、指标、保留策略和选题配置后，新请求读取新配置。已开始的后台任务按原配置完成，后台随后用新配置继续领取。HTTP 超时、SQLite 日志模式和连接参数在下一次重启时应用。部署 YAML 与服务进程环境变量的值在启动时提供。
 
 ## 采集接口
 
@@ -100,13 +123,15 @@ Search 的 `sourceType` 为 `search`，`sourceKey` 为规则标识，`query` 为
 
 服务默认每 15 分钟计算增长、热度及采样等级，整点聚合小时数据，01:00 UTC 聚合日数据，03:00 UTC 清理过期记录。原始快照、小时聚合和日聚合默认分别保留 14、60、180 天，清理前检查下一级聚合水位和实际观测锚点。趋势中的缺测点保持为 `null`。
 
-后台可通过 `/api/v1/system/settings` 的 `scheduler.metricsIntervalMinutes`、`metrics` 和 `maintenance` 修改计算、评分和保留参数，保存后重启生效。旧数据库升级会补齐新增参数的默认值，并保留已有设置。维护可在缺少 GitHub 令牌的情况下运行。离线执行一轮可使用 `go run ./cmd/radar maintenance-once`，支持 `-config`，需要数据库已完成安装。
+后台可通过 `/api/v1/system/settings` 的 `scheduler.metricsIntervalMinutes`、`metrics` 和 `maintenance` 修改计算、评分和保留参数，下一轮任务使用新值。旧数据库升级会补齐新增参数的默认值，并保留已有设置。维护可在缺少 GitHub 令牌的情况下运行。离线执行一轮可使用 `go run ./cmd/radar maintenance-once`，支持 `-config`，需要数据库已完成安装。
 
 ## 中文摘要和选题
 
-在后台「运行状态 → 运行配置 → AI 中文摘要」启用摘要、填写 Base URL 和模型后保存。仅支持 OpenAI 兼容供应商，Base URL 需指向支持 Chat Completions JSON 模式与 `max_completion_tokens` 的 API 根路径，例如供应商提供的 `/v1` 路径。密钥通过服务进程的 `AI_API_KEY` 环境变量提供，README 检查使用 `GITHUB_TOKEN`，配置完成后重启服务。未生成摘要的仓库展示 GitHub About 中的 Description。每个 UTC 自然日默认允许 50 次自动调用和 20 次手动调用，失败后的新调用也占预算。
+在后台「运行状态 → 运行配置 → AI 中文摘要」启用摘要、填写 Base URL 和模型后保存。仅支持 OpenAI 兼容供应商，Base URL 需指向支持 Chat Completions JSON 模式的 API 根路径，例如供应商提供的 `/v1` 路径。AI 摘要使用 `credentials.ai_api_key`，README 检查使用 `credentials.github_token`，两项均支持上述环境变量。每个 UTC 自然日默认允许 50 次自动调用和 20 次手动调用，失败后的新调用也占预算。
 
-GitHub Topics 为空的活跃仓库会在同一模型预算内按调度补充主题词。系统从 GitHub About 和公开 README 提取至多五个主题词，详情页标为「AI Topics」，后台分类映射自动使用这些词。GitHub 后续补上 Topics 时，分类和详情随采集数据切换到原生主题。模型未配置时继续展示 GitHub 简介。
+公开页面只发布完成过采样、已有有效 AI 导读的仓库。Star 增长等观测数据充分后再显示。后台可查看并处理等待采样或摘要的仓库，并在没有导读时展示 GitHub About。
+
+GitHub Topics 为空的活跃仓库会在同一模型预算内按调度补充主题词。系统从 GitHub About 和公开 README 提取至多五个主题词，详情页标为「AI Topics」，后台分类映射自动使用这些词。GitHub 后续补上 Topics 时，分类和详情随采集数据切换到原生主题。
 
 仓库详情在 AI 导读下展示 GitHub README。中文 README 直接显示正文，英文 README 可在译文生成后切换「中文」和「原文」。系统使用剩余自动额度为已有摘要的活跃仓库准备译文，管理员也可在详情手动生成。译文按 README 版本分批保存，访客读取不会调用模型。
 
@@ -126,7 +151,7 @@ GitHub Topics 为空的活跃仓库会在同一模型预算内按调度补充主
 
 在「运行状态 → 备份与恢复」填写 R2 端点、存储桶、备份前缀和对象读写凭据。备份计划和 R2 设置由 SQLite 保存，默认关闭。启用后默认每天北京时间 03:00 备份，上传成功后及 03:30 清理，保留当天及之前 4 个自然日。后台可调整时间、时区和 1～30 天的保留期。
 
-「立即备份」会更新同一天的云端对象。也可在服务运行时执行 `go run ./cmd/radar backup -config configs/radar.local.yaml`，该命令使用同一配置文件中的管理员密码登录本机 API 并等待结果。离线维护、迁移和采集命令应在停止服务后运行。
+「立即备份」会更新同一天的云端对象。也可在服务运行时执行 `go run ./cmd/radar backup -config configs/radar.local.yaml`，按提示输入原密码，命令会登录本机 API 并等待结果。离线维护、迁移和采集命令应在停止服务后运行。
 
 恢复时选定日期并确认覆盖。服务在校验下载文件后短暂停止业务访问，继续提供进度查询。恢复完成后，自动摘要和相似项目向量生成保持暂停，在管理页确认用量记录可能不完整后再恢复。迁移到新实例时，登录后在 `/admin/setup` 输入该实例的 R2 凭据并选择备份，目标实例继续使用自己的部署配置和环境变量。
 

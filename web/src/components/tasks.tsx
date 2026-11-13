@@ -61,8 +61,7 @@ function useRepoTask(repoId: number, kind: 'refresh' | 'summary' | 'readme/trans
     const event = jobId + ':' + (gone ? 'gone' : status)
     if (notified.current === event) return
     notified.current = event
-    if (kind === 'readme/translate') void queryClient.invalidateQueries({ queryKey: ['readme', repoId] })
-    else void refreshRepo(queryClient, repoId)
+    void refreshRepo(queryClient, repoId)
     void queryClient.invalidateQueries({ queryKey: ['jobs'] })
   }, [gone, jobId, kind, queryClient, repoId, status])
 

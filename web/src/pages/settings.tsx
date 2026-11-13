@@ -6,7 +6,8 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError, errorText } from '../api/client'
-import type { CategorySetting, DiscoverySelection, DiscoveryTab, DiscoveryTabSettings, ListSettings, ProjectThemeGroup, ProjectThemeSetting, RuleSetting, RuntimeSettings, SettingFields, SettingValue } from '../api/types'
+import { resetPublicRepoLists } from '../api/queries'
+import type { CategorySetting, DiscoveryRanking, DiscoveryTabSettings, ListSettings, ProjectThemeGroup, ProjectThemeSetting, RuleSetting, RuntimeSettings, SettingFields, SettingValue } from '../api/types'
 import { AdminMetrics, AdminPanel } from '../components/admin'
 import { ThemeIcon } from '../components/theme-icon'
 import { ThemeIconPicker } from '../components/theme-icon-picker'
@@ -31,6 +32,16 @@ function useConfig<T extends Snapshot>(path: ConfigPath) {
 }
 
 function refreshSettings(queryClient: ReturnType<typeof useQueryClient>, path: ConfigPath) {
+  if (path === '/system/settings') {
+    for (const key of ['limits', 'repo', 'readme', 'similar-repos', 'topics', 'backup-status']) {
+      void queryClient.invalidateQueries({ queryKey: [key] })
+    }
+  }
+  if (path === '/system/discovery-rules') {
+    // Search 门槛变化会同时影响已收录项目的公开列表与详情。
+    void resetPublicRepoLists(queryClient)
+    void queryClient.resetQueries({ queryKey: ['repo'], predicate: ({ queryKey }) => queryKey[2] === 'public' })
+  }
   if (path === '/system/project-themes' || path === '/system/project-theme-groups') {
     // 编辑或删除专题后，重新读取公开目录和受该专题限制的项目列表。
     void queryClient.resetQueries({ queryKey: ['project-themes'] })
@@ -65,9 +76,9 @@ function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields,
       setDraft(null)
       setSaved(true)
       if (path === '/system/discovery-tabs') {
-        // 保存后清掉旧精选，返回前台等待新规则的查询结果。
-        void queryClient.resetQueries({ queryKey: ['repos'], predicate: ({ queryKey: [, source] }) =>
-          source === 'discover-hot' || (typeof source === 'string' && source.startsWith('/discovery?')) })
+        // 发现和全部项目共用精选门槛，避免返回时显示旧标记。
+        void queryClient.resetQueries({ queryKey: ['repos'], predicate: ({ queryKey: [, source, scope] }) =>
+          source === 'discover-hot' || scope === 'public' })
       }
       refreshSettings(queryClient, path)
     },
@@ -132,6 +143,7 @@ function ConfigEditor<T extends Snapshot, Draft>({ path, query, heading, fields,
 const settingsNames: Record<string, string> = {
   server: 'HTTP 服务', storage: 'SQLite', github: 'GitHub 采集', scheduler: '调度',
   ai: 'AI 中文摘要', embedding: '相似项目', metrics: '增长与热度', maintenance: '数据保留', recommendations: '每日选题',
+  reportPublication: '报刊出刊', weeklyMinDays: '周报最少观测天数', monthlyMinCoverage: '月报最低覆盖率（%）',
   summary: '模型调用与来源检查', baseUrl: 'OpenAI 兼容 API Base URL', model: '模型', apiKeyEnv: '密钥环境变量名',
   tokenEnv: '访问令牌环境变量名', enabled: '启用', timeoutSeconds: '超时（秒）',
   batchSize: '每轮处理仓库数', intervalMinutes: '扫描间隔（分钟）', minSimilarity: '最低相似度',
@@ -162,8 +174,10 @@ const settingsNames: Record<string, string> = {
 }
 function settingName(key: string) { return settingsNames[key] ?? key }
 
-function NumberInput({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
-  return <label className="field">{label}<input type="number" step="any" value={value} onChange={(event) => {
+function NumberInput({ label, value, onChange, min, step = 'any', title }: {
+  label: string; value: number; onChange: (value: number) => void; min?: number; step?: number | 'any'; title?: string
+}) {
+  return <label className="field">{label}<input type="number" min={min} step={step} title={title} value={value} onChange={(event) => {
     const n = event.target.valueAsNumber
     if (Number.isFinite(n)) onChange(n)
   }} /></label>
@@ -173,13 +187,15 @@ function Setting({ name, path, value, update }: { name: string; path: string; va
   const id = useId()
   const label = path === 'metrics.hour' ? '小时窗口' : settingName(name)
   const help = runtimeHelp[path]
+  const reportMax = path === 'reportPublication.weeklyMinDays' ? 7 : path === 'reportPublication.monthlyMinCoverage' ? 100 : undefined
   if (typeof value !== 'object' || value === null) {
     const description = help ? id : undefined
     const field = typeof value === 'boolean' ?
       <label className="check-field"><input type="checkbox" checked={value} aria-describedby={description}
         onChange={(e) => update(e.target.checked)} />{label}</label> :
       <label className="field">{label}{typeof value === 'number' ?
-        <input type="number" step="any" value={value} aria-describedby={description} onChange={(event) => {
+        <input type="number" min={reportMax === undefined ? undefined : 1} max={reportMax} step={reportMax === undefined ? 'any' : 1}
+          value={value} aria-describedby={description} onChange={(event) => {
           const next = event.target.valueAsNumber
           if (Number.isFinite(next)) update(next)
         }} /> :
@@ -266,17 +282,20 @@ export function RuntimeEditor() {
     fields={(server, draft, update) => {
       const values = draft ?? server.settings
       return <>
-        {server.restartRequired && <Notice>已保存的运行配置将在重启服务后生效。</Notice>}
+        {server.restartRequired && <Notice>已保存的 HTTP 或 SQLite 修改将在重启服务后生效。</Notice>}
         {keys.map((key) => {
           const value = values[key]
           const fields = value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null
           const setValue = (next: SettingValue) => update({ ...values, [key]: next })
           return <section key={key} className="runtime-section" id={'runtime-' + key} data-group={key} aria-labelledby={'runtime-title-' + key}>
             <div className="panel runtime-section-card">
-              <h2 id={'runtime-title-' + key}>{settingName(key)}</h2>
-              {key === 'github' && <p className="minor muted">将令牌设置到服务进程的 <code>{String(fields?.tokenEnv || 'GITHUB_TOKEN')}</code> 环境变量，重启服务后启用采集。</p>}
-              {key === 'ai' && <p className="minor muted">仅支持 OpenAI 兼容供应商，需支持 Chat Completions 的 JSON 模式和 <code>max_completion_tokens</code>。API Key 通过服务进程的 <code>{String(fields?.apiKeyEnv || 'AI_API_KEY')}</code> 环境变量提供。</p>}
-              {key === 'embedding' && <p className="minor muted">使用独立的 OpenAI 兼容 <code>/embeddings</code> 接口。将 API Key 设置为服务进程的 <code>{String(fields?.apiKeyEnv || 'EMBEDDING_API_KEY')}</code> 环境变量，保存后重启。</p>}
+              <div className="section-head">
+                <h2 id={'runtime-title-' + key}>{settingName(key)}</h2>
+                {(key === 'server' || key === 'storage') && <span className="minor muted">重启后生效</span>}
+              </div>
+              {key === 'github' && <p className="minor muted">在部署 YAML 中填写 <code>credentials.github_token</code>，留空时读取 <code>{String(fields?.tokenEnv || 'GITHUB_TOKEN')}</code> 环境变量。修改 YAML 后需重启服务。</p>}
+              {key === 'ai' && <p className="minor muted">仅支持 OpenAI 兼容供应商，需支持 Chat Completions 的 JSON 模式和 <code>max_completion_tokens</code>。在部署 YAML 中填写 <code>credentials.ai_api_key</code>，留空时读取 <code>{String(fields?.apiKeyEnv || 'AI_API_KEY')}</code> 环境变量。修改 YAML 后需重启服务。</p>}
+              {key === 'embedding' && <p className="minor muted">使用独立的 OpenAI 兼容 <code>/embeddings</code> 接口。服务进程从 <code>{String(fields?.apiKeyEnv || 'EMBEDDING_API_KEY')}</code> 环境变量读取 API Key。</p>}
               {fields ? <Fields path={key} value={fields} update={setValue} /> : <Setting name={key} path={key} value={value} update={setValue} />}
             </div>
           </section>
@@ -490,22 +509,25 @@ const categories: Directory<CategorySetting> = {
 }
 
 const sourceNames = { search: 'GitHub Search', trending: 'GitHub Trending' }
+const defaultSearchMinStars = 200
 const enabledBadge = (enabled: boolean) => <Badge tone={enabled ? 'ok' : 'neutral'}>{enabled ? '已启用' : '已停用'}</Badge>
 const rules: Directory<RuleSetting> = {
   path: '/system/discovery-rules', title: '发现规则', noun: '规则',
   identity: (item) => item.sourceType + ':' + item.sourceKey,
   name: (item) => item.sourceKey, caption: (item) => item.sourceKey,
   search: (item) => [item.sourceKey, item.query, sourceNames[item.sourceType]].join(' '),
-  columns: ['来源类型', '状态', '扫描间隔', '优先级', '搜索表达式'],
+  columns: ['来源类型', '状态', '扫描间隔', '优先级', '最低 Star', '搜索表达式'],
   cells: (item) => [<Badge>{sourceNames[item.sourceType]}</Badge>, enabledBadge(item.enabled),
-    number(item.intervalMinutes) + ' 分钟', number(item.priority), item.query ? <code>{item.query}</code> : '—'],
+    number(item.intervalMinutes) + ' 分钟', number(item.priority),
+    item.sourceType === 'trending' ? '—' : item.minStars === 0 ? '不限' : number(item.minStars ?? defaultSearchMinStars),
+    item.query ? <code>{item.query}</code> : '—'],
   metrics: (items) => [
     { label: '全部', value: number(items.length) },
     { label: '启用', value: number(items.filter((item) => item.enabled).length) },
     { label: 'GitHub Search', value: number(items.filter((item) => item.sourceType === 'search').length) },
     { label: 'GitHub Trending', value: number(items.filter((item) => item.sourceType === 'trending').length) },
   ],
-  initial: { sourceType: 'search', sourceKey: '', query: '', intervalMinutes: 30, priority: 20, enabled: true },
+  initial: { sourceType: 'search', sourceKey: '', query: '', minStars: defaultSearchMinStars, intervalMinutes: 30, priority: 20, enabled: true },
   enabled: (item) => item.enabled,
   filter: { label: '来源类型', options: [
     { value: '', label: '全部类型' }, { value: 'search', label: 'GitHub Search' }, { value: 'trending', label: 'GitHub Trending' },
@@ -515,9 +537,12 @@ const rules: Directory<RuleSetting> = {
       onChange={(e) => edit({ ...item, sourceKey: e.target.value })} /></label>
     <label className="field">来源类型<select value={item.sourceType} onChange={(e) => edit({
       ...item, sourceType: e.target.value === 'trending' ? 'trending' : 'search', sourceKey: '', query: '',
+      minStars: e.target.value === 'trending' ? undefined : defaultSearchMinStars,
     })}><option value="search">GitHub Search</option><option value="trending">GitHub Trending</option></select></label>
     <NumberInput label="扫描间隔（分钟）" value={item.intervalMinutes} onChange={(intervalMinutes) => edit({ ...item, intervalMinutes })} />
     <NumberInput label="优先级" value={item.priority} onChange={(priority) => edit({ ...item, priority })} />
+    {item.sourceType === 'search' && <NumberInput label="最低 Star" value={item.minStars ?? defaultSearchMinStars}
+      min={0} step={1} title="0 表示不限" onChange={(minStars) => edit({ ...item, minStars })} />}
     {item.sourceType === 'search' && <label className="field admin-field-wide">搜索表达式
       <input required value={item.query} onChange={(e) => edit({ ...item, query: e.target.value })} />
     </label>}
@@ -540,17 +565,19 @@ function projectThemes(groups: ProjectThemeGroup[]): Directory<ProjectThemeSetti
     path: '/system/project-themes', title: '专题管理', noun: '专题',
     icon: (item) => <ThemeIcon icon={item.icon} color={item.iconColor} size={14} />,
     identity: (item) => item.slug, name: (item) => item.name, caption: (item) => item.slug,
-    search: (item) => [item.name, item.slug, item.description, names.get(item.groupSlug), ...item.anyTopics].join(' '),
-    columns: ['方向', '简介', '匹配 Topics'],
-    cells: (item) => [names.get(item.groupSlug), item.description, item.anyTopics.join('、')],
+    search: (item) => [item.name, item.slug, item.description, names.get(item.groupSlug), ...item.anyTopics, ...(item.aliases ?? []), ...(item.owners ?? [])].join(' '),
+    columns: ['方向', '简介', '匹配 Topics', '别名', 'GitHub 所有者'],
+    cells: (item) => [names.get(item.groupSlug), item.description, item.anyTopics.join('、'), item.aliases?.join('、'), item.owners?.join('、')],
     metrics: (items) => [
       { label: '专题', value: number(items.length) },
       { label: '匹配 Topics', value: number(new Set(items.flatMap((item) => item.anyTopics)).size) },
     ],
-    initial: { slug: '', name: '', description: '', anyTopics: [], icon: '', iconColor: '', groupSlug: groups[0]?.slug ?? '' },
+    initial: { slug: '', name: '', description: '', anyTopics: [], aliases: [], owners: [], icon: '', iconColor: '', groupSlug: groups[0]?.slug ?? '' },
     normalize: (item) => ({
       ...item, slug: item.slug.trim(), name: item.name.trim(), description: item.description.trim(),
       anyTopics: item.anyTopics.map((topic) => topic.trim()).filter(Boolean),
+      aliases: (item.aliases ?? []).map((alias) => alias.trim()).filter(Boolean),
+      owners: (item.owners ?? []).map((owner) => owner.trim()).filter(Boolean),
     }),
     fields: (item, edit) => <>
       <label className="field">专题名称<input required value={item.name} onChange={(e) => edit({ ...item, name: e.target.value })} /></label>
@@ -563,8 +590,14 @@ function projectThemes(groups: ProjectThemeGroup[]): Directory<ProjectThemeSetti
       <ThemeIconPicker icon={item.icon} color={item.iconColor} onChange={(icon, iconColor) => edit({ ...item, icon, iconColor })} />
       <label className="field admin-field-wide">简介<textarea required rows={3} value={item.description}
         onChange={(e) => edit({ ...item, description: e.target.value })} /></label>
-      <label className="field admin-field-wide">匹配 Topics<input required placeholder="用逗号分隔" value={item.anyTopics.join(',')}
+      <label className="field admin-field-wide">GitHub 所有者<textarea rows={2} placeholder="组织或个人账号，用逗号或换行分隔" value={(item.owners ?? []).join('\n')}
+        onChange={(e) => edit({ ...item, owners: e.target.value.split(/[,，\n]/) })} />
+        <span className="minor muted">填写后，只收录这些账号拥有的仓库。</span>
+      </label>
+      <label className="field admin-field-wide">匹配 Topics<input required={!item.owners?.some((owner) => owner.trim()) && !item.aliases?.some((alias) => alias.trim())} placeholder="GitHub 主题词，用逗号分隔" value={item.anyTopics.join(',')}
         onChange={(e) => edit({ ...item, anyTopics: e.target.value.split(/[,，]/) })} /></label>
+      <label className="field admin-field-wide">主题别名<input placeholder="同义词或常用缩写，用逗号分隔" value={(item.aliases ?? []).join(',')}
+        onChange={(e) => edit({ ...item, aliases: e.target.value.split(/[,，]/) })} /></label>
     </>,
     status: (item) => <Link className="admin-link" to={topicPath(item.slug)}>查看专题</Link>,
   }
@@ -608,13 +641,13 @@ export function DiscoveryTabEditor() {
   const path = '/system/discovery-tabs'
   const query = useConfig<DiscoveryTabSettings>(path)
   return <ConfigEditor<DiscoveryTabSettings, DiscoveryTabDraft> path={path} query={query}
-    apply={(server, draft) => ({ ...server, items: draft.items, selection: draft.selection })}
-    payload={({ revision, items, selection }, draft) => ({ revision, items, selection, newCategories: draft?.newCategories })}
+    apply={(server, { items, selection, ranking }) => ({ ...server, items, selection, ranking })}
+    payload={({ revision, items, selection, ranking }, draft) => ({ revision, items, selection, ranking, newCategories: draft?.newCategories })}
     fields={(server, draft, edit) => <DiscoveryTabFields options={server.options}
-      draft={draft ?? { items: server.items, selection: server.selection, newCategories: [] }} edit={edit} />} />
+      draft={draft ?? { items: server.items, selection: server.selection, ranking: server.ranking, newCategories: [] }} edit={edit} />} />
 }
 
-type DiscoveryTabDraft = { items: DiscoveryTab[]; newCategories: CategorySetting[]; selection: DiscoverySelection }
+type DiscoveryTabDraft = Pick<DiscoveryTabSettings, 'items' | 'selection' | 'ranking'> & { newCategories: CategorySetting[] }
 type DiscoveryTabOptions = DiscoveryTabSettings['options']
 
 const discoverySelectionFields = [
@@ -625,6 +658,13 @@ const discoverySelectionFields = [
   ['trendingTop', '全站日榜入选名次'],
 ] as const
 
+const discoveryRankingFields = [
+  ['heatWeight', '热度权重（%）', 0, 100],
+  ['freshnessWeight', '新鲜度权重（%）', 0, 100],
+  ['consecutiveDays', '连续上榜天数', 1, undefined],
+  ['cooldownDays', '冷却天数', 0, undefined],
+] as const
+
 function DiscoveryTabFields({ draft, options, edit }: { draft: DiscoveryTabDraft; options: DiscoveryTabOptions; edit: (value: DiscoveryTabDraft) => void }) {
   const [adding, setAdding] = useState(false)
   const { items, newCategories } = draft
@@ -632,6 +672,15 @@ function DiscoveryTabFields({ draft, options, edit }: { draft: DiscoveryTabDraft
   const available = options.filter((option) => !items.some(({ slug }) => slug === option.slug))
   const names = new Map(allOptions.map(({ slug, name }) => [slug, name]))
   const entries = items.map(({ slug, label }) => ({ id: slug, label: label || names.get(slug) || slug }))
+
+  function changeRanking(key: keyof DiscoveryRanking, value: number) {
+    const ranking = { ...draft.ranking, [key]: value }
+    if (Number.isFinite(value)) {
+      if (key === 'heatWeight') ranking.freshnessWeight = 100 - value
+      if (key === 'freshnessWeight') ranking.heatWeight = 100 - value
+    }
+    edit({ ...draft, ranking })
+  }
 
   // 「全部」是默认入口，只有分类标签可以调整。
   return <>
@@ -672,6 +721,18 @@ function DiscoveryTabFields({ draft, options, edit }: { draft: DiscoveryTabDraft
             onChange={(event) => edit({ ...draft, selection: { ...draft.selection, [key]: event.target.valueAsNumber } })} />
         </label>)}
       </div>
+    </section>
+    <section className="panel runtime-section-card">
+      <h3>展示排序与冷却</h3>
+      <div className="admin-fields">
+        {discoveryRankingFields.map(([key, label, min, max]) => <label className="field" key={key}>{label}
+          <input type="number" min={min} max={max} step="1" required
+            aria-describedby={key === 'cooldownDays' ? 'discovery-cooldown-hint' : undefined}
+            value={Number.isFinite(draft.ranking[key]) ? draft.ranking[key] : ''}
+            onChange={(event) => changeRanking(key, event.target.valueAsNumber)} />
+        </label>)}
+      </div>
+      <p id="discovery-cooldown-hint" className="minor muted">冷却天数填 0 时关闭冷却。</p>
     </section>
   </>
 }

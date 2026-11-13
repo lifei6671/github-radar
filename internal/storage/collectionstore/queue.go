@@ -1,4 +1,4 @@
-package collector
+package collectionstore
 
 import (
 	"context"
@@ -11,40 +11,21 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"github.com/lifei6671/github-radar/internal/collector/port"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
-var ErrLeaseLost = errors.New("任务租约已失效")
-var ErrCapacity = errors.New("监控容量已满")
-
-// Payload 固化计划槽，跨窗口重试也不会重算槽。
-type Payload struct {
-	PlannedAt    int64  `json:"plannedAt"`
-	RuleID       int64  `json:"ruleId,omitempty"`
-	SourceKey    string `json:"sourceKey,omitempty"`
-	Query        string `json:"query,omitempty"`
-	Language     string `json:"language,omitempty"`
-	Period       string `json:"period,omitempty"`
-	Manual       bool   `json:"manual,omitempty"`
-	Page         int    `json:"page,omitempty"`
-	MinStars     int    `json:"minStars,omitempty"`
-	MaxStars     int    `json:"maxStars,omitempty"`
-	StarRange    bool   `json:"starRange,omitempty"`
-	CreatedFrom  int64  `json:"createdFrom,omitempty"`
-	CreatedUntil int64  `json:"createdUntil,omitempty"`
-}
-
-func Slot(ms int64) int64 { return ms / 300000 * 300000 }
-
 type Queue struct {
-	DB  *gorm.DB
-	Cfg config.Scheduler
+	DB     *gorm.DB
+	Cfg    config.Scheduler
+	Pacing storage.JobPacing
 }
 
-func (q Queue) enqueue(tx *gorm.DB, kind string, repoID *int64, key string, payload Payload, priority int, now int64) (storage.Job, error) {
+func (q Queue) enqueue(tx *gorm.DB, kind string, repoID *int64, key string, payload collection.Payload, priority int, now int64) (storage.Job, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return storage.Job{}, err
@@ -110,8 +91,8 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 			return err
 		}
 		for _, repo := range repos {
-			key := fmt.Sprintf(consts.RefreshAutoDedupFormat, repo.RepoID, Slot(ms))
-			if _, err := q.enqueue(tx, consts.JobRefreshRepo, &repo.RepoID, key, Payload{PlannedAt: ms}, gradePriority(repo.Grade), ms); err != nil {
+			key := fmt.Sprintf(consts.RefreshAutoDedupFormat, repo.RepoID, collection.Slot(ms))
+			if _, err := q.enqueue(tx, consts.JobRefreshRepo, &repo.RepoID, key, collection.Payload{PlannedAt: ms}, gradePriority(repo.Grade), ms); err != nil {
 				return err
 			}
 		}
@@ -123,15 +104,15 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 			return err
 		}
 		for _, rule := range rules {
-			payload := Payload{PlannedAt: ms, RuleID: rule.ID, SourceKey: rule.SourceKey, Query: rule.Query, Page: 1}
+			payload := collection.Payload{PlannedAt: ms, RuleID: rule.ID, SourceKey: rule.SourceKey, Query: rule.Query, Page: 1, StarFloor: rule.MinStars}
 			if rule.SourceType == consts.SourceTrending {
 				source, language, period, err := config.TrendingSource(rule.SourceKey)
 				if err != nil {
 					return err
 				}
-				payload = Payload{RuleID: rule.ID, PlannedAt: ms, SourceKey: source, Language: language, Period: period}
+				payload = collection.Payload{RuleID: rule.ID, PlannedAt: ms, SourceKey: source, Language: language, Period: period}
 			}
-			key := fmt.Sprintf(consts.DiscoveryAutoDedupFormat, rule.SourceType, rule.ID, Slot(ms))
+			key := fmt.Sprintf(consts.DiscoveryAutoDedupFormat, rule.SourceType, rule.ID, collection.Slot(ms))
 			job, err := q.enqueue(tx, "discover_"+rule.SourceType, nil, key, payload, rule.Priority, ms)
 			if err != nil {
 				return err
@@ -139,7 +120,7 @@ func (q Queue) Schedule(ctx context.Context, now time.Time) error {
 			nextRun := now.Add(time.Duration(rule.IntervalMinutes) * time.Minute).UnixMilli()
 			if job.Status != consts.StatusPending {
 				// 同槽旧规则任务可能已被撤销，下一槽重新安排新定义。
-				nextRun = Slot(ms) + 300000
+				nextRun = collection.Slot(ms) + 300000
 			}
 			if err := tx.Model(&rule).Update(storage.DiscoveryRuleColumns.NextRunAt, nextRun).Error; err != nil {
 				return err
@@ -155,7 +136,12 @@ func gradePriority(grade string) int {
 
 // Claim 单条 UPDATE RETURNING 原子领取任务，过期租约可由新 token 接管。
 func (q Queue) Claim(ctx context.Context, now time.Time) (*storage.Job, error) {
-	db := q.DB.WithContext(ctx)
+	return q.Pacing.Claim(q.DB.WithContext(ctx), now, func(db *gorm.DB, deferred []string) (*storage.Job, error) {
+		return q.claim(db, now, deferred)
+	})
+}
+
+func (q Queue) claim(db *gorm.DB, now time.Time, blocked []string) (*storage.Job, error) {
 	j, r, d := storage.JobColumns, storage.RepositoryColumns, storage.DiscoveryRuleColumns
 	jobRepo := db.Model(&storage.Repository{}).Select("1").
 		Where(r.RepoID+"="+storage.JobTable+"."+j.RepoID).
@@ -170,6 +156,9 @@ func (q Queue) Claim(ctx context.Context, now time.Time) (*storage.Job, error) {
 		Where(j.Attempts+"<"+j.MaxAttempts).Where(j.AvailableAt+"<=?", ms).
 		Where("("+j.Status+" IN ? OR ("+j.Status+"=? AND "+j.LeaseUntil+"<=?))", []string{consts.StatusPending, consts.StatusFailed}, consts.StatusRunning, ms).
 		Order(j.Priority + " DESC").Order(j.AvailableAt).Order(j.ID).Limit(1)
+	if len(blocked) > 0 {
+		next = next.Where("(json_extract("+j.PayloadJSON+",'$.manual')=1 OR "+j.Type+" NOT IN ?)", blocked)
+	}
 	var job storage.Job
 	err := db.Raw("UPDATE "+storage.JobTable+" SET "+j.Status+"=?, "+j.Attempts+"="+j.Attempts+"+1, "+
 		j.LeaseToken+"=?, "+j.LeaseUntil+"=?, "+j.UpdatedAt+"=? WHERE "+j.ID+"=(?) RETURNING *",
@@ -187,7 +176,7 @@ func (q Queue) Renew(ctx context.Context, job storage.Job, now time.Time) error 
 		return result.Error
 	}
 	if result.RowsAffected != 1 {
-		return ErrLeaseLost
+		return collection.ErrLeaseLost
 	}
 	return nil
 }
@@ -198,17 +187,19 @@ func (q Queue) fenced(tx *gorm.DB, job storage.Job, now int64) *gorm.DB {
 }
 
 // Complete 同事务校验租约、写业务数据并结束任务，旧执行者的结果会整体回滚。
-func (q Queue) Complete(ctx context.Context, job storage.Job, apply func(*gorm.DB) error) error {
+func (q Queue) Complete(ctx context.Context, job storage.Job, apply port.Change) error {
 	return q.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := q.fenced(tx, job, time.Now().UnixMilli()).Update(storage.JobColumns.UpdatedAt, time.Now().UnixMilli())
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return ErrLeaseLost
+			return collection.ErrLeaseLost
 		}
-		if err := apply(tx); err != nil {
-			return err
+		if apply != nil {
+			if err := apply(q.Writer(tx)); err != nil {
+				return err
+			}
 		}
 		result = q.fenced(tx, job, time.Now().UnixMilli()).Updates(map[string]any{
 			storage.JobColumns.Status: consts.StatusSucceeded, storage.JobColumns.LeaseToken: nil, storage.JobColumns.LeaseUntil: nil, storage.JobColumns.LastErrorCode: nil, storage.JobColumns.UpdatedAt: time.Now().UnixMilli(),
@@ -217,7 +208,7 @@ func (q Queue) Complete(ctx context.Context, job storage.Job, apply func(*gorm.D
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return ErrLeaseLost
+			return collection.ErrLeaseLost
 		}
 		return nil
 	})
@@ -225,13 +216,13 @@ func (q Queue) Complete(ctx context.Context, job storage.Job, apply func(*gorm.D
 
 // Fail 把恢复时间交给持久队列，不在 Worker 中长时间睡眠。
 func (q Queue) Fail(ctx context.Context, job storage.Job, cause error, now time.Time) error {
-	code, next := consts.CodeCollectionFailed, now.Add(time.Duration(1<<min(job.Attempts, 8))*time.Second+time.Duration(job.ID%17)*time.Second).UnixMilli()
+	code, next := consts.CodeCollectionFailed, collection.RetryAt(job.ID, job.Attempts, now)
 	attempts, status := job.Attempts, consts.StatusFailed
 	var upstream *gh.Failure
 	if errors.As(cause, &upstream) {
 		code = upstream.Code
 		if upstream.Until > 0 {
-			next = max(next, upstream.Until)
+			next = max(next, collection.SpreadRetry(upstream.Until, job.ID, job.IsManual()))
 			// 本地等待没有发出请求，不占重试次数；真实限流响应仍受上限约束。
 			if upstream.Status == 0 {
 				attempts--
@@ -250,7 +241,7 @@ func (q Queue) Fail(ctx context.Context, job storage.Job, cause error, now time.
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return ErrLeaseLost
+			return collection.ErrLeaseLost
 		}
 		if status != consts.StatusDead || job.RepoID == nil {
 			return nil

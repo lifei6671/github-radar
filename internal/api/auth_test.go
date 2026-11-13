@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	credentials "github.com/lifei6671/github-radar/internal/auth"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
 )
@@ -43,7 +44,8 @@ func TestAdminPasswordSession(t *testing.T) {
 	}
 	status(router, nil, "false")
 	call(router, http.MethodPost, auth+consts.AuthLoginPath, "", `{"password":"wrong"}`, nil, 401)
-	body := `{"password":"` + cfg.Auth.AdminPassword + `"}`
+	call(router, http.MethodPost, auth+consts.AuthLoginPath, "", `{"password":"`+cfg.Auth.AdminPassword+`"}`, nil, 401)
+	body := `{"password":"` + testAdminPassword + `"}`
 	call(router, http.MethodPost, auth+consts.AuthLoginPath, "https://untrusted.example.com", body, nil, 403)
 	login := call(router, http.MethodPost, auth+consts.AuthLoginPath, cfg.Server.SiteURL, body, nil, 200)
 	cookies := login.Result().Cookies()
@@ -59,8 +61,12 @@ func TestAdminPasswordSession(t *testing.T) {
 	status(router, cookie, "true")
 	status(router, &http.Cookie{Name: cookie.Name, Value: cookie.Value + "x"}, "false")
 	call(router, http.MethodPost, consts.APIPath+"/setup/initialize", "https://untrusted.example.com", "", cookie, 403)
+	rotatedHash, err := credentials.HashPassword("new-password-for-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, rotated := range []config.Auth{
-		{AdminPassword: "new-password-for-admin", SessionSecret: cfg.Auth.SessionSecret},
+		{AdminPassword: rotatedHash, SessionSecret: cfg.Auth.SessionSecret},
 		{AdminPassword: cfg.Auth.AdminPassword, SessionSecret: "changed-signing-secret-at-least-32-bytes"},
 	} {
 		next := cfg

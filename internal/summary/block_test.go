@@ -55,9 +55,9 @@ func TestReadmeRechecksBlockAfterGitHubIdentityLookup(t *testing.T) {
 				}
 			}}
 			repo := row[storage.Repository](t, db, "repo_id=1")
-			view, err := e.ReadmeView(t.Context(), repo)
+			view, err := e.readReadme(t.Context(), repo, false)
 			if !errors.Is(err, storage.ErrRepositoryBlocked) || len(source.etags) != tc.readBefore ||
-				view.OriginalHTML != "" || view.ChineseHTML != "" {
+				len(view.Body) != 0 {
 				t.Fatalf("屏蔽后不能继续读取或发布正文: reads=%d view=%+v err=%v", len(source.etags), view, err)
 			}
 		})

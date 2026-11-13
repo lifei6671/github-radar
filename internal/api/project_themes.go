@@ -14,9 +14,8 @@ import (
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
-// 专题目录、精选和全部项目共用匹配条件，GitHub Topics 非空时只匹配原生主题。
-var projectThemeMatch = `EXISTS (SELECT 1 FROM json_each(` + effectiveTopicsSQL + `) topic
-WHERE lower(topic.value) IN (SELECT value FROM json_each(` + storage.ProjectThemeTable + `.` + storage.ProjectThemeColumns.TopicsJSON + `)))`
+// 专题目录、精选和全部项目共用归类规则。
+const projectThemeMatch = storage.ProjectThemeMatchSQL
 
 func filterProjectTheme(tx, query *gorm.DB, slug string) (*gorm.DB, error) {
 	if slug == "" {

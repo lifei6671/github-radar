@@ -57,6 +57,7 @@ export interface Repo {
   titleZh: string | null
   language: string | null
   categories: string[]
+  valueTags: string[]
   state: 'candidate' | 'active' | 'paused' | 'unavailable' | 'address_pending'
   grade: 'S' | 'A' | 'B' | 'C'
   stars: number
@@ -73,6 +74,7 @@ export interface Repo {
   candidateBurst: boolean
   summaryPreview: string | null
   recommendationReason?: string | null
+  selected?: boolean
   summaryStatus: SummaryStatus
   summarySourceQuality: SourceQuality | null
   summaryJobId?: number | null
@@ -93,16 +95,16 @@ export interface RepoDetail extends Repo {
   summaryModel?: string | null
   summaryAvailable?: boolean
   sourceReadmeUrl: string | null
+  readme: RepoReadme
   features: string[]
   audience: string[]
-  valueTags: string[]
   aiTopics: string[]
 }
 
 export interface RepoReadme {
-  state: 'ready' | 'missing' | 'unavailable'
+  state: 'ready' | 'pending' | 'missing' | 'unavailable'
+  language?: string
   sourceUrl?: string
-  originalHtml?: string
   chineseHtml?: string
   complete: boolean
   truncated: boolean
@@ -189,7 +191,7 @@ export type SettingValue = boolean | number | string | null | SettingValue[] | S
 export interface SettingFields { [key: string]: SettingValue }
 export interface RuntimeSettings { revision: number; settings: SettingFields; restartRequired: boolean }
 export interface CategorySetting { slug: string; name: string; anyTopics: string[] }
-export interface ProjectThemeSetting { slug: string; name: string; description: string; anyTopics: string[]; icon: string; iconColor: string; groupSlug: string }
+export interface ProjectThemeSetting { slug: string; name: string; description: string; anyTopics: string[]; aliases?: string[]; owners?: string[]; icon: string; iconColor: string; groupSlug: string }
 export interface DiscoveryTab { slug: string; label: string }
 export interface DiscoveryTabOption { slug: string; name: string }
 export interface DiscoverySelection {
@@ -199,14 +201,22 @@ export interface DiscoverySelection {
   trendingHours: number
   trendingTop: number
 }
+export interface DiscoveryRanking {
+  heatWeight: number
+  freshnessWeight: number
+  consecutiveDays: number
+  cooldownDays: number
+}
 export interface DiscoveryTabSettings extends ListSettings<DiscoveryTab> {
   options: DiscoveryTabOption[]
   selection: DiscoverySelection
+  ranking: DiscoveryRanking
 }
 export interface RuleSetting {
   sourceType: 'trending' | 'search'
   sourceKey: string
   query: string
+  minStars?: number
   enabled: boolean
   intervalMinutes: number
   priority: number

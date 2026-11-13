@@ -1,18 +1,20 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, Bot, Check, ChevronDown, ChevronRight, CodeXml, Folder, ListFilter, Plug, Video, Wrench } from 'lucide-react'
+import { ArrowLeft, ArrowRight, Bot, Check, ChevronDown, ChevronRight, CodeXml, Folder, ListFilter, Plug, Video, Wrench, X } from 'lucide-react'
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactNode } from 'react'
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { ApiError, errorText, publicApi } from '../api/client'
-import { distinct, useAdminArea, useCategories, useRepos } from '../api/queries'
+import { Link, matchPath, Navigate, useNavigate, useNavigation, useParams, useSearchParams } from 'react-router'
+import type { LoaderFunctionArgs } from 'react-router'
+import { ApiError, errorText, publicApi, sessionQueryClient } from '../api/client'
+import { distinct, publicRepoListOptions, useAdminArea, useCategories, useRepos } from '../api/queries'
 import type { Category, DiscoveryTabOption, Items, Page, ProjectThemeDirectory, ProjectThemeDetail as ThemeDetail, Repo, Trending } from '../api/types'
 import { Badge, Empty, InlineSearch, More, Notice, PageError, Skeleton } from '../components/ui'
+import { AnimatedPills } from '../components/navigation-feedback'
 import { GrowthValue, RankedRepos, RepoBlockButton, RepoCard, RepoLink, Sparkline } from '../components/repo'
 import { RepoCollectionEmpty } from '../components/repo-collection'
 import { PageTitle } from '../components/page-title'
 import { ThemeChronicle } from '../components/theme-chronicle'
 import { ThemeIcon } from '../components/theme-icon'
-import { dateGroup, dateHeading, dayOfWeek, decimal, number, relativeTime, repoState, timeOfDay, timestamp, topicPath, topicsPath } from '../lib/format'
+import { dateGroup, dateHeading, dayOfWeek, decimal, discoveryCategoryPath, number, relativeTime, repoCategoryPath, repoCategoryRoute, repoState, timeOfDay, timestamp, topicPath, topicsPath } from '../lib/format'
 
 function mapNames(items: Category[] | undefined) {
   return new Map(items?.map(({ slug, name }) => [slug, name]))
@@ -22,40 +24,37 @@ export function Discover() {
   const categories = useCategories()
   const tabs = useQuery({
     queryKey: ['discovery-tabs'],
+    meta: { pageLoad: true },
     queryFn: ({ signal }) => publicApi<Items<DiscoveryTabOption>>('/discovery-tabs', { signal }),
     staleTime: 0,
     refetchOnWindowFocus: true,
   })
   const navigate = useNavigate()
-  const [params, setParams] = useSearchParams()
-  // 打开旧的发现页链接时，已隐藏的标签回到「全部」。
-  const categoryTags = params.getAll('category').filter((slug) => tabs.data?.items.some((tab) => tab.slug === slug))
+  const { slug } = useParams()
+  const category = tabs.data?.items.find((tab) => tab.slug === slug)?.slug
+  if (slug && tabs.data && !category) return <Navigate replace to="/" />
   const criteria = new URLSearchParams({ limit: '30' })
-  for (const slug of categoryTags) criteria.append('category', slug)
+  if (category) criteria.set('category', category)
 
   function search(q: string) {
-    // 从发现页进入搜索结果时保留当前分类。
-    const next = new URLSearchParams()
-    for (const slug of categoryTags) next.append('category', slug)
-    if (q) next.set('q', q)
-    navigate({ pathname: '/repos', search: next.toString() })
+    navigate({ pathname: repoCategoryPath(category), search: q ? new URLSearchParams({ q }).toString() : '' })
   }
 
   return <>
     <header className="page-head"><PageTitle title="发现" subtitle="精选近期值得关注的 GitHub 开源项目。" /></header>
     <div className="list-tools">
-      <CategoryTabs items={tabs.data?.items} selected={categoryTags}
-        onSelect={(slug) => setParams(slug ? { category: slug } : {}, { preventScrollReset: true })} />
+      <CategoryTabs items={tabs.data?.items} selected={category ? [category] : []}
+        onSelect={(value) => navigate(discoveryCategoryPath(value), { preventScrollReset: true })} />
       <InlineSearch value="" onSearch={search} />
     </div>
     {categories.error && <Notice error>{errorText(categories.error)}</Notice>}
     {tabs.error && <Notice error>{errorText(tabs.error)} <button type="button" onClick={() => { void tabs.refetch() }}>重试</button></Notice>}
-    {tabs.isPending && params.has('category') ? <Skeleton /> : <div className="discover-grid">
-      {categoryTags.length === 0 && <DiscoverHot />}
+    {tabs.isPending && slug ? <Skeleton /> : <div className="discover-grid">
+      {!category && <DiscoverHot />}
       <section className="timeline-section" aria-label="项目动态">
         <RepoFeed params={criteria} names={mapNames(categories.data?.items)} timeline favorites discovery
           empty={<RepoCollectionEmpty icon={<Folder size={20} aria-hidden />} message="暂无项目动态"
-            action={categoryTags.length > 0 && <Link to="/repos">浏览全部项目<ArrowRight size={14} aria-hidden /></Link>} />} />
+            action={category && <Link to="/repos">浏览全部项目<ArrowRight size={14} aria-hidden /></Link>} />} />
       </section>
     </div>}
   </>
@@ -64,6 +63,7 @@ export function Discover() {
 function DiscoverHot() {
   const hot = useQuery({
     queryKey: ['repos', 'discover-hot'],
+    meta: { pageLoad: true },
     queryFn: ({ signal }) => publicApi<Page<Repo>>('/discovery?sort=hotness&limit=5', { signal }),
   })
   const leaders = hot.data?.items ?? []
@@ -86,11 +86,11 @@ function DiscoverHot() {
   </section>
 }
 
-function RepoFeed({ params, names, timeline = false, ranking, favorites = false, discovery = false, empty }: {
+function RepoFeed({ params, names, timeline = false, ranking, favorites = false, discovery = false, routed = false, empty }: {
   params: URLSearchParams; names?: Map<string, string>; timeline?: boolean
-  ranking?: 'growth24h' | 'growth7d' | 'hotness'; favorites?: boolean; discovery?: boolean; empty: ReactNode
+  ranking?: 'growth24h' | 'growth7d' | 'hotness'; favorites?: boolean; discovery?: boolean; routed?: boolean; empty: ReactNode
 }) {
-  const repos = useRepos(params, discovery)
+  const repos = useRepos(params, discovery, routed)
   if (repos.isPending) return <Skeleton />
   if (repos.error && !repos.data) return <PageError error={repos.error} retry={() => { void repos.refetch() }} />
   // 跨页期间指标可能更新，合并已显示的页面时仍按仓库身份处理。
@@ -102,13 +102,13 @@ function RepoFeed({ params, names, timeline = false, ranking, favorites = false,
   return <>
     {ranking && <div className="feed-update muted minor">{updatedAt
       ? <time dateTime={updatedAt}>计算于 {timestamp(updatedAt)}</time> : '等待首次指标计算'}</div>}
-    {repos.error && <Notice error>{errorText(repos.error)}</Notice>}
-    {ranking ? <RankedRepos metric={ranking} items={items.map((repo, index) => ({
+    {repos.error && <RepoListError error={repos.error} reload={() => { void repos.refetch() }} />}
+    {ranking ? <RankedRepos key={params.toString()} metric={ranking} items={items.map((repo, index) => ({
       repo,
       rank: ranking === 'hotness' ? repo.hotnessRank : index + 1,
-    }))} /> : <div className={'repo-list ' + (timeline ? 'timeline' : '')}>
+    }))} /> : <div key={params.toString()} className={'repo-list page-reveal ' + (timeline ? 'timeline' : '')}>
       {items.map((repo) => {
-        const at = discovery ? repo.discoveryAt ?? repo.discoveredAt : repo.discoveredAt
+        const at = repo.discoveredAt
         const label = timeline ? dateGroup(at, discovery) : ''
         const showDay = label && previous !== label
         previous = label
@@ -116,13 +116,18 @@ function RepoFeed({ params, names, timeline = false, ranking, favorites = false,
           {showDay && <h2 className="timeline-day" title={label}>{dateHeading(at, discovery)}<span className="minor muted">{dayOfWeek(at, discovery)}</span></h2>}
           <div className="timeline-item">
             {timeline && <div className="timeline-clock"><time dateTime={at}>{timeOfDay(at, discovery)}</time></div>}
-            <RepoCard repo={repo} names={names} favorite={favorites} recommend={discovery} />
+            <RepoCard repo={repo} names={names} favorite={favorites} showTags={!discovery} />
           </div>
         </Fragment>
       })}
     </div>}
     <More hasMore={repos.hasNextPage && (!ranking || loaded.length === items.length)} pending={repos.isFetchingNextPage} onClick={() => { void repos.fetchNextPage() }} />
   </>
+}
+
+function RepoListError({ error, reload }: { error: Error; reload: () => void }) {
+  return <Notice error>{errorText(error)}{error instanceof ApiError && error.code === 'invalid_cursor' &&
+    <button type="button" className="text-button" onClick={reload}>重新加载</button>}</Notice>
 }
 
 function AdminRepoTable({ params, names }: { params: URLSearchParams; names: Map<string, string> }) {
@@ -132,7 +137,7 @@ function AdminRepoTable({ params, names }: { params: URLSearchParams; names: Map
   // 沿用服务端筛选和游标，仓库链接会记录当前列表地址。
   const items = distinct(repos.data.pages.flatMap((page) => page.items))
   return <>
-    {repos.error && <Notice error>{errorText(repos.error)}</Notice>}
+    {repos.error && <RepoListError error={repos.error} reload={() => { void repos.refetch() }} />}
     {items.length ? <div className="admin-table-scroll" role="region" aria-label="仓库表格" tabIndex={0}>
       <table className="admin-table admin-directory-table admin-repo-table" aria-label="仓库列表">
       <thead><tr>
@@ -140,7 +145,7 @@ function AdminRepoTable({ params, names }: { params: URLSearchParams; names: Map
           <th key={label} scope="col">{label}</th>)}
       </tr></thead>
       <tbody>{items.map((repo) => {
-        const description = repo.titleZh || repo.description
+        const description = repo.titleZh || repo.summaryPreview || repo.description
         return <tr key={repo.id}>
           <td className="admin-repo-identity">
             <RepoLink repo={repo} />
@@ -155,8 +160,8 @@ function AdminRepoTable({ params, names }: { params: URLSearchParams; names: Map
             <span className="minor muted">{repo.grade} 级</span>
           </div></td>
           <td className="numeric">{number(repo.stars)}</td>
-          <td><GrowthValue value={repo.growth24h} /></td>
-          <td><GrowthValue value={repo.growth7d} /></td>
+          <td><GrowthValue value={repo.growth24h} showMissing /></td>
+          <td><GrowthValue value={repo.growth7d} showMissing /></td>
           <td className="numeric">{decimal(repo.hotnessScore)}</td>
           <td>{repo.lastSuccessAt ? <time dateTime={repo.lastSuccessAt}>{timestamp(repo.lastSuccessAt)}</time> : '—'}</td>
           <td><RepoBlockButton repo={repo} /></td>
@@ -167,50 +172,62 @@ function AdminRepoTable({ params, names }: { params: URLSearchParams; names: Map
   </>
 }
 
-export function Repos() {
-  const admin = useAdminArea()
-  const [params, setParams] = useSearchParams()
-  const categories = useCategories()
-  const { slug } = useParams()
-  const selected = categories.data?.items.find((entry) => entry.slug === slug)
-  const names = mapNames(categories.data?.items)
+function repoListCriteria(search: URLSearchParams, admin: boolean, slug?: string) {
+  const params = new URLSearchParams(search)
+  params.delete('cursor')
+  if (!admin) params.delete('category')
   const q = params.get('q') ?? ''
-  const sort = slug && !admin ? 'discovered' : params.get('sort') ?? 'discovered'
-  const criteria = slug && !admin ? new URLSearchParams(q ? { q } : {}) : new URLSearchParams(params)
-  criteria.delete('cursor')
+  const hasQuery = q.trim() !== ''
+  const defaultSort = hasQuery ? 'relevance' : 'discovered'
+  const sort = params.get('sort') ?? defaultSort
+  const criteria = new URLSearchParams(params)
   criteria.set('limit', '30')
   criteria.set('sort', sort)
-  if (slug) {
-    criteria.delete('category')
-    criteria.append('category', slug)
-  }
-  const categoryTags = params.getAll('category')
-  const advancedCount = filterKeys.slice(1).filter((name) => params.has(name)).length
-  const filterCount = categoryTags.length + advancedCount
+  if (slug) criteria.set('category', slug)
+  return { params, criteria, q, hasQuery, sort }
+}
+
+export async function loadPublicRepos({ request, params }: LoaderFunctionArgs) {
+  const { criteria } = repoListCriteria(new URL(request.url).searchParams, false, params.slug)
+  // 首屏和后续分页共用缓存。切换期间继续展示当前结果，请求失败由列表提供重试。
+  await sessionQueryClient().infiniteQuery({ ...publicRepoListOptions(criteria), staleTime: 'static' }).catch(() => undefined)
+  return null
+}
+
+export function Repos() {
+  const admin = useAdminArea()
+  const [routeParams, setParams] = useSearchParams()
+  const categories = useCategories()
+  const { slug } = useParams()
+  const navigation = useNavigation()
+  const selected = categories.data?.items.find((entry) => entry.slug === slug)
+  const names = mapNames(categories.data?.items)
+  const { params, criteria, q, hasQuery, sort } = repoListCriteria(routeParams, admin, slug)
+  const tag = !admin && params.get('tag')?.trim()
+  const pendingPath = navigation.state === 'loading' ? navigation.location.pathname : ''
+  const pendingCategory = matchPath(repoCategoryPath(), pendingPath) ? '' : matchPath(repoCategoryRoute, pendingPath)?.params.slug
+  const activeFilters = filterKeys.filter((name) => params.has(name)).length
   const navigationOptions = { preventScrollReset: true, flushSync: admin }
 
   function change(name: string, value: string) {
     const next = new URLSearchParams(params)
     if (value) next.set(name, value)
     else next.delete(name)
-    next.delete('cursor')
+    if (name === 'q' && !value && next.get('sort') === 'relevance') next.delete('sort')
     setParams(next, navigationOptions)
   }
 
-  function chooseCategory(value: string) {
-    // 后台的分类标签可叠加搜索、排序及其他筛选。
+  function chooseAdminCategory(value: string) {
     const next = new URLSearchParams(params)
-    for (const key of admin ? ['category', 'cursor'] : [...filterKeys, 'sort', 'cursor']) next.delete(key)
+    next.delete('category')
     if (value) next.set('category', value)
     setParams(next, navigationOptions)
   }
 
-  const categoryTabs = !slug && <CategoryTabs items={categories.data?.items} selected={categoryTags}
-    allSelected={admin ? categoryTags.length === 0 : filterCount === 0} onSelect={chooseCategory} />
-  const activeFilters = advancedCount
   const listActions = <div className="list-actions">
     <label className="select-label"><span className="sr-only">排序</span>
       <select value={sort} onChange={(e) => change('sort', e.target.value)}>
+        {hasQuery && <option value="relevance">相关度</option>}
         <option value="discovered">最近发现</option><option value="hotness">综合热度</option>
         <option value="growth24h">24h 净增</option><option value="growth7d">7d 净增</option><option value="stars">累计 Star</option>
       </select>
@@ -219,51 +236,59 @@ export function Repos() {
   </div>
   const search = <InlineSearch key={q} value={q} onSearch={(value) => change('q', value)} />
   const categoryError = categories.error && <Notice error>{errorText(categories.error)}</Notice>
-  const topicTabs = slug && <div className="pills repo-category-tabs" role="group" aria-label="项目分类">
-    <Link className="pill-link" to={{ pathname: '/repos', search: criteriaSearch(q) }}>全部</Link>
-    {categories.data?.items.map((entry) => <Link className="pill-link" key={entry.slug} aria-current={entry.slug === slug ? 'page' : undefined}
-      to={{ pathname: '/categories/' + encodeURIComponent(entry.slug), search: criteriaSearch(q) }}>{entry.name}</Link>)}
-  </div>
+  const searchParams = params.toString()
 
   return <>
-    {slug && <Link className="back-link" to="/categories"><ArrowLeft size={15} />返回分类</Link>}
-    <header className="page-head">
-      <PageTitle title={slug ? selected?.name ?? '项目分类' : admin ? '仓库管理' : '全部项目'}
-        subtitle={slug ? '按仓库主题词查看此分类的项目。' : admin ? '搜索和筛选已收录仓库，管理重点监控与屏蔽。' : '浏览已收录的 GitHub 仓库，按分类查看或收藏。'} />
+    <header className={'page-head' + (tag ? ' repo-tag-heading' : '')}>
+      <PageTitle title={admin ? '仓库管理' : tag ? '#' + tag : '全部项目'}
+        subtitle={admin ? '搜索和筛选已收录仓库，管理重点监控与屏蔽。' : tag ? undefined : '浏览已收录的 GitHub 仓库，按分类查看或收藏。'} />
     </header>
     {admin ? <section className="panel admin-panel" aria-label="仓库管理列表">
       <div className="admin-table-toolbar admin-repo-toolbar">
         {search}
-        <div className="admin-filters">{categoryTabs}{listActions}</div>
+        <div className="admin-filters">
+          <CategoryTabs items={categories.data?.items} selected={params.getAll('category')} onSelect={chooseAdminCategory} />
+          {listActions}
+        </div>
       </div>
       {categoryError}
       <AdminRepoTable params={criteria} names={names} />
     </section> : <>
-      <div className="list-tools">{topicTabs || categoryTabs}{search}</div>
+      <div className={'list-tools' + (tag ? ' repo-tag-tools' : '')}>
+        <AnimatedPills className="repo-category-tabs" role="group" aria-label="项目分类">
+          <Link className="pill-link" aria-current={slug ? undefined : 'page'} preventScrollReset
+            data-pending={pendingCategory === '' && slug ? '' : undefined}
+            to={{ pathname: repoCategoryPath(), search: searchParams }}>全部</Link>
+          {categories.data?.items.map((entry) => <Link className="pill-link" key={entry.slug}
+            aria-current={entry.slug === slug ? 'page' : undefined} preventScrollReset
+            data-pending={entry.slug === pendingCategory && entry.slug !== slug ? '' : undefined}
+            to={{ pathname: repoCategoryPath(entry.slug), search: searchParams }}>{entry.name}</Link>)}
+        </AnimatedPills>
+        {search}
+      </div>
+      {tag && <button type="button" className="badge badge-accent repo-tag-filter" aria-label={'清除标签筛选 ' + tag}
+        onClick={() => change('tag', '')}><span>#{tag}</span><X size={14} aria-hidden /></button>}
       {categoryError}
-      {slug && categories.data && !selected ? <Empty title="此分类不存在"><Link className="button" to="/categories">返回分类</Link></Empty> :
-        <RepoFeed params={criteria} names={names} timeline={sort === 'discovered' || sort === 'followed'}
-          favorites
-          empty="暂无匹配的项目" />}
+      <div className="repo-results" aria-busy={pendingCategory !== undefined || undefined}>
+        {slug && categories.data && !selected ? <Empty title="此分类不存在"><Link className="button" to="/categories">返回分类</Link></Empty> :
+          <RepoFeed key={criteria.toString()} params={criteria} names={names} timeline={sort === 'discovered' || sort === 'followed'} favorites routed
+            empty="暂无匹配的项目" />}
+      </div>
     </>}
   </>
 }
 
-function criteriaSearch(q: string) {
-  return q ? new URLSearchParams({ q }).toString() : ''
-}
-
-function CategoryTabs({ items, selected, allSelected = selected.length === 0, onSelect }: {
-  items: DiscoveryTabOption[] | undefined; selected: string[]; allSelected?: boolean; onSelect: (slug: string) => void
+function CategoryTabs({ items, selected, onSelect }: {
+  items: DiscoveryTabOption[] | undefined; selected: string[]; onSelect: (slug: string) => void
 }) {
-  return <div className="pills repo-category-tabs" role="group" aria-label="项目分类">
-    <button type="button" aria-pressed={allSelected} onClick={() => onSelect('')}>全部</button>
+  return <AnimatedPills className="repo-category-tabs" role="group" aria-label="项目分类">
+    <button type="button" aria-pressed={selected.length === 0} onClick={() => onSelect('')}>全部</button>
     {items?.map(({ slug, name }) => <button key={slug} type="button" aria-pressed={selected.includes(slug)}
       onClick={() => onSelect(slug)}>{name}</button>)}
-  </div>
+  </AnimatedPills>
 }
 
-const filterKeys = ['category', 'grade', 'language', 'state', 'tag', 'blocked']
+const filterKeys = ['grade', 'language', 'state', 'tag', 'blocked']
 
 function RepoFilterPopover({ params, activeCount, onApply }: {
   params: URLSearchParams; activeCount: number; onApply: (value: URLSearchParams) => void
@@ -333,12 +358,11 @@ function RepoFiltersForm({ id, left, params, onApply }: {
     event.preventDefault()
     // 浮窗打开期间仍可操作排序和搜索，提交只覆盖浮窗中的筛选项。
     const next = new URLSearchParams(params)
-    for (const key of filterKeys.slice(1)) {
+    for (const key of filterKeys) {
       const value = draft.get(key)?.trim()
       if (value) next.set(key, value)
       else next.delete(key)
     }
-    next.delete('cursor')
     onApply(next)
   }
   return <form id={id} className="panel repo-filter-popover" style={{ insetInlineStart: left }} aria-label="筛选项目" onSubmit={submit}>
@@ -359,7 +383,7 @@ function RepoFiltersForm({ id, left, params, onApply }: {
       <div className="action-row">
         <button type="button" className="button" onClick={() => {
           const next = new URLSearchParams(draft)
-          for (const key of filterKeys.slice(1)) next.delete(key)
+          for (const key of filterKeys) next.delete(key)
           setDraft(next)
         }}>重置</button><button className="button primary">应用筛选</button>
       </div>
@@ -376,8 +400,8 @@ export function Ranking() {
   return <>
     <header className="page-head"><PageTitle title="热点榜" subtitle="追踪 Star 增长、综合热度与 GitHub Trending。" /></header>
     <div className="ranking-content">
-      <div className="pills ranking-choice" role="group" aria-label="榜单类型">{ranks.map(([key, label]) => <button key={key} aria-pressed={key === view}
-        onClick={() => setParams({ view: key }, { preventScrollReset: true })}>{label}</button>)}</div>
+      <AnimatedPills className="ranking-choice" role="group" aria-label="榜单类型">{ranks.map(([key, label]) => <button key={key} aria-pressed={key === view}
+        onClick={() => setParams({ view: key }, { preventScrollReset: true })}>{label}</button>)}</AnimatedPills>
       {view === 'official' ? <Official /> : <RepoFeed params={new URLSearchParams({ sort: view, limit: '30' })}
         ranking={view} empty="暂无可排序的项目" />}
     </div>
@@ -395,6 +419,7 @@ function Official() {
   const [params, setParams] = useSearchParams()
   const sources = useQuery({
     queryKey: ['trending', 'sources'],
+    meta: { pageLoad: true },
     queryFn: ({ signal }) => publicApi<Items<{ sourceKey: string }>>('/trending/sources', { signal }),
   })
   const choices = new Set(sources.data?.items.map(({ sourceKey }) => sourceKey))
@@ -405,6 +430,7 @@ function Official() {
   const period = key.slice(split + 1)
   const trending = useQuery({
     queryKey: ['trending', key],
+    meta: { pageLoad: true },
     enabled: sources.isSuccess && choices.size > 0,
     queryFn: ({ signal }) => publicApi<Trending>('/trending?' + new URLSearchParams({ sourceKey, period }), { signal }),
   })
@@ -435,7 +461,7 @@ function Official() {
         ? <PageError error={trending.error} retry={() => { void trending.refetch() }} /> :
         trending.data?.items.length ? <>
           {trending.error && <Notice error>{errorText(trending.error)}</Notice>}
-          <RankedRepos metric="official" items={trending.data.items.map((repo) => {
+          <RankedRepos key={key} metric="official" items={trending.data.items.map((repo) => {
             const entry = repo.trendingEntries.find((item) => item.sourceKey === sourceKey && item.period === period)
             return { repo, rank: entry?.rank ?? null }
           })} />
@@ -494,7 +520,7 @@ export function Categories() {
         {/* 同一张卡片在桌面进入网格，在手机收为带入口图标的列表行。 */}
         <ul className="category-grid">{items.map(({ slug, name, count, latestRepo }) => {
           const Icon = categoryIcons.get(slug) ?? Folder
-          return <li key={slug}><Link className="category-tile" to={'/categories/' + encodeURIComponent(slug)} aria-label={name}>
+          return <li key={slug}><Link className="category-tile" to={repoCategoryPath(slug)} aria-label={name}>
             <span className="category-icon" data-category={slug}><Icon size={15} aria-hidden /></span>
             <div className="category-tile-body">
               <h3>{name}</h3>
@@ -516,6 +542,7 @@ export function Categories() {
 export function ProjectThemes() {
   const query = useQuery({
     queryKey: ['project-themes'],
+    meta: { pageLoad: true },
     queryFn: ({ signal }) => publicApi<ProjectThemeDirectory>('/project-themes', { signal }),
   })
   const themes = query.data?.items ?? []
@@ -561,6 +588,7 @@ export function ProjectThemeDetail() {
   const categories = useCategories()
   const query = useQuery({
     queryKey: ['project-themes', slug],
+    meta: { pageLoad: true },
     queryFn: ({ signal }) => publicApi<ThemeDetail>('/project-themes/' + encodeURIComponent(slug), { signal }),
   })
   const theme = query.data

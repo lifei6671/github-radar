@@ -24,7 +24,11 @@ import (
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
-const acceptanceReadmeMarker = "RADAR_ACCEPTANCE_PRIVATE_README_MARKER"
+const (
+	acceptanceReadmeMarker = "RADAR_ACCEPTANCE_PRIVATE_README_MARKER"
+	acceptanceGitHubToken  = "acceptance-github"
+	acceptanceAIKey        = "acceptance-model-key"
+)
 
 type acceptanceUpstream struct {
 	stars          atomic.Int32
@@ -35,6 +39,16 @@ type acceptanceUpstream struct {
 }
 
 func (u *acceptanceUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/trending/" {
+		key := acceptanceGitHubToken
+		if r.URL.Path == "/v1/chat/completions" {
+			key = acceptanceAIKey
+		}
+		if r.Header.Get("Authorization") != "Bearer "+key {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-RateLimit-Limit", "5000")
 	w.Header().Set("X-RateLimit-Remaining", "4900")
@@ -97,8 +111,9 @@ func (u *acceptanceUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		call := u.modelCalls.Add(1)
 		answer, _ := json.Marshal(map[string]any{"source_language": "en",
-			"summary_zh": fmt.Sprintf("第%d版。", call) + strings.Repeat("这个项目用于组织本地开发工作流。团队可以配置命令分组、重复运行任务并查看每个步骤的状态。文档提供了配置示例和启动方式。", 4),
+			"summary_zh": fmt.Sprintf("第%d版。", call) + "这个项目用于组织本地开发工作流，团队可以配置命令分组、重复运行任务并查看每个步骤的状态。仓库文档提供了完整的本地配置示例和启动方式，便于在开发工作区中复用相同的任务步骤。",
 			"features":   []string{"脚本分组", "状态输出"}, "audience": []string{"开发团队"}, "value_tags": []string{"自动化"},
+			"topics": []string{"workflow", "task-runner"}, "theme_slugs": []string{},
 			"evidence": []string{"仓库 README"}, "uncertainty": []string{}})
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": string(answer)}}},
 			"usage": map[string]int{"prompt_tokens": 140, "completion_tokens": 260}})
@@ -146,7 +161,7 @@ func TestAcceptanceBusiness(t *testing.T) {
 	const rulePath = "/api/v1/system/discovery-rules"
 	rules := acceptanceJSON[acceptanceRules](t, initial, http.MethodGet, rulePath, nil, 200)
 	rules.Items = []settings.Rule{
-		{SourceType: "search", SourceKey: "acceptance", Query: "topic:mcp stars:>=20", Enabled: true, IntervalMinutes: 60, Priority: 40},
+		{SourceType: "search", SourceKey: "acceptance", Query: "topic:mcp", MinStars: new(20), Enabled: true, IntervalMinutes: 60, Priority: 40},
 		{SourceType: "trending", SourceKey: "all:daily", Enabled: true, IntervalMinutes: 60, Priority: 30},
 	}
 	acceptanceJSON[acceptanceRules](t, initial, http.MethodPut, rulePath, rules, 200)
@@ -164,17 +179,25 @@ func TestAcceptanceBusiness(t *testing.T) {
 		t.Fatal("缺少 GitHub 令牌时应明确提示")
 	}
 	// 模拟升级后仍带旧 YAML，已经保存的规则和运行参数须保持。
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	file, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = io.WriteString(file, "discovery:\n  trending_enabled: obsolete\n")
-	if closeErr := file.Close(); err != nil || closeErr != nil {
-		t.Fatal("写入验收 YAML 失败")
+	legacyYAML := string(file) + "\ndiscovery:\n  trending_enabled: obsolete\n"
+	withKeys := legacyYAML + "credentials:\n  github_token: " + acceptanceGitHubToken + "\n  ai_api_key: " + acceptanceAIKey + "\n"
+	if err := os.WriteFile(path, []byte(withKeys), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	env := []string{"RADAR_ACCEPTANCE_UPSTREAM=" + fixture.URL, "GITHUB_TOKEN=acceptance-github", "AI_API_KEY=acceptance-model-key"}
-	server := startAcceptanceServer(t, path, env...)
+	server := startAcceptanceServer(t, path, "RADAR_ACCEPTANCE_UPSTREAM="+fixture.URL)
+	limits := acceptanceJSON[struct{ GitHubConfigured bool }](t, server, http.MethodGet, "/api/v1/system/limits", nil, 200)
+	if !limits.GitHubConfigured {
+		t.Fatal("YAML 令牌应使采集状态显示已配置")
+	}
+	savedRuntime := acceptanceJSON[map[string]any](t, server, http.MethodGet, runtimePath, nil, 200)
+	if raw, err := json.Marshal(savedRuntime); err != nil || bytes.Contains(raw, []byte(acceptanceGitHubToken)) || bytes.Contains(raw, []byte(acceptanceAIKey)) {
+		t.Fatal("运行配置接口不应返回 YAML 密钥")
+	}
 	if saved := acceptanceJSON[acceptanceRules](t, server, http.MethodGet, rulePath, nil, 200); len(saved.Items) != 2 {
 		t.Fatal("重启未保留已保存的发现规则")
 	}
@@ -202,7 +225,8 @@ func TestAcceptanceBusiness(t *testing.T) {
 
 	acceptanceJob(t, server, repoPath+"/summary", map[string]any{"requestId": "acceptance-summary-first", "force": false})
 	summarized := acceptanceJSON[acceptanceRepoView](t, server, http.MethodGet, repoPath, nil, 200)
-	if summarized.SummaryZh == nil || summarized.SummaryStatus != "ready" || len([]rune(*summarized.SummaryZh)) < 200 || upstream.modelCalls.Load() != 1 {
+	if summarized.SummaryZh == nil || summarized.SummaryStatus != "ready" || len([]rune(*summarized.SummaryZh)) < 80 ||
+		len([]rune(*summarized.SummaryZh)) > 200 || upstream.modelCalls.Load() != 1 {
 		t.Fatal("真实摘要任务未生成足量的中文摘要")
 	}
 	upstream.stars.Store(1250)
@@ -223,29 +247,35 @@ func TestAcceptanceBusiness(t *testing.T) {
 	}
 	visitor := server
 	visitor.admin = ""
-	readmePath := "/api/v1/public/repos/" + strconv.Itoa(acceptanceRepoID) + "/readme"
+	readmePath := "/api/v1/public/repos/by-name/fixture/radar-workflow"
 	type readmeView struct {
-		OriginalHTML, ChineseHTML string
-		Complete                  bool
+		State, SourceURL, ChineseHTML string
+		Complete                      bool
 	}
-	original := acceptanceJSON[readmeView](t, visitor, http.MethodGet, readmePath, nil, 200)
-	if !strings.Contains(original.OriginalHTML, "<h1") || original.ChineseHTML != "" || upstream.translateCalls.Load() != 0 {
-		t.Fatal("公开读取应展示 README 原文且不触发翻译")
+	type readmeDetail struct {
+		SummaryZh string
+		Readme    readmeView
+	}
+	original := acceptanceJSON[readmeDetail](t, visitor, http.MethodGet, readmePath, nil, 200)
+	if original.SummaryZh == "" || original.Readme.State != "pending" || original.Readme.SourceURL == "" ||
+		original.Readme.ChineseHTML != "" || upstream.translateCalls.Load() != 0 {
+		t.Fatalf("公开详情应同时返回导读与 README 准备状态: %+v", original)
 	}
 	translationRequest := map[string]string{"requestId": "acceptance-readme-translation"}
 	acceptanceJSON[map[string]string](t, visitor, http.MethodPost, repoPath+"/readme/translate", translationRequest, 401)
 	acceptanceJob(t, server, repoPath+"/readme/translate", translationRequest)
-	translated := acceptanceJSON[readmeView](t, visitor, http.MethodGet, readmePath, nil, 200)
-	if !translated.Complete || !strings.Contains(translated.ChineseHTML, "本地开发任务") ||
-		translated.OriginalHTML != original.OriginalHTML || upstream.translateCalls.Load() == 0 {
-		t.Fatal("已完成译文应与当前 README 原文一起发布")
+	translated := acceptanceJSON[readmeDetail](t, visitor, http.MethodGet, readmePath, nil, 200)
+	if translated.SummaryZh == "" || !translated.Readme.Complete || !strings.Contains(translated.Readme.ChineseHTML, "本地开发任务") ||
+		translated.Readme.SourceURL != original.Readme.SourceURL || upstream.translateCalls.Load() == 0 {
+		t.Fatal("详情应一次返回 AI 导读、已完成译文和 GitHub 原文入口")
 	}
 	acceptanceJSON[map[string]any](t, server, http.MethodPost, repoPath+"/follow", map[string]bool{"follow": true}, 200)
 	topic := acceptanceJSON[struct{ ID int64 }](t, server, http.MethodPost, repoPath+"/topic", nil, 200)
 	acceptanceJSON[map[string]any](t, server, http.MethodPatch, "/api/v1/topics/"+strconv.FormatInt(topic.ID, 10), map[string]string{"status": "accepted", "feedback": "验收反馈"}, 200)
 	server.stop()
-	if strings.Contains(server.logs(), acceptanceReadmeMarker) {
-		t.Fatal("README 原文标识出现在服务日志")
+	logs := server.logs()
+	if strings.Contains(logs, acceptanceReadmeMarker) || strings.Contains(logs, acceptanceGitHubToken) || strings.Contains(logs, acceptanceAIKey) {
+		t.Fatal("README 原文标识或 YAML 密钥出现在服务日志")
 	}
 	t.Log("空库安装、迁移重跑、数据库规则重启、Search 与 Trending、Star 304 与摘要缓存通过")
 
@@ -265,8 +295,11 @@ func TestAcceptanceBusiness(t *testing.T) {
 	if counts[0] != 3 || counts[1] == 0 || counts[2] == 0 {
 		t.Fatalf("原始清理或聚合行数不符 %v", counts)
 	}
-	// 不设置模型密钥仍可读取已有摘要、聚合与选题。
-	reopened := startAcceptanceServer(t, path, "RADAR_ACCEPTANCE_UPSTREAM="+fixture.URL, "GITHUB_TOKEN=acceptance-github")
+	// GitHub 令牌可以继续由环境变量提供，缺少模型密钥时仍可读取已有摘要。
+	if err := os.WriteFile(path, []byte(legacyYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reopened := startAcceptanceServer(t, path, "RADAR_ACCEPTANCE_UPSTREAM="+fixture.URL, "GITHUB_TOKEN="+acceptanceGitHubToken)
 	detail := acceptanceJSON[acceptanceRepoView](t, reopened, http.MethodGet, repoPath, nil, 200)
 	if !detail.Followed || detail.Growth24h.Delta == nil || *detail.Growth24h.Delta != 250 || detail.Growth24h.Quality != "exact" {
 		t.Fatalf("跟踪状态或 24h 净增长不符，quality=%s", detail.Growth24h.Quality)
@@ -306,8 +339,8 @@ func TestAcceptanceBusiness(t *testing.T) {
 		if err != nil && !os.IsNotExist(err) {
 			t.Fatal(err)
 		}
-		if bytes.Contains(data, []byte(acceptanceReadmeMarker)) {
-			t.Fatal("README 原文标识落入数据库或事务文件")
+		if bytes.Contains(data, []byte(acceptanceReadmeMarker)) || bytes.Contains(data, []byte(acceptanceGitHubToken)) || bytes.Contains(data, []byte(acceptanceAIKey)) {
+			t.Fatal("README 原文标识或 YAML 密钥落入数据库或事务文件")
 		}
 	}
 	t.Log("24h 精确 +250、小时与日趋势、聚合重跑、清理、人工反馈和无 AI 密钥降级通过")

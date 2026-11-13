@@ -7,6 +7,7 @@ import (
 
 	sdk "github.com/google/go-github/v88/github"
 
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/trending"
@@ -31,14 +32,14 @@ func TestRepositoryBlockStopsSamplingAndDiscovery(t *testing.T) {
 	if err != nil || claimed == nil || claimed.ID != job.ID {
 		t.Fatalf("未领取采样任务: %+v %v", claimed, err)
 	}
-	write, err := e.refresh(ctx, *claimed, Payload{Manual: true, PlannedAt: time.Now().UnixMilli()})
+	write, err := e.refresh(ctx, *claimed, collection.Payload{Manual: true, PlannedAt: time.Now().UnixMilli()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Queue.SetBlocked(ctx, 1, true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Queue.Complete(ctx, *claimed, write); !errors.Is(err, ErrLeaseLost) {
+	if err := e.Queue.Complete(ctx, *claimed, write); !errors.Is(err, collection.ErrLeaseLost) {
 		t.Fatalf("屏蔽前已发出的采样不能提交: %v", err)
 	}
 	if _, err := e.Queue.Refresh(ctx, 1, "blocked", time.Now()); !errors.Is(err, storage.ErrRepositoryBlocked) {
@@ -52,19 +53,19 @@ func TestRepositoryBlockStopsSamplingAndDiscovery(t *testing.T) {
 	}
 	trendingRepo := source(0, "repo", 150)
 	e.Trending = fixtureTrending{entries: []trending.Entry{{Repository: trendingRepo, Rank: 1}, {Repository: source(2, "other", 200), Rank: 2}}}
-	p := Payload{SourceKey: "all", Period: "daily", PlannedAt: time.Now().UnixMilli()}
+	p := collection.Payload{SourceKey: "all", Period: "daily", PlannedAt: time.Now().UnixMilli()}
 	trend, err := e.discoverTrending(ctx, p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transaction(trend); err != nil {
+	if err := e.write(trend); err != nil {
 		t.Fatal(err)
 	}
 	search, err := e.search(ctx, storage.Job{}, p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.Transaction(search); err != nil {
+	if err := e.write(search); err != nil {
 		t.Fatal(err)
 	}
 	for _, model := range []any{&storage.RepoSnapshot{}, &storage.SearchObservation{}, &storage.TrendingObservation{}} {
@@ -140,11 +141,11 @@ func TestBlockedNameDoesNotHideDifferentGitHubID(t *testing.T) {
 	reused := source(2, "repo", 200)
 	e.GitHub = fixtureGitHub{get: func() (gh.RepositoryResult, error) { return gh.RepositoryResult{Repository: reused}, nil }}
 	e.Trending = fixtureTrending{entries: []trending.Entry{{Repository: reused, Rank: 1}}}
-	write, err := e.discoverTrending(t.Context(), Payload{SourceKey: "all", Period: "daily", PlannedAt: time.Now().UnixMilli()})
+	write, err := e.discoverTrending(t.Context(), collection.Payload{SourceKey: "all", Period: "daily", PlannedAt: time.Now().UnixMilli()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Queue.DB.Transaction(write); err != nil {
+	if err := e.write(write); err != nil {
 		t.Fatal(err)
 	}
 	if old, next := repository(t, e, 1), repository(t, e, 2); !old.Blocked || old.NameIsCurrent || next.Blocked || !next.NameIsCurrent {

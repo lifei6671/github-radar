@@ -1,14 +1,9 @@
 package metrics
 
-import (
-	"testing"
-
-	"github.com/lifei6671/github-radar/internal/config"
-	"github.com/lifei6671/github-radar/internal/storage"
-)
+import "testing"
 
 func TestBoundaryCoverage(t *testing.T) {
-	tolerance := config.DefaultMetrics().Hour
+	tolerance := BoundaryToleranceMinutes{Exact: 10, Max: 30}
 	from, to := 2*Hour, 3*Hour
 	points := []Point{
 		{At: from + 5*minute, Stars: 120, Slot: 2, Resolution: "raw"},
@@ -28,7 +23,8 @@ func TestBoundaryCoverage(t *testing.T) {
 	if w.Delta != nil || w.Quality != Insufficient {
 		t.Fatalf("超出容差不可推算: %+v", w)
 	}
-	w = Bucket(storage.MetricAnchors{OpenObservedAt: from + minute, CloseObservedAt: from + minute, SampleCount: 1}, from, Hour, tolerance)
+	only := Point{At: from + minute}
+	w = Between(&only, &only, from, to, tolerance)
 	if w.Delta != nil || w.Quality != Insufficient {
 		t.Fatalf("单点桶不能计算零增长: %+v", w)
 	}

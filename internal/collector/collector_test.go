@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,11 +17,15 @@ import (
 	sdk "github.com/google/go-github/v88/github"
 	"gorm.io/gorm"
 
+	"github.com/lifei6671/github-radar/internal/collector/port"
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/collectionstore"
 	"github.com/lifei6671/github-radar/internal/trending"
 	"github.com/lifei6671/github-radar/migrations"
 )
@@ -53,12 +58,73 @@ func (f fixtureTrending) Fetch(context.Context, string, string) ([]trending.Entr
 	return f.entries, f.err
 }
 
-func newEngine(t *testing.T) *Engine {
+type testEngine struct {
+	*Engine
+	Queue *collectionstore.Queue
+}
+
+func TestConcurrentCollectorClaimsSpreadSameSource(t *testing.T) {
+	e := newEngine(t)
+	q := e.Queue
+	q.Pacing = storage.JobPacing{{Key: "search", Types: []string{consts.JobDiscoverSearch}, Gap: 2 * time.Second}}
+	ctx, db := t.Context(), q.DB
+	now := time.Now()
+	for i := 1; i <= 2; i++ {
+		rule := storage.DiscoveryRule{SourceType: consts.SourceSearch, SourceKey: fmt.Sprintf("paced-rule-%d", i),
+			Query: "topic:mcp", Enabled: true, IntervalMinutes: 30}
+		if err := db.Create(&rule).Error; err != nil {
+			t.Fatal(err)
+		}
+		job := storage.Job{Type: consts.JobDiscoverSearch, DedupKey: rule.SourceKey,
+			PayloadJSON: fmt.Sprintf(`{"ruleId":%d}`, rule.ID), Status: consts.StatusPending,
+			AvailableAt: now.UnixMilli(), MaxAttempts: 5}
+		if err := db.Create(&job).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	type result struct {
+		job *storage.Job
+		err error
+	}
+	results := make(chan result, 3)
+	for range 3 {
+		go func() {
+			job, err := q.Claim(ctx, now)
+			results <- result{job, err}
+		}()
+	}
+	var count int
+	for range 3 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.job != nil {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("同一时刻只能启动一个自动 Search，实际 %d", count)
+	}
+	reopened := collectionstore.Queue{DB: db, Cfg: q.Cfg, Pacing: q.Pacing}
+	if job, err := reopened.Claim(ctx, now.Add(time.Second)); err != nil || job != nil {
+		t.Fatalf("更换 Worker 后仍要遵循持久化间隔: %+v %v", job, err)
+	}
+	if job, err := reopened.Claim(ctx, now.Add(2*time.Second)); err != nil || job == nil {
+		t.Fatalf("间隔结束后应继续处理积压: %+v %v", job, err)
+	}
+}
+
+func (e *testEngine) write(change port.Change) error {
+	return e.Queue.DB.Transaction(func(tx *gorm.DB) error { return change(e.Queue.Writer(tx)) })
+}
+
+func newEngine(t *testing.T) *testEngine {
 	t.Helper()
 	return newEngineWithBusyTimeout(t, 5000)
 }
 
-func newEngineWithBusyTimeout(t *testing.T, timeout int) *Engine {
+func newEngineWithBusyTimeout(t *testing.T, timeout int) *testEngine {
 	t.Helper()
 	cfg, err := config.Load("")
 	if err != nil {
@@ -82,8 +148,9 @@ func newEngineWithBusyTimeout(t *testing.T, timeout int) *Engine {
 	if _, err := (settings.Store{DB: db}).Initialize(t.Context(), cfg); err != nil {
 		t.Fatal(err)
 	}
-	return &Engine{Queue: Queue{DB: db, Cfg: cfg.Scheduler}, Cfg: cfg,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	queue := &collectionstore.Queue{DB: db, Cfg: cfg.Scheduler}
+	return &testEngine{Queue: queue, Engine: &Engine{Queue: queue, Cfg: cfg,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}}
 }
 
 func source(id int64, name string, stars int) *sdk.Repository {
@@ -94,10 +161,10 @@ func source(id int64, name string, stars int) *sdk.Repository {
 	}
 }
 
-func discover(t *testing.T, e *Engine, repo *sdk.Repository) {
+func discover(t *testing.T, e *testEngine, repo *sdk.Repository) {
 	t.Helper()
 	err := e.Queue.DB.Transaction(func(tx *gorm.DB) error {
-		_, err := e.Queue.discover(tx, repo, time.Now().UnixMilli())
+		_, err := e.Queue.Discover(tx, repo, time.Now().UnixMilli())
 		return err
 	})
 	if err != nil {
@@ -105,7 +172,7 @@ func discover(t *testing.T, e *Engine, repo *sdk.Repository) {
 	}
 }
 
-func manual(t *testing.T, e *Engine, id int64, request string, planned time.Time) storage.Job {
+func manual(t *testing.T, e *testEngine, id int64, request string, planned time.Time) storage.Job {
 	t.Helper()
 	job, err := e.Queue.Refresh(t.Context(), id, request, planned)
 	if err != nil {
@@ -118,7 +185,7 @@ func manual(t *testing.T, e *Engine, id int64, request string, planned time.Time
 	return job
 }
 
-func step(t *testing.T, e *Engine) {
+func step(t *testing.T, e *testEngine) {
 	t.Helper()
 	if processed, err := e.Step(t.Context()); err != nil || !processed {
 		t.Fatalf("任务未执行: processed=%v err=%v", processed, err)
@@ -163,7 +230,7 @@ func TestDrainInterruptsCollectorFailureWrite(t *testing.T) {
 	}
 }
 
-func repository(t *testing.T, e *Engine, id int64) storage.Repository {
+func repository(t *testing.T, e *testEngine, id int64) storage.Repository {
 	t.Helper()
 	var repo storage.Repository
 	if err := e.Queue.DB.Take(&repo, "repo_id = ?", id).Error; err != nil {
@@ -213,7 +280,7 @@ func TestSnapshotBaseline304AndSameSlot(t *testing.T) {
 	if err := e.Queue.DB.Order("sample_slot").Find(&all).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 || all[1].Stars != 10020 || all[1].SampleSlot != Slot(planned.Add(5*time.Minute).UnixMilli()) {
+	if len(all) != 2 || all[1].Stars != 10020 || all[1].SampleSlot != collection.Slot(planned.Add(5*time.Minute).UnixMilli()) {
 		t.Fatalf("认证 304 应沿可靠基线采样: %+v", all)
 	}
 }
@@ -251,6 +318,40 @@ func TestRenameAndNameReusePreserveIdentity(t *testing.T) {
 	e.Queue.DB.Where("repo_id = ?", 1).Find(&snapshots)
 	if len(snapshots) != 1 || snapshots[0].Stars != 110 {
 		t.Fatalf("旧身份的采样历史发生变化: %+v", snapshots)
+	}
+}
+
+func TestRefreshWithdrawsReadmeWhenAddressIsPrivate(t *testing.T) {
+	for _, tc := range []struct {
+		id    int64
+		state string
+	}{{1, "unavailable"}, {2, "address_pending"}} {
+		t.Run(tc.state, func(t *testing.T) {
+			e := newEngine(t)
+			discover(t, e, source(1, "repo", 100))
+			db := e.Queue.DB
+			if err := db.Create(&storage.RepoReadmeDocument{RepoID: 1, ReadmeSHA: "old-version", Complete: true,
+				ChineseHTML: "<p>旧正文</p>"}).Error; err != nil {
+				t.Fatal(err)
+			}
+			result := source(tc.id, "repo", 900)
+			result.Private = new(true)
+			e.GitHub = fixtureGitHub{get: func() (gh.RepositoryResult, error) {
+				return gh.RepositoryResult{Repository: result}, nil
+			}}
+			manual(t, e, 1, "private-address", time.Now())
+			step(t, e)
+			if old := repository(t, e, 1); old.State != tc.state || old.Stars != 100 {
+				t.Fatalf("旧公开仓库应撤回: %+v", old)
+			}
+			var count int64
+			if err := db.Model(&storage.RepoReadmeDocument{}).Where("repo_id=1").Count(&count).Error; err != nil || count != 0 {
+				t.Fatalf("撤回应删除站内 README: count=%d err=%v", count, err)
+			}
+			if err := db.Model(&storage.Repository{}).Where("repo_id=2").Count(&count).Error; err != nil || count != 0 {
+				t.Fatalf("采集不能导入私有仓库: count=%d err=%v", count, err)
+			}
+		})
 	}
 }
 
@@ -359,10 +460,10 @@ func TestAtomicClaimAndLeaseFence(t *testing.T) {
 		t.Fatalf("过期租约未被新 token 接管: %+v %v", second, err)
 	}
 	wrote := false
-	if err := e.Queue.Complete(t.Context(), *first, func(tx *gorm.DB) error { wrote = true; return nil }); !errors.Is(err, ErrLeaseLost) || wrote {
+	if err := e.Queue.Complete(t.Context(), *first, func(port.Writer) error { wrote = true; return nil }); !errors.Is(err, collection.ErrLeaseLost) || wrote {
 		t.Fatalf("旧执行者不应提交: wrote=%v err=%v", wrote, err)
 	}
-	if err := e.Queue.Complete(t.Context(), *second, func(tx *gorm.DB) error { return nil }); err != nil {
+	if err := e.Queue.Complete(t.Context(), *second, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -370,16 +471,16 @@ func TestAtomicClaimAndLeaseFence(t *testing.T) {
 func TestTrendingFailureKeepsCompleteBatch(t *testing.T) {
 	e := newEngine(t)
 	e.Trending = fixtureTrending{entries: []trending.Entry{{Repository: source(1, "repo", 100), Rank: 1}}}
-	p := Payload{PlannedAt: time.Now().UnixMilli(), SourceKey: "all", Period: "daily"}
+	p := collection.Payload{PlannedAt: time.Now().UnixMilli(), SourceKey: "all", Period: "daily"}
 	apply, err := e.discoverTrending(t.Context(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Queue.DB.Transaction(apply); err != nil {
+	if err := e.write(apply); err != nil {
 		t.Fatal(err)
 	}
 	var before storage.MaintenanceState
-	e.Queue.DB.Take(&before, "key = ?", BatchKey("all", "daily"))
+	e.Queue.DB.Take(&before, "key = ?", collection.BatchKey("all", "daily"))
 	e.Trending = fixtureTrending{err: errors.New("页面结构变化")}
 	p.PlannedAt += 300000
 	if _, err := e.discoverTrending(t.Context(), p); err == nil {
@@ -394,30 +495,54 @@ func TestTrendingFailureKeepsCompleteBatch(t *testing.T) {
 
 func TestSearchDedupAndBoundedShards(t *testing.T) {
 	e := newEngine(t)
-	p := Payload{PlannedAt: time.Now().UnixMilli(), SourceKey: "mcp", RuleID: 1, Query: "topic:mcp", Page: 1}
+	p := collection.Payload{PlannedAt: time.Now().UnixMilli(), SourceKey: "mcp", RuleID: 1, Query: "topic:mcp stars:>=20", Page: 1, StarFloor: 200}
+	requests := 0
 	e.GitHub = fixtureGitHub{search: func(query string, page int) (gh.SearchPage, error) {
-		return gh.SearchPage{Repositories: []*sdk.Repository{source(1, "repo", 100), source(1, "repo", 100)}, Total: 2}, nil
+		requests++
+		if !strings.Contains(query, "stars:>=200 ") || strings.Count(query, "stars:") != 1 {
+			t.Fatalf("请求应使用有效 Star 交集: %q", query)
+		}
+		return gh.SearchPage{Repositories: []*sdk.Repository{source(1, "repo", 200), source(1, "repo", 200), source(2, "small", 199)}, Total: 3}, nil
 	}}
 	job := storage.Job{Priority: 20}
 	apply, err := e.search(t.Context(), job, p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Queue.DB.Transaction(apply); err != nil {
+	if err := e.write(apply); err != nil {
 		t.Fatal(err)
 	}
 	var count int64
 	e.Queue.DB.Model(&storage.Repository{}).Count(&count)
 	if count != 1 {
-		t.Fatalf("重复发现生成了 %d 个实体", count)
+		t.Fatalf("应仅收录一个去重后达到门槛的项目，实际 %d 个", count)
 	}
-	p.StarRange, p.MinStars, p.MaxStars = true, 0, 1
-	children, err := splitSearch(p, []*sdk.Repository{source(1, "repo", 1)})
+	if row := repository(t, e, 1); row.RepoID != 1 {
+		t.Fatalf("应收录刚好达到门槛的项目: %+v", row)
+	}
+	p.StarRange, p.MaxStars = true, 199
+	if apply, err := e.search(t.Context(), job, p); err != nil || apply != nil || requests != 1 {
+		t.Fatalf("不相交的旧分片应直接跳过请求: requests=%d err=%v", requests, err)
+	}
+	e.Trending = fixtureTrending{entries: []trending.Entry{{Repository: source(2, "small", 199), Rank: 1}}}
+	trendingChange, err := e.discoverTrending(t.Context(), collection.Payload{PlannedAt: p.PlannedAt, SourceKey: "all", Period: "daily"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.write(trendingChange); err != nil {
+		t.Fatal(err)
+	}
+	if row := repository(t, e, 2); row.RepoID != 2 {
+		t.Fatalf("Trending 应独立收录低 Star 上榜项目: %+v", row)
+	}
+	p.StarFloor, p.MinStars, p.MaxStars = 0, 0, 1
+	highest := 1
+	children, err := collection.SplitSearch(p, &highest)
 	if err != nil || len(children) != 2 || !children[0].StarRange || children[0].MaxStars != 0 || children[1].MinStars != 1 {
 		t.Fatalf("零 Star 分片必须有明确上界: %+v %v", children, err)
 	}
 	encoded, _ := json.Marshal(children[0])
-	var restored Payload
+	var restored collection.Payload
 	json.Unmarshal(encoded, &restored)
 	if !restored.StarRange || restored.MaxStars != 0 {
 		t.Fatal("零上界在任务序列化后丢失")
@@ -442,7 +567,7 @@ func TestCapacityAndFollowTime(t *testing.T) {
 	if *repository(t, e, 1).FollowedAt != first.UnixMilli() {
 		t.Fatal("重复关注不得改写首次关注时间")
 	}
-	if err := e.Queue.Follow(t.Context(), 2, true, first); !errors.Is(err, ErrCapacity) {
+	if err := e.Queue.Follow(t.Context(), 2, true, first); !errors.Is(err, collection.ErrCapacity) {
 		t.Fatalf("全部容量已被关注项目占用时应返回容量错误: %v", err)
 	}
 	if repository(t, e, 2).StarredByUser {
@@ -458,13 +583,30 @@ func TestCompletionRollsBackWhenLeaseExpiresDuringWrite(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("领取任务失败: %+v %v", job, err)
 	}
-	err = e.Queue.Complete(t.Context(), *job, func(tx *gorm.DB) error {
-		if err := tx.Model(&storage.Repository{}).Where("repo_id=1").Update("stars", 999).Error; err != nil {
-			return err
-		}
-		return tx.Model(job).Update("lease_until", time.Now().Add(-time.Second).UnixMilli()).Error
-	})
-	if !errors.Is(err, ErrLeaseLost) || repository(t, e, 1).Stars != 10 {
+	if err := e.Queue.DB.Exec(`
+CREATE TRIGGER expire_refresh_after_insert AFTER INSERT ON repo_snapshots
+BEGIN
+    UPDATE jobs SET lease_until=0 WHERE repo_id=NEW.repo_id AND status='running';
+END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	e.GitHub = fixtureGitHub{get: func() (gh.RepositoryResult, error) {
+		return gh.RepositoryResult{Repository: source(1, "repo", 999)}, nil
+	}}
+	var plan collection.Payload
+	if err := json.Unmarshal([]byte(job.PayloadJSON), &plan); err != nil {
+		t.Fatal(err)
+	}
+	change, err := e.refresh(t.Context(), *job, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = e.Queue.Complete(t.Context(), *job, change)
+	var count int64
+	if err := e.Queue.DB.Model(&storage.RepoSnapshot{}).Count(&count).Error; err != nil || count != 0 {
+		t.Fatalf("租约失效后快照应回滚: %d %v", count, err)
+	}
+	if !errors.Is(err, collection.ErrLeaseLost) || repository(t, e, 1).Stars != 10 {
 		t.Fatalf("提交前失效应回滚全部业务结果: %v", err)
 	}
 }
@@ -541,18 +683,18 @@ func TestOutOfOrderSuccessPreservesEachSlot(t *testing.T) {
 	}}
 	id := int64(1)
 	oldPlan := time.Now().Add(-5 * time.Minute).UnixMilli()
-	older, err := e.refresh(t.Context(), storage.Job{RepoID: &id}, Payload{PlannedAt: oldPlan, Manual: true})
+	older, err := e.refresh(t.Context(), storage.Job{RepoID: &id}, collection.Payload{PlannedAt: oldPlan, Manual: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(2 * time.Millisecond)
 	stars = 102
-	newer, err := e.refresh(t.Context(), storage.Job{RepoID: &id}, Payload{PlannedAt: oldPlan + 300000, Manual: true})
+	newer, err := e.refresh(t.Context(), storage.Job{RepoID: &id}, collection.Payload{PlannedAt: oldPlan + 300000, Manual: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, apply := range []func(*gorm.DB) error{newer, older} {
-		if err := e.Queue.DB.Transaction(apply); err != nil {
+	for _, apply := range []port.Change{newer, older} {
+		if err := e.write(apply); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -626,7 +768,7 @@ func TestLocalDeferralAndRemoteLimitUseDifferentAttemptCounts(t *testing.T) {
 	}
 }
 
-func TestRuleChangeCancelsOldLeaseAndSchedulesNewQuery(t *testing.T) {
+func TestRuleStarFloorChangeCancelsOldLeaseAndSchedulesNewFloor(t *testing.T) {
 	e := newEngine(t)
 	store := settings.Store{DB: e.Queue.DB}
 	snapshot, err := store.Get(t.Context())
@@ -649,31 +791,31 @@ func TestRuleChangeCancelsOldLeaseAndSchedulesNewQuery(t *testing.T) {
 	if err := e.Queue.DB.Take(&oldRule, "source_key='editable'").Error; err != nil {
 		t.Fatal(err)
 	}
-	rules[0].Query = "topic:new"
+	rules[0].MinStars = new(350)
 	if _, _, err := store.SaveDiscoveryRules(t.Context(), revision, rules); err != nil {
 		t.Fatal(err)
 	}
 	wrote := false
-	err = e.Queue.Complete(t.Context(), *oldJob, func(*gorm.DB) error { wrote = true; return nil })
-	if !errors.Is(err, ErrLeaseLost) || wrote {
+	err = e.Queue.Complete(t.Context(), *oldJob, func(port.Writer) error { wrote = true; return nil })
+	if !errors.Is(err, collection.ErrLeaseLost) || wrote {
 		t.Fatalf("旧定义的在途任务不能提交结果: wrote=%v err=%v", wrote, err)
 	}
 	var current storage.DiscoveryRule
 	if err := e.Queue.DB.Take(&current, "source_key='editable'").Error; err != nil || current.ID != oldRule.ID {
 		t.Fatalf("编辑保留原规则 ID: %+v %v", current, err)
 	}
-	var oldPayload Payload
+	var oldPayload collection.Payload
 	if err := json.Unmarshal([]byte(oldJob.PayloadJSON), &oldPayload); err != nil {
 		t.Fatal(err)
 	}
-	if Slot(current.NextRunAt) == Slot(oldPayload.PlannedAt) {
+	if collection.Slot(current.NextRunAt) == collection.Slot(oldPayload.PlannedAt) {
 		if err := e.Queue.Schedule(t.Context(), time.UnixMilli(current.NextRunAt)); err != nil {
 			t.Fatal(err)
 		}
 		if err := e.Queue.DB.Take(&current, current.ID).Error; err != nil {
 			t.Fatal(err)
 		}
-		if current.NextRunAt != Slot(oldPayload.PlannedAt)+300000 {
+		if current.NextRunAt != collection.Slot(oldPayload.PlannedAt)+300000 {
 			t.Fatal("同槽撤销后应在下一槽安排新查询")
 		}
 	}
@@ -685,9 +827,10 @@ func TestRuleChangeCancelsOldLeaseAndSchedulesNewQuery(t *testing.T) {
 	if err != nil || job == nil {
 		t.Fatalf("未安排新规则任务: %+v %v", job, err)
 	}
-	var payload Payload
-	if err := json.Unmarshal([]byte(job.PayloadJSON), &payload); err != nil || payload.Query != "topic:new" {
-		t.Fatalf("新任务应使用数据库里的新查询: %+v %v", payload, err)
+	var payload collection.Payload
+	if err := json.Unmarshal([]byte(job.PayloadJSON), &payload); err != nil || payload.Query != "topic:old" ||
+		payload.StarFloor != 350 || oldPayload.StarFloor != consts.DefaultSearchMinStars {
+		t.Fatalf("仅修改最低 Star 也应让新任务使用新门槛: old=%+v new=%+v err=%v", oldPayload, payload, err)
 	}
 }
 
@@ -707,7 +850,7 @@ func TestPendingLowerCapacityProtectsRestart(t *testing.T) {
 	if err := e.Queue.Follow(t.Context(), 1, true, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Queue.Follow(t.Context(), 2, true, time.Now()); !errors.Is(err, ErrCapacity) {
+	if err := e.Queue.Follow(t.Context(), 2, true, time.Now()); !errors.Is(err, collection.ErrCapacity) {
 		t.Fatalf("新增关注不能导致已保存的下次启动容量失效: %v", err)
 	}
 }

@@ -10,21 +10,22 @@ import (
 
 // Runtime 是数据库持有的进程级设置。部署地址、库路径和密钥值不会序列化。
 type Runtime struct {
-	Server          Server          `json:"server"`
-	Storage         Storage         `json:"storage"`
-	GitHub          GitHub          `json:"github"`
-	Scheduler       Scheduler       `json:"scheduler"`
-	AI              AI              `json:"ai"`
-	Embedding       Embedding       `json:"embedding"`
-	Metrics         Metrics         `json:"metrics"`
-	Maintenance     Maintenance     `json:"maintenance"`
-	Recommendations Recommendations `json:"recommendations"`
+	Server            Server            `json:"server"`
+	Storage           Storage           `json:"storage"`
+	GitHub            GitHub            `json:"github"`
+	Scheduler         Scheduler         `json:"scheduler"`
+	AI                AI                `json:"ai"`
+	Embedding         Embedding         `json:"embedding"`
+	Metrics           Metrics           `json:"metrics"`
+	Maintenance       Maintenance       `json:"maintenance"`
+	Recommendations   Recommendations   `json:"recommendations"`
+	ReportPublication ReportPublication `json:"reportPublication"`
 }
 
 // RuntimeSettings 提取正在使用的设置，排除部署字段和一次性导入字段。
 func (cfg Config) RuntimeSettings() Runtime {
 	values := Runtime{Server: cfg.Server, Storage: cfg.Storage, GitHub: cfg.GitHub, Scheduler: cfg.Scheduler, AI: cfg.AI, Embedding: cfg.Embedding,
-		Metrics: cfg.Metrics, Maintenance: cfg.Maintenance, Recommendations: cfg.Recommendations}
+		Metrics: cfg.Metrics, Maintenance: cfg.Maintenance, Recommendations: cfg.Recommendations, ReportPublication: cfg.ReportPublication}
 	values.Server.Listen, values.Server.SiteURL, values.Storage.Path = "", "", ""
 	values.Scheduler.TrendingDailyMinutes, values.Scheduler.TrendingOtherMinutes, values.Scheduler.SearchRoundMinutes = 0, 0, 0
 	values.AI.BaseURLEnv, values.AI.ModelEnv = "", ""
@@ -51,7 +52,19 @@ func (cfg Config) WithRuntime(values Runtime) Config {
 	cfg.Metrics, cfg.Maintenance = values.Metrics, values.Maintenance
 	cfg.Recommendations = values.Recommendations
 	cfg.Embedding = values.Embedding
+	cfg.ReportPublication = values.ReportPublication
 	return cfg
+}
+
+// WithLiveRuntime 保留已启动的 HTTP 服务和 SQLite 连接池参数。
+func (cfg Config) WithLiveRuntime(values Runtime) Config {
+	values.Server, values.Storage = cfg.Server, cfg.Storage
+	return cfg.WithRuntime(values)
+}
+
+func (cfg Config) NeedsRestart(values Runtime) bool {
+	applied := cfg.RuntimeSettings()
+	return values.Server != applied.Server || values.Storage != applied.Storage
 }
 
 // Validate 在导入、管理写入和启动读取时共用同一组运行参数约束。
@@ -81,6 +94,9 @@ func (r Runtime) Validate() error {
 		return err
 	}
 	if err := r.Embedding.validate(); err != nil {
+		return err
+	}
+	if err := r.ReportPublication.validate(); err != nil {
 		return err
 	}
 	return r.validateSummary()

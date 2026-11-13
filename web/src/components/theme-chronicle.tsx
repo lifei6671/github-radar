@@ -1,7 +1,7 @@
 import { ChevronDown } from 'lucide-react'
-import { Link } from 'react-router'
+import { Link, useLocation } from 'react-router'
 import type { ThemeMilestone } from '../api/types'
-import { number, repoPath } from '../lib/format'
+import { number, repoListReturn, repoPath } from '../lib/format'
 
 const recentCount = 5
 const monthKey = new Intl.DateTimeFormat('sv-SE', { year: 'numeric', month: '2-digit', timeZone: 'Asia/Shanghai' })
@@ -28,6 +28,7 @@ export function ThemeChronicle({ events }: { events: ThemeMilestone[] }) {
 }
 
 function ChronicleMonths({ events, newestYear }: { events: ThemeMilestone[]; newestYear: string }) {
+  const location = useLocation()
   const months = new Map<string, ThemeMilestone[]>()
   for (const event of events) {
     const key = monthKey.format(new Date(event.at))
@@ -46,7 +47,7 @@ function ChronicleMonths({ events, newestYear }: { events: ThemeMilestone[]; new
       <time className="minor muted numeric" dateTime={row.at}>{dayLabel.format(new Date(row.at))}</time>
       <span className="theme-chronicle-marker" data-kind={row.kind} aria-hidden />
       <span className="minor theme-chronicle-kind" data-kind={row.kind}>{row.kind === 'trending' ? '上榜' : 'Star'}</span>
-      <Link to={repoPath(row.fullName)}>
+      <Link to={repoPath(row.fullName)} state={repoListReturn(location)}>
         <strong>{row.fullName}</strong>{row.kind === 'trending' ? ' 登上 GitHub Trending 日榜第 ' + row.value + ' 名' : ' 突破 ' + number(row.value) + ' Star'}
       </Link>
     </li>)}</ol>

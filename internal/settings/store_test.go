@@ -56,12 +56,13 @@ func TestPhaseThreeUpgradePreservesAIConfiguration(t *testing.T) {
 	}
 	if err := store.DB.Exec(`UPDATE system_settings SET value_json=json_remove(
 json_set(value_json,'$.settings.ai.model','existing-model'), '$.settings.ai.summary',
-'$.settings.recommendations') WHERE key=?`, runtimeKey).Error; err != nil {
+'$.settings.recommendations', '$.settings.reportPublication') WHERE key=?`, runtimeKey).Error; err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := store.Initialize(t.Context(), cfg)
 	if err != nil || snapshot.Revision != original.Revision || snapshot.Settings.AI.Model != "existing-model" ||
-		snapshot.Settings.AI.Summary.AutoDailyCalls != 50 || snapshot.Settings.Recommendations.Timezone != "Asia/Shanghai" {
+		snapshot.Settings.AI.Summary.AutoDailyCalls != 50 || snapshot.Settings.Recommendations.Timezone != "Asia/Shanghai" ||
+		snapshot.Settings.ReportPublication != config.DefaultReportPublication() {
 		t.Fatalf("升级没有保留 AI 配置或补齐新值: %+v %v", snapshot, err)
 	}
 	invalid := snapshot.Settings
@@ -70,15 +71,23 @@ json_set(value_json,'$.settings.ai.model','existing-model'), '$.settings.ai.summ
 	if _, err := store.SaveRuntime(t.Context(), snapshot.Revision, invalid); !errors.As(err, &validation) {
 		t.Fatalf("低于完整来源检查所需的预算应被拒绝: %v", err)
 	}
+	for _, rules := range []config.ReportPublication{{WeeklyMinDays: 8, MonthlyMinCoverage: 75}, {WeeklyMinDays: 5, MonthlyMinCoverage: 0}} {
+		invalid = snapshot.Settings
+		invalid.ReportPublication = rules
+		if _, err := store.SaveRuntime(t.Context(), snapshot.Revision, invalid); !errors.As(err, &validation) {
+			t.Fatalf("无效出刊门槛应被拒绝: %+v %v", rules, err)
+		}
+	}
 	snapshot.Settings.AI.Summary.AutoDailyCalls = 8
 	snapshot.Settings.Recommendations.Minute = 45
+	snapshot.Settings.ReportPublication = config.ReportPublication{WeeklyMinDays: 4, MonthlyMinCoverage: 80}
 	saved, err := store.SaveRuntime(t.Context(), snapshot.Revision, snapshot.Settings)
 	if err != nil {
 		t.Fatal(err)
 	}
 	reopened, err := store.Initialize(t.Context(), cfg)
 	if err != nil || reopened.Revision != saved.Revision || reopened.Settings.AI.Summary.AutoDailyCalls != 8 ||
-		reopened.Settings.Recommendations.Minute != 45 {
+		reopened.Settings.Recommendations.Minute != 45 || reopened.Settings.ReportPublication != snapshot.Settings.ReportPublication {
 		t.Fatalf("重启覆盖了后台配置: %+v %v", reopened, err)
 	}
 }

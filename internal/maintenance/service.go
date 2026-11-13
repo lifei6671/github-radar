@@ -11,8 +11,14 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/config"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/metrics"
+	"github.com/lifei6671/github-radar/internal/reports"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/discoverystore"
+	"github.com/lifei6671/github-radar/internal/storage/metricstore"
+	"github.com/lifei6671/github-radar/internal/storage/reportstore"
+	"github.com/lifei6671/github-radar/internal/storage/topicstore"
 	"github.com/lifei6671/github-radar/internal/topics"
 )
 
@@ -20,9 +26,10 @@ const requestKey = "maintenance.request"
 const optimizeKey = "maintenance.optimize"
 
 type Service struct {
-	DB     *gorm.DB
-	Cfg    config.Config
-	Logger *slog.Logger
+	DB          *gorm.DB
+	Cfg         config.Config
+	Logger      *slog.Logger
+	PlanReports func(context.Context, time.Time) error
 }
 
 // Request 持久化一轮维护请求，服务重启后仍会执行。
@@ -33,8 +40,15 @@ func Request(ctx context.Context, db *gorm.DB, now time.Time) error {
 
 func (s Service) RunMetrics(ctx context.Context) error {
 	return s.loop(ctx, time.Duration(s.Cfg.Scheduler.MetricsIntervalMinutes)*time.Minute, func(now time.Time) error {
-		return metrics.Compute(ctx, s.DB, s.Cfg, now, false)
+		return s.compute(ctx, now, false)
 	})
+}
+
+func (s Service) compute(ctx context.Context, now time.Time, force bool) error {
+	if err := metrics.Compute(ctx, metricstore.Store{DB: s.DB}, s.Cfg, now, force); err != nil {
+		return err
+	}
+	return discoverystore.Record(ctx, s.DB, now)
 }
 
 func (s Service) RunMaintenance(ctx context.Context) error {
@@ -56,10 +70,10 @@ func (s Service) Once(ctx context.Context, now time.Time) error {
 }
 
 func (s Service) loop(ctx context.Context, interval time.Duration, work func(time.Time) error) error {
-	for ctx.Err() == nil {
+	for !lifecycle.Stopping(ctx) {
 		now := time.Now().UTC()
 		ready, err := storage.Initialized(ctx, s.DB)
-		if err == nil && ready {
+		if err == nil && ready && !lifecycle.Stopping(ctx) {
 			err = work(now)
 		}
 		if err != nil && ctx.Err() == nil {
@@ -69,11 +83,8 @@ func (s Service) loop(ctx context.Context, interval time.Duration, work func(tim
 		if !ready {
 			wait = min(wait, time.Second)
 		}
-		timer := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-		case <-timer.C:
+		if !lifecycle.Wait(ctx, wait) {
+			break
 		}
 	}
 	return ctx.Err()
@@ -90,7 +101,7 @@ func (s Service) maintain(ctx context.Context, now time.Time, force bool) error 
 		return err
 	}
 	if manual {
-		if err := metrics.Compute(ctx, s.DB, s.Cfg, now, true); err != nil {
+		if err := s.compute(ctx, now, true); err != nil {
 			return err
 		}
 	}
@@ -129,5 +140,9 @@ func (s Service) maintain(ctx context.Context, now time.Time, force bool) error 
 			return err
 		}
 	}
-	return topics.Generate(ctx, s.DB, s.Cfg.Recommendations, now)
+	reportErr := reports.Generate(ctx, reportstore.Store{DB: s.DB}, now)
+	if reportErr == nil && s.PlanReports != nil {
+		reportErr = s.PlanReports(ctx, now)
+	}
+	return errors.Join(topics.Generate(ctx, topicstore.Store{DB: s.DB}, s.Cfg.Recommendations, now), reportErr)
 }

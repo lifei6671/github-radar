@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,19 +12,18 @@ import (
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
-	"github.com/lifei6671/github-radar/internal/collector"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
-	"github.com/lifei6671/github-radar/internal/summary"
+	"github.com/lifei6671/github-radar/internal/storage/collectionstore"
 )
 
 type collectionAPI struct {
-	db      *gorm.DB
-	cfg     config.Config
-	logger  *slog.Logger
-	readmes *summary.Engine
+	db     *gorm.DB
+	logger *slog.Logger
+	live   LiveRuntime
 }
 
 func (a *collectionAPI) register(v1 *gin.RouterGroup) {
@@ -111,8 +109,9 @@ func (a *collectionAPI) card(c *gin.Context, repo storage.Repository, entries ma
 		"growth24h": view.window(consts.Window24h), "growth7d": view.window(consts.Window7d),
 		"hotnessScore": view.row.HotnessScore, "hotnessRank": view.rank, "trendingEntries": trending,
 		"dataQuality": quality, "metricsUpdatedAt": metricsUpdatedAt, "candidateBurst": view.row.CandidateBurst,
-		"sparkline": view.sparkline, "summaryPreview": summary.preview(), "summaryStatus": summary.state(),
+		"sparkline": view.sparkline, "summaryPreview": textPtr(summary.row.SummaryZh), "summaryStatus": summary.state(),
 		"recommendationReason": summary.reason(),
+		"valueTags":            summary.valueTags(),
 		"summarySourceQuality": textPtr(summary.row.SourceQuality), "summaryJobId": summary.jobID,
 		"followed": repo.StarredByUser, "followedAt": optionalISO(repo.FollowedAt),
 		"lastSuccessAt": optionalISO(repo.LastSuccessAt),
@@ -198,7 +197,17 @@ func (a *collectionAPI) repo(c *gin.Context) {
 		return
 	}
 	summary := summaries[repo.RepoID]
+	if c.GetBool(publicReadKey) && !summary.readyForPublication() {
+		a.fail(c, gorm.ErrRecordNotFound)
+		return
+	}
+	readme, err := cachedReadme(c, db, repo)
+	if err != nil {
+		a.fail(c, err)
+		return
+	}
 	body := a.card(c, repo, entries, view, summary)
+	body["readme"] = readme
 	body["license"] = nil
 	if repo.LicenseSPDXID != nil || repo.LicenseName != nil {
 		body["license"] = gin.H{"spdxId": repo.LicenseSPDXID, "name": repo.LicenseName}
@@ -210,16 +219,24 @@ func (a *collectionAPI) repo(c *gin.Context) {
 	}
 	body["summarySourceLanguage"] = textPtr(summary.row.SourceLanguage)
 	body["aiTopics"] = []string{}
-	if len(repo.GitHubTopics()) == 0 && len(summary.aiTopics) > 0 {
-		body["aiTopics"] = summary.aiTopics
+	if len(summary.aiTopics) > 0 {
+		var matched bool
+		if err := db.Model(&storage.Repository{}).Select(storage.HasNativeThemeSQL).
+			Where("repositories.repo_id=?", repo.RepoID).Scan(&matched).Error; err != nil {
+			a.fail(c, err)
+			return
+		}
+		if !matched {
+			body["aiTopics"] = summary.aiTopics
+		}
 	}
 	if c.GetBool(publicReadKey) {
 		delete(body, "summaryModel")
 	} else {
 		// 管理端沿用发起手动任务的门槛，只返回可用状态。
-		body["summaryAvailable"] = !repo.Blocked && a.summaryAvailable()
+		body["summaryAvailable"] = !repo.Blocked && a.summaryAvailable(c)
 	}
-	for name, raw := range map[string]string{"features": summary.row.FeaturesJSON, "audience": summary.row.AudienceJSON, "valueTags": summary.row.ValueTagsJSON} {
+	for name, raw := range map[string]string{"features": summary.row.FeaturesJSON, "audience": summary.row.AudienceJSON} {
 		tags := []string{}
 		_ = json.Unmarshal([]byte(raw), &tags)
 		body[name] = tags
@@ -243,11 +260,12 @@ func (a *collectionAPI) refresh(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidRequestID})
 		return
 	}
-	if strings.TrimSpace(os.Getenv(a.cfg.GitHub.TokenEnv)) == "" {
+	cfg := runtimeFor(c).Config
+	if cfg.GitHubToken() == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"code": consts.CodeGitHubNotConfigured})
 		return
 	}
-	job, err := (collector.Queue{DB: a.db, Cfg: a.cfg.Scheduler}).Refresh(c.Request.Context(), id, input.RequestID, time.Now())
+	job, err := (collectionstore.Queue{DB: a.db, Cfg: cfg.Scheduler}).Refresh(c.Request.Context(), id, input.RequestID, time.Now())
 	if err != nil {
 		a.fail(c, err)
 		return
@@ -267,7 +285,7 @@ func (a *collectionAPI) block(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidBlock})
 		return
 	}
-	queue := collector.Queue{DB: a.db, Cfg: a.cfg.Scheduler}
+	queue := collectionstore.Queue{DB: a.db, Cfg: runtimeFor(c).Config.Scheduler}
 	if err := queue.SetBlocked(c.Request.Context(), id, *input.Blocked, time.Now()); err != nil {
 		a.fail(c, err)
 		return
@@ -287,8 +305,8 @@ func (a *collectionAPI) follow(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidFollow})
 		return
 	}
-	err := (collector.Queue{DB: a.db, Cfg: a.cfg.Scheduler}).Follow(c.Request.Context(), id, *input.Follow, time.Now())
-	if errors.Is(err, collector.ErrCapacity) {
+	err := (collectionstore.Queue{DB: a.db, Cfg: runtimeFor(c).Config.Scheduler}).Follow(c.Request.Context(), id, *input.Follow, time.Now())
+	if errors.Is(err, collection.ErrCapacity) {
 		c.JSON(http.StatusConflict, gin.H{"code": consts.CodeMonitoringCapacityFull})
 		return
 	}
@@ -378,12 +396,12 @@ func (a *collectionAPI) limits(c *gin.Context) {
 			"rateLimitedResponses": state.LimitedCount,
 		})
 	}
-	ai, err := a.aiLimits(db, time.Now())
+	ai, err := a.aiLimits(c, db, time.Now())
 	if err != nil {
 		a.fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"githubConfigured": strings.TrimSpace(os.Getenv(a.cfg.GitHub.TokenEnv)) != "",
+	c.JSON(http.StatusOK, gin.H{"githubConfigured": runtimeFor(c).Config.GitHubToken() != "",
 		"items": items, "waitingTaskCount": waiting, "ai": ai})
 }
 
@@ -432,7 +450,7 @@ func (a *collectionAPI) latestEntries(db *gorm.DB) (map[int64][]gin.H, error) {
 		parts := strings.Split(marker.Key, ":")
 		period := parts[len(parts)-1]
 		source := strings.TrimSuffix(strings.TrimPrefix(marker.Key, consts.TrendingStatePrefix), ":"+period)
-		var batch collector.TrendingBatch
+		var batch collection.TrendingBatch
 		if err := json.Unmarshal([]byte(marker.Value), &batch); err != nil {
 			return nil, err
 		}
@@ -463,7 +481,7 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		return
 	}
 	var marker storage.MaintenanceState
-	err := db.Take(&marker, storage.MaintenanceStateColumns.Key+" = ?", collector.BatchKey(source, period)).Error
+	err := db.Take(&marker, storage.MaintenanceStateColumns.Key+" = ?", collection.BatchKey(source, period)).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(http.StatusOK, gin.H{"sourceKey": source, "period": period, "batch": nil, "items": []any{}, "updatedAt": nil})
 		return
@@ -472,7 +490,7 @@ func (a *collectionAPI) trending(c *gin.Context) {
 		a.fail(c, err)
 		return
 	}
-	var batch collector.TrendingBatch
+	var batch collection.TrendingBatch
 	if err := json.Unmarshal([]byte(marker.Value), &batch); err != nil {
 		a.fail(c, err)
 		return
@@ -528,7 +546,11 @@ func (a *collectionAPI) trending(c *gin.Context) {
 	}
 	items := make([]gin.H, 0, len(repos))
 	for _, repo := range repos {
-		items = append(items, a.card(c, repo, entries, views[repo.RepoID], summaries[repo.RepoID]))
+		summary := summaries[repo.RepoID]
+		if c.GetBool(publicReadKey) && !summary.readyForPublication() {
+			continue
+		}
+		items = append(items, a.card(c, repo, entries, views[repo.RepoID], summary))
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"sourceKey": source, "period": period, "batch": gin.H{"observedSlot": batch.ObservedSlot, "observedAt": iso(batch.ObservedAt)},

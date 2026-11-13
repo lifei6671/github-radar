@@ -52,6 +52,8 @@ export function useSession() {
   return useSyncExternalStore(subscribe, () => session)
 }
 
+export function sessionQueryClient() { return session.client }
+
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'PUT'
   body?: unknown
@@ -110,11 +112,11 @@ const messages: Record<string, string> = {
   network_error: '无法连接服务，请检查网络后重试。',
   setup_required: '请先完成系统初始化。',
   invalid_filter: '筛选条件无效，请检查或清除筛选。',
+  invalid_cursor: '分页位置已失效，请重新加载列表。',
   invalid_trending_source: '此 GitHub Trending 来源尚未配置。',
   github_not_configured: '请先配置 GitHub 访问令牌。',
   summary_unavailable: '摘要服务未配置或手动摘要额度已关闭。',
   summary_repo_unavailable: '此仓库当前无法生成摘要。',
-  readme_unavailable: '暂时无法读取 GitHub README。',
   monitoring_capacity_full: '重点监控容量已满，请移出一个仓库或调整容量。',
   repo_blocked: '此仓库已屏蔽，请先解除屏蔽。',
   settings_conflict: '配置已被其他操作更新，当前编辑已保留。',

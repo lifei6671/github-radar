@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -13,7 +14,7 @@ import (
 
 const publicReadKey = "publicRead"
 
-var publicRepoCondition = storage.PublicRepositoryCondition
+var publicRepoCondition = storage.PublishableRepositoryCondition
 
 func markPublicRead(c *gin.Context) {
 	c.Set(publicReadKey, true)
@@ -28,8 +29,16 @@ func publicRepos(c *gin.Context, db *gorm.DB) *gorm.DB {
 	return db
 }
 
+func readableRepoCondition(c *gin.Context) string {
+	if c.GetBool(publicReadKey) {
+		return publicRepoCondition
+	}
+	return storage.PublicRepositoryCondition
+}
+
 func (a *collectionAPI) registerPublic(public *gin.RouterGroup) {
 	public.GET("/repos", a.loadCategories, a.repos)
+	public.GET("/repos/published", a.publishedRepos)
 	public.GET("/repos/by-name/:owner/:name", a.loadCategories, a.repo)
 	public.GET("/repos/:id/trend", a.trend)
 	public.GET("/repos/:id/readme", a.readme)
@@ -41,6 +50,33 @@ func (a *collectionAPI) registerPublic(public *gin.RouterGroup) {
 	public.GET("/project-themes/:slug", a.projectThemes)
 	public.GET("/trending", a.loadCategories, a.trending)
 	public.GET("/trending/sources", a.trendingSources)
+	public.GET("/daily-reports", a.dailyReport)
+}
+
+// publishedRepos 校验浏览器本地收藏中的数字 ID，避免继续展示已撤回的项目。
+func (a *collectionAPI) publishedRepos(c *gin.Context) {
+	values := c.QueryArray("id")
+	if len(values) == 0 || len(values) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidFilter})
+		return
+	}
+	ids := make([]int64, 0, len(values))
+	for _, value := range values {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidFilter})
+			return
+		}
+		ids = append(ids, id)
+	}
+	published := []int64{}
+	db := a.db.WithContext(c.Request.Context()).Model(&storage.Repository{})
+	if err := publicRepos(c, db).Where(storage.RepositoryColumns.RepoID+" IN ?", ids).
+		Pluck(storage.RepositoryColumns.RepoID, &published).Error; err != nil {
+		a.fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": published})
 }
 
 // publicDiscoveryTabs 只返回前台需要的分类标识和显示名称。

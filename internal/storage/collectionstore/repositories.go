@@ -1,4 +1,4 @@
-package collector
+package collectionstore
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/collection"
 	"github.com/lifei6671/github-radar/internal/settings"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
@@ -55,8 +56,8 @@ func detachName(tx *gorm.DB, id int64, at int64) error {
 		Updates(map[string]any{storage.JobColumns.Status: consts.StatusCanceled, storage.JobColumns.LastErrorCode: consts.StatusAddressPending, storage.JobColumns.UpdatedAt: at}).Error
 }
 
-// discover 合并已确认的数字身份；发现元数据不会被当成 Star 成功采样。
-func (q Queue) discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, error) {
+// Discover 合并已确认的数字身份；发现元数据不会被当成 Star 成功采样。
+func (q Queue) Discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, error) {
 	if source.GetID() <= 0 || source.GetPrivate() {
 		return false, errors.New("发现源返回无效仓库身份")
 	}
@@ -111,7 +112,7 @@ func (q Queue) discover(tx *gorm.DB, source *sdk.Repository, at int64) (bool, er
 }
 
 func (q Queue) admit(tx *gorm.DB, repo *storage.Repository, at int64) error {
-	if repo.State == consts.StatusActive || repo.Blocked || repo.Disabled || !repo.NameIsCurrent || (repo.State != consts.StatusCandidate && repo.State != consts.StatusPaused) {
+	if !repo.MonitoringState().CanMonitor() {
 		return nil
 	}
 	var total int64
@@ -273,7 +274,7 @@ func (q Queue) Refresh(ctx context.Context, repoID int64, requestID string, now 
 		}
 		var err error
 		job, err = q.enqueue(tx, consts.JobRefreshRepo, &repoID,
-			fmtManualKey(repoID, requestID), Payload{PlannedAt: now.UnixMilli(), Manual: true}, 200, now.UnixMilli())
+			fmtManualKey(repoID, requestID), collection.Payload{PlannedAt: now.UnixMilli(), Manual: true}, 200, now.UnixMilli())
 		return err
 	})
 	return job, err
@@ -301,7 +302,7 @@ func (q Queue) Follow(ctx context.Context, repoID int64, followed bool, now time
 				return err
 			}
 			if !allowed {
-				return ErrCapacity
+				return collection.ErrCapacity
 			}
 		}
 		if followed && !wasFollowed && repo.State != consts.StatusActive {
@@ -314,7 +315,7 @@ func (q Queue) Follow(ctx context.Context, repoID int64, followed bool, now time
 				if err := tx.Where(storage.RepositoryColumns.State + "='" + consts.StatusActive + "' AND " + storage.RepositoryColumns.StarredByUser + "=0").
 					Order("CASE " + storage.RepositoryColumns.Grade + " WHEN '" + consts.GradeC + "' THEN 0 WHEN '" + consts.GradeB + "' THEN 1 WHEN '" + consts.GradeA + "' THEN 2 ELSE 3 END, " + storage.RepositoryColumns.LastDiscoveredAt + ", " + storage.RepositoryColumns.RepoID + " DESC").
 					Take(&victim).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-					return ErrCapacity
+					return collection.ErrCapacity
 				} else if err != nil {
 					return err
 				}
@@ -346,7 +347,7 @@ func (q Queue) Follow(ctx context.Context, repoID int64, followed bool, now time
 			}
 			if !wasFollowed {
 				key := "follow:refresh_repo:" + strconv.FormatInt(repoID, 10) + ":" + strconv.FormatInt(*followedAt, 10)
-				_, err := q.enqueue(tx, consts.JobRefreshRepo, &repoID, key, Payload{PlannedAt: now.UnixMilli(), Manual: true}, 200, now.UnixMilli())
+				_, err := q.enqueue(tx, consts.JobRefreshRepo, &repoID, key, collection.Payload{PlannedAt: now.UnixMilli(), Manual: true}, 200, now.UnixMilli())
 				return err
 			}
 		}

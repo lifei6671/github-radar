@@ -56,9 +56,14 @@ func (a *collectionAPI) settingsFailure(c *gin.Context, err error) {
 }
 
 func (a *collectionAPI) runtimeResponse(c *gin.Context, snapshot settings.Snapshot) {
+	cfg := runtimeFor(c).Config
+	restartRequired := cfg.NeedsRestart(snapshot.Settings)
+	if a.live == nil {
+		restartRequired = !reflect.DeepEqual(snapshot.Settings, cfg.RuntimeSettings())
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"revision": snapshot.Revision, "settings": snapshot.Settings,
-		"restartRequired": !reflect.DeepEqual(snapshot.Settings, a.cfg.RuntimeSettings()),
+		"restartRequired": restartRequired,
 	})
 }
 
@@ -83,7 +88,11 @@ func (a *collectionAPI) putRuntime(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettingsRevision})
 		return
 	}
-	snapshot, err := (settings.Store{DB: a.db}).SaveRuntime(c.Request.Context(), input.Revision, input.Settings)
+	save := (settings.Store{DB: a.db}).SaveRuntime
+	if a.live != nil {
+		save = a.live.SaveRuntime
+	}
+	snapshot, err := save(c.Request.Context(), input.Revision, input.Settings)
 	if err != nil {
 		a.settingsFailure(c, err)
 		return
@@ -164,6 +173,7 @@ func (a *collectionAPI) putDiscoveryTabSettings(c *gin.Context) {
 		Items         []settings.DiscoveryTab      `json:"items"`
 		NewCategories []config.Category            `json:"newCategories"`
 		Selection     *settings.DiscoverySelection `json:"selection"`
+		Ranking       *settings.DiscoveryRanking   `json:"ranking"`
 	}
 	if !decodeSettings(c, &input) {
 		return
@@ -172,7 +182,7 @@ func (a *collectionAPI) putDiscoveryTabSettings(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidSettings})
 		return
 	}
-	result, err := (settings.Store{DB: a.db}).SaveDiscoveryTabs(c.Request.Context(), input.Revision, input.Items, input.NewCategories, input.Selection)
+	result, err := (settings.Store{DB: a.db}).SaveDiscoveryTabs(c.Request.Context(), input.Revision, input.Items, input.NewCategories, input.Selection, input.Ranking)
 	if err != nil {
 		a.settingsFailure(c, err)
 		return

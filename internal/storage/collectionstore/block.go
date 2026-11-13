@@ -1,4 +1,4 @@
-package collector
+package collectionstore
 
 import (
 	"context"

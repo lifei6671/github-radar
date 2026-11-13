@@ -3,7 +3,6 @@ package api
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
 	"net/http"
 	"strings"
 	"time"
@@ -12,18 +11,23 @@ import (
 	"github.com/gorilla/securecookie"
 	"golang.org/x/time/rate"
 
+	"github.com/lifei6671/github-radar/internal/auth"
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
 )
 
 type adminAuth struct {
-	password [sha256.Size]byte
+	password func(string) bool
 	codec    *securecookie.SecureCookie
 	secure   bool
 	attempts *rate.Limiter
 }
 
 func newAdminAuth(cfg config.Config) adminAuth {
+	hash, err := auth.ParsePasswordHash(cfg.Auth.AdminPassword)
+	checkPassword := func(password string) bool {
+		return err == nil && hash.Verify(password)
+	}
 	// 将密码绑定到签名密钥，重启后轮换任一凭据都会使原会话失效。
 	key := hmac.New(sha256.New, []byte(cfg.Auth.SessionSecret))
 	key.Write([]byte(cfg.Auth.AdminPassword))
@@ -31,7 +35,7 @@ func newAdminAuth(cfg config.Config) adminAuth {
 		SetSerializer(securecookie.JSONEncoder{}).
 		MaxAge(consts.AdminSessionAgeSeconds)
 	return adminAuth{
-		password: sha256.Sum256([]byte(cfg.Auth.AdminPassword)),
+		password: checkPassword,
 		codec:    codec,
 		secure:   strings.HasPrefix(cfg.Server.SiteURL, "https://"),
 		attempts: rate.NewLimiter(rate.Every(2*time.Second), 10),
@@ -95,8 +99,7 @@ func (a adminAuth) register(group *gin.RouterGroup) {
 			c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidLogin})
 			return
 		}
-		given := sha256.Sum256([]byte(input.Password))
-		if subtle.ConstantTimeCompare(given[:], a.password[:]) != 1 {
+		if !a.password(input.Password) {
 			c.JSON(http.StatusUnauthorized, gin.H{"code": consts.CodeInvalidAdminPassword})
 			return
 		}

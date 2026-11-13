@@ -11,7 +11,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/reports"
 )
 
 // Register 将浏览器路由交给 Vite 入口，API 与缺失静态文件保留各自的 404。
@@ -68,12 +70,22 @@ func pageRoute(name string) bool {
 		return true
 	}
 	switch name {
-	case "", "trending", "repos", "categories", consts.PublicTopicPathSegment, "starred":
+	case "", "trending", "daily", "weekly", "monthly", "repos", "categories", consts.PublicTopicPathSegment, "starred":
 		return true
 	}
 	prefix, value, found := strings.Cut(name, "/")
 	if !found || value == "" {
 		return false
+	}
+	if prefix == "discover" {
+		return config.ValidSourceSlug(value)
+	}
+	if prefix == "daily" || prefix == "weekly" || prefix == "monthly" {
+		if prefix == "daily" && value == "archive" {
+			return true
+		}
+		_, _, valid := reports.Kind(prefix).Bounds(value)
+		return valid
 	}
 	if prefix == "categories" || prefix == consts.PublicTopicPathSegment {
 		return !strings.ContainsAny(value, "/.")

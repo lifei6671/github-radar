@@ -13,12 +13,16 @@ storage:
   path: "./data/github-radar.db"
 
 auth:
-  # 后台和首次安装共用的管理员密码，单行至少 12 个字符，最多 512 字节。
-  # 建议用 openssl rand -hex 24 生成。空值会阻止 HTTP 服务启动。
+  # 运行 go run ./cmd/radar hash-password，填入输出的 Argon2id 哈希。
+  # 输入的原密码须为单行，至少 12 个字符，最多 512 字节。
   admin_password: ""
-  # 签发和校验后台 Cookie 的密钥，至少 32 字节。请独立运行 openssl rand -hex 32 生成。
+  # 运行 go run ./cmd/radar generate-session-secret，填入输出的 Cookie 签名密钥。
   # 正常重启沿用同一密钥。修改密码或签名密钥并重启后，需要重新登录。
   session_secret: ""
 
+credentials:
+  # 两项均可留空，留空时读取对应环境变量。默认 GITHUB_TOKEN 和 AI_API_KEY。
+  github_token: ""
+  ai_api_key: ""
+
 # 采集、AI、分类、专题和备份等运行设置从后台保存到数据库。
-# GitHub 和 AI 服务的访问密钥仍使用部署环境变量，避免进入数据库和备份。

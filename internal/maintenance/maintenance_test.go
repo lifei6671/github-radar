@@ -12,6 +12,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/metricstore"
 	"github.com/lifei6671/github-radar/migrations"
 )
 
@@ -107,7 +108,7 @@ func TestComputeGrowthAndHeat(t *testing.T) {
 	if n := count(t, db, &storage.RepoSnapshot{}, "observed_at < ?", now.AddDate(0, 0, -14).UnixMilli()); n != 0 {
 		t.Fatalf("旧原始快照剩余 %d", n)
 	}
-	if err := metrics.Compute(t.Context(), db, cfg, now, false); err != nil {
+	if err := metrics.Compute(t.Context(), metricstore.Store{DB: db}, cfg, now, false); err != nil {
 		t.Fatal(err)
 	}
 	var row storage.LatestMetric
@@ -137,13 +138,13 @@ func TestComputeGrowthAndHeat(t *testing.T) {
 	if err := db.Take(&repo, "repo_id=1").Error; err != nil || repo.Grade != "S" {
 		t.Fatalf("精确增长应升 S: %v %+v", err, repo)
 	}
-	if err := metrics.Compute(t.Context(), db, cfg, now.Add(time.Minute), false); err != nil {
+	if err := metrics.Compute(t.Context(), metricstore.Store{DB: db}, cfg, now.Add(time.Minute), false); err != nil {
 		t.Fatal(err)
 	}
 	if n := count(t, db, &storage.LatestMetric{}, "calculated_at=?", now.UnixMilli()); n != 2 {
 		t.Fatalf("同一计算窗口被重复发布: %d", n)
 	}
-	if err := metrics.Compute(t.Context(), db, cfg, now.Add(48*time.Hour), false); err != nil {
+	if err := metrics.Compute(t.Context(), metricstore.Store{DB: db}, cfg, now.Add(48*time.Hour), false); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Take(&row, "repo_id=1").Error; err != nil {

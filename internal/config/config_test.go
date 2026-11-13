@@ -1,11 +1,14 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/lifei6671/github-radar/internal/auth"
 )
 
 func TestLoadOverrides(t *testing.T) {
@@ -49,14 +52,51 @@ func TestCredentials(t *testing.T) {
 	}
 }
 
+func TestDeploymentCredentials(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "radar.yaml")
+	const github, ai = "test-yaml-token", "test-yaml-api-key"
+	content := "credentials:\n  github_token: ' " + github + " '\n  ai_api_key: '" + ai + "'\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, err := cfg.SeedConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := seed.SeedRuntime()
+	runtime.GitHub.TokenEnv, runtime.AI.APIKeyEnv = "TEST_RADAR_GITHUB", "TEST_RADAR_AI"
+	t.Setenv(runtime.GitHub.TokenEnv, "test-env-token")
+	t.Setenv(runtime.AI.APIKeyEnv, "test-env-key")
+	cfg = cfg.WithRuntime(runtime)
+	if cfg.GitHubToken() != github || cfg.AIAPIKey() != ai {
+		t.Fatal("运行配置加载后应优先使用部署 YAML 中的密钥")
+	}
+	serialized, err := json.Marshal(cfg)
+	if err != nil || strings.Contains(string(serialized), github) || strings.Contains(string(serialized), ai) {
+		t.Fatal("部署密钥不应进入 JSON")
+	}
+	cfg.Credentials = Credentials{GitHubToken: " "}
+	if cfg.GitHubToken() != "test-env-token" || cfg.AIAPIKey() != "test-env-key" {
+		t.Fatal("部署密钥留空时应使用运行配置指定的环境变量")
+	}
+}
+
 func TestDeploymentAuthConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "radar.yaml")
-	const password = "测试密码-actual spaces "
+	const plaintext = "测试密码-actual spaces "
+	password, err := auth.HashPassword(plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
 	const secret = "test-signing-key-with-at-least-32-bytes"
 	for _, tc := range []struct{ site, password, secret, missing string }{
 		{"", "", "", "server.site_url"},
 		{"https://radar.example.com/team", password, secret, "server.site_url"},
-		{"https://radar.example.com", "too short", secret, "auth.admin_password"},
+		{"https://radar.example.com", plaintext, secret, "auth.admin_password"},
 		{"https://radar.example.com", strings.Repeat("x", 513), secret, "auth.admin_password"},
 		{"https://radar.example.com", password, "short", "auth.session_secret"},
 		{"https://radar.example.com/", password, secret, ""},

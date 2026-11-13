@@ -14,6 +14,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/lifecycle"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -41,12 +42,13 @@ type Worker struct {
 func (w Worker) Run(ctx context.Context) error {
 	tick := time.NewTicker(time.Duration(w.Config.IntervalMinutes) * time.Minute)
 	defer tick.Stop()
-	for ctx.Err() == nil {
+	for !lifecycle.Stopping(ctx) {
 		if err := w.once(ctx, time.Now()); err != nil && ctx.Err() == nil {
 			w.Logger.Warn("相似项目向量扫描失败", "error", err)
 		}
 		select {
 		case <-ctx.Done():
+		case <-lifecycle.SchedulingDone(ctx):
 		case <-tick.C:
 		}
 	}
@@ -71,6 +73,9 @@ func (w Worker) once(ctx context.Context, now time.Time) error {
 		return err
 	}
 	for _, repo := range batch {
+		if lifecycle.Stopping(ctx) {
+			break
+		}
 		if err := w.process(ctx, repo, key, now); err != nil {
 			return err
 		}

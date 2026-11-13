@@ -43,7 +43,7 @@ func (a *collectionAPI) storageStatus(c *gin.Context) {
 		}
 	}
 	var wal int64
-	if file, err := os.Stat(a.cfg.Storage.Path + "-wal"); err == nil {
+	if file, err := os.Stat(runtimeFor(c).Config.Storage.Path + "-wal"); err == nil {
 		wal = file.Size()
 	} else if !errors.Is(err, os.ErrNotExist) {
 		a.fail(c, err)

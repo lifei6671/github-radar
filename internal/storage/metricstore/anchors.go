@@ -1,37 +1,22 @@
-package metrics
+package metricstore
 
 import (
 	"fmt"
 	"time"
 
-	"gorm.io/gorm"
-
-	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
-type anchors struct {
-	raw, hourly map[int64][]Point
-}
-
-func (a anchors) pick(id, target int64, tolerance config.BoundaryToleranceMinutes, hourlyOnly bool) *Point {
-	limit := int64(tolerance.Max) * minute
-	if !hourlyOnly {
-		if p := nearest(a.raw[id], target, limit); p != nil {
-			return p
-		}
-	}
-	return nearest(a.hourly[id], target, limit)
-}
-
-// loadAnchors 每个仓库对目标时刻做两次索引查找；小时层只读取可能命中的桶。
-func loadAnchors(tx *gorm.DB, target, limit, asOf int64, hourlyOnly bool) (anchors, error) {
-	a := anchors{make(map[int64][]Point), make(map[int64][]Point)}
+// LoadAnchors 每个仓库对目标时刻做两次索引查找；小时层只读取可能命中的桶。
+func (r transaction) LoadAnchors(target, limit, asOf int64, hourlyOnly bool) (metrics.Anchors, error) {
+	tx := r.db
+	a := metrics.Anchors{Raw: make(map[int64][]metrics.Point), Hourly: make(map[int64][]metrics.Point)}
 	if !hourlyOnly {
 		type row struct {
-			RepoID int64
-			Point  `gorm:"embedded"`
+			RepoID        int64
+			metrics.Point `gorm:"embedded"`
 		}
 		for _, seek := range []struct {
 			min, max int64
@@ -52,7 +37,7 @@ FROM %[5]s r JOIN %[6]s s ON s.%[7]s=r.%[1]s AND s.%[4]s=(
 			}
 			for _, row := range rows {
 				row.Resolution = consts.ResolutionRaw
-				a.raw[row.RepoID] = append(a.raw[row.RepoID], row.Point)
+				a.Raw[row.RepoID] = append(a.Raw[row.RepoID], row.Point)
 			}
 		}
 	}
@@ -65,10 +50,10 @@ FROM %[5]s r JOIN %[6]s s ON s.%[7]s=r.%[1]s AND s.%[4]s=(
 	}
 	for _, h := range hours {
 		if h.OpenObservedAt <= asOf {
-			a.hourly[h.RepoID] = append(a.hourly[h.RepoID], Point{h.OpenObservedAt, h.StarsOpen, h.OpenSlot, consts.ResolutionHourly})
+			a.Hourly[h.RepoID] = append(a.Hourly[h.RepoID], metrics.Point{At: h.OpenObservedAt, Stars: h.StarsOpen, Slot: h.OpenSlot, Resolution: consts.ResolutionHourly})
 		}
 		if h.CloseObservedAt <= asOf && h.CloseSlot != h.OpenSlot {
-			a.hourly[h.RepoID] = append(a.hourly[h.RepoID], Point{h.CloseObservedAt, h.StarsClose, h.CloseSlot, consts.ResolutionHourly})
+			a.Hourly[h.RepoID] = append(a.Hourly[h.RepoID], metrics.Point{At: h.CloseObservedAt, Stars: h.StarsClose, Slot: h.CloseSlot, Resolution: consts.ResolutionHourly})
 		}
 	}
 	return a, nil

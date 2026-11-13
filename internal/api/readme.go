@@ -1,60 +1,54 @@
 package api
 
 import (
-	"context"
-	"errors"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"github.com/lifei6671/github-radar/internal/consts"
-	gh "github.com/lifei6671/github-radar/internal/github"
 	"github.com/lifei6671/github-radar/internal/storage"
 	"github.com/lifei6671/github-radar/internal/summary"
 )
 
-// readme 只读取当前可公开的 README 和匹配该版本的译文，不触发模型调用。
+func cachedReadme(c *gin.Context, db *gorm.DB, repo storage.Repository) (summary.ReadmeView, error) {
+	if repo.Blocked || repo.Disabled || !repo.NameIsCurrent || repo.FirstNotFoundAt != nil || repo.State == consts.StatusUnavailable {
+		return summary.ReadmeView{State: consts.StatusUnavailable}, nil
+	}
+	view, err := summary.CachedReadme(db, repo.RepoID)
+	if err != nil || c.GetBool(publicReadKey) || view.State != consts.StatusPending ||
+		view.Language == "" || view.Language == consts.LanguageChinese {
+		return view, err
+	}
+	var job storage.Job
+	cols := storage.JobColumns
+	statuses := []string{consts.StatusPending, consts.StatusRunning, consts.StatusFailed, consts.StatusUnknown}
+	if err := db.Select(cols.ID).Where(cols.RepoID+"=? AND "+cols.Type+"=? AND "+cols.Status+" IN ?", repo.RepoID,
+		summary.TranslationJob, statuses).Order(cols.ID + " DESC").Limit(1).Find(&job).Error; err != nil {
+		return view, err
+	}
+	if job.ID != 0 {
+		view.TranslationJobID = &job.ID
+	}
+	return view, nil
+}
+
 func (a *collectionAPI) readme(c *gin.Context) {
 	id, ok := parseID(c)
 	if !ok {
 		return
 	}
 	c.Header("Cache-Control", "no-store")
-	ctx, cancel := context.WithTimeout(c.Request.Context(), time.Duration(a.cfg.Server.WriteTimeoutSeconds)*time.Second)
-	defer cancel()
+	db := a.db.WithContext(c.Request.Context())
 	var repo storage.Repository
-	if err := a.db.WithContext(ctx).Where(publicRepoCondition).Take(&repo, storage.RepositoryColumns.RepoID+"=?", id).Error; err != nil {
+	if err := db.Where(readableRepoCondition(c)).Take(&repo, storage.RepositoryColumns.RepoID+"=?", id).Error; err != nil {
 		a.fail(c, err)
 		return
 	}
-	if a.readmes == nil {
-		c.JSON(http.StatusOK, summary.ReadmeView{State: consts.StatusUnavailable})
+	view, err := cachedReadme(c, db, repo)
+	if err != nil {
+		a.fail(c, err)
 		return
 	}
-	view, err := a.readmes.ReadmeView(ctx, repo)
-	switch {
-	case err == nil:
-		if !c.GetBool(publicReadKey) && view.OriginalHTML != "" {
-			var job storage.Job
-			if err := a.db.WithContext(ctx).Select(storage.JobColumns.ID).Where(
-				storage.JobColumns.RepoID+"=? AND "+storage.JobColumns.Type+"=? AND "+storage.JobColumns.Status+" IN ('"+consts.StatusPending+"','"+consts.StatusRunning+"','"+consts.StatusFailed+"','"+consts.StatusUnknown+"')", id, summary.TranslationJob).Find(&job).Error; err != nil {
-				a.fail(c, err)
-				return
-			}
-			if job.ID != 0 {
-				view.TranslationJobID = &job.ID
-			}
-		}
-		c.JSON(http.StatusOK, view)
-	case errors.Is(err, summary.ErrRepoUnavailable), errors.Is(err, storage.ErrRepositoryBlocked):
-		c.JSON(http.StatusNotFound, gin.H{"code": consts.CodeNotFound})
-	default:
-		var upstream *gh.Failure
-		if errors.As(err, &upstream) || errors.Is(err, context.DeadlineExceeded) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{"code": consts.CodeReadmeUnavailable})
-			return
-		}
-		a.fail(c, err)
-	}
+	c.JSON(http.StatusOK, view)
 }

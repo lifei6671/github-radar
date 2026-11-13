@@ -21,6 +21,7 @@ import (
 	"github.com/lifei6671/github-radar/internal/consts"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/discoverystore"
 )
 
 var errInvalidCursor = errors.New("无效分页游标")
@@ -43,9 +44,11 @@ type repoCursor struct {
 	Version int         `json:"v"`
 	Sort    string      `json:"sort"`
 	Filters repoFilters `json:"filters"`
+	Vector  string      `json:"vector,omitempty"`
 	Last    struct {
 		Value  any   `json:"value"`
 		RepoID int64 `json:"repoId"`
+		Rank   *int  `json:"rank,omitempty"`
 	} `json:"last"`
 }
 
@@ -63,14 +66,21 @@ func (a *collectionAPI) repos(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidFilter})
 		return
 	}
-	// 排序键、全局名次及计算时间来自同一读快照，计算任务可以并发提交新一轮结果。
+	vector, err := a.prepareRepoSearch(c, filters, sort)
 	var page gin.H
 	db := a.db.WithContext(c.Request.Context())
-	err = db.Transaction(func(tx *gorm.DB) error {
-		var err error
-		page, err = a.repoPage(c, tx, filters, sort, limit)
-		return err
-	}, &sql.TxOptions{ReadOnly: true})
+	if err == nil {
+		// 排序键、全局名次及计算时间来自同一读快照，外部模型请求已在事务外结束。
+		err = db.Transaction(func(tx *gorm.DB) error {
+			var err error
+			if sort == consts.SortRelevance {
+				page, err = a.relevanceRepoPage(c, tx, filters, vector, limit)
+			} else {
+				page, err = a.repoPage(c, tx, filters, sort, limit)
+			}
+			return err
+		}, &sql.TxOptions{ReadOnly: true})
+	}
 	if errors.Is(err, errInvalidCursor) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": consts.CodeInvalidCursor})
 		return
@@ -96,35 +106,12 @@ func (a *collectionAPI) repoPage(c *gin.Context, tx *gorm.DB, filters repoFilter
 	if metricSort(sort) {
 		db = db.Joins("LEFT JOIN " + storage.LatestMetricTable + " m ON m." + storage.LatestMetricColumns.RepoID + "=" + storage.RepositoryTable + "." + storage.RepositoryColumns.RepoID + " AND " + storage.RepositoryTable + "." + storage.RepositoryColumns.State + "='" + consts.StatusActive + "'")
 	}
-	if filters.IncludeBlocked {
-		db = db.Where("("+storage.RepositoryColumns.State+" = ? OR "+storage.RepositoryColumns.Blocked+"=1)", filters.State)
-	} else if filters.State != "" {
-		db = db.Where(storage.RepositoryColumns.State+" = ?", filters.State)
-	}
-	if filters.Blocked != "" {
-		db = db.Where(storage.RepositoryColumns.Blocked+"=?", filters.Blocked == "true")
-	}
-	if filters.Followed {
-		db = db.Where(storage.RepositoryColumns.StarredByUser + " = 1")
-	}
-	if filters.Language != "" {
-		db = db.Where(storage.RepositoryColumns.PrimaryLanguage+" = ?", filters.Language)
-	}
-	if filters.Grade != "" {
-		db = db.Where(storage.RepositoryColumns.Grade+"=?", filters.Grade)
-	}
-	if filters.Tag != "" {
-		db = db.Where(`EXISTS (SELECT 1 FROM `+storage.AISummaryTable+` s JOIN json_each(s.`+storage.AISummaryColumns.ValueTagsJSON+`) tag
-WHERE s.`+storage.AISummaryColumns.RepoID+`=`+storage.RepositoryTable+`.`+storage.RepositoryColumns.RepoID+` AND tag.value=?)`, filters.Tag)
-	}
-	if filters.Q != "" {
-		// instr 按字面搜索，用户输入中的 % 和 _ 不扩展为通配符。
-		db = db.Where("instr(lower("+storage.RepositoryColumns.FullName+"), lower(?)) > 0 OR instr(lower(coalesce("+storage.RepositoryColumns.Description+",'')), lower(?)) > 0", filters.Q, filters.Q)
-	}
-	db = a.filterCategories(c, db, filters.Category)
-	db, err := filterProjectTheme(tx, db, filters.Theme)
+	db, err := a.filterRepoList(c, tx, db, filters)
 	if err != nil {
 		return nil, err
+	}
+	if filters.Q != "" {
+		db = db.Where(literalRepoSearch, filters.Q, filters.Q)
 	}
 	if raw, exists := c.GetQuery("cursor"); exists {
 		cursor, err := decodeCursor(raw, sort, filters)
@@ -169,18 +156,16 @@ WHERE s.`+storage.AISummaryColumns.RepoID+`=`+storage.RepositoryTable+`.`+storag
 			value := json.Number(strconv.FormatFloat(*last.RealKey, 'g', -1, 64))
 			cursor.Last.Value = value
 		}
-		data, err := json.Marshal(cursor)
+		next, err = encodeRepoCursor(cursor)
 		if err != nil {
 			return nil, err
 		}
-		value := base64.RawURLEncoding.EncodeToString(data)
-		next = &value
 	}
 	repos := make([]storage.Repository, 0, len(rows))
 	for _, row := range rows {
 		repos = append(repos, row.Repository)
 	}
-	items, err := a.repoCards(c, tx, repos)
+	items, err := a.repoListCards(c, tx, repos)
 	if err != nil {
 		return nil, err
 	}
@@ -199,14 +184,34 @@ WHERE s.`+storage.AISummaryColumns.RepoID+`=`+storage.RepositoryTable+`.`+storag
 	return gin.H{"items": items, "nextCursor": next, "updatedAt": updatedAt}, nil
 }
 
-// exactGrowthSQL 只将精确窗口的增长值用于排序和游标。
-func exactGrowthSQL(window, deltaColumn string) string {
-	return "CASE WHEN " + metricWindowSQL(window, "quality") + "='" + consts.QualityExact + "' THEN m." + deltaColumn + " END"
+func (a *collectionAPI) filterRepoList(c *gin.Context, tx, db *gorm.DB, filters repoFilters) (*gorm.DB, error) {
+	if filters.IncludeBlocked {
+		db = db.Where("("+storage.RepositoryColumns.State+" = ? OR "+storage.RepositoryColumns.Blocked+"=1)", filters.State)
+	} else if filters.State != "" {
+		db = db.Where(storage.RepositoryColumns.State+" = ?", filters.State)
+	}
+	if filters.Blocked != "" {
+		db = db.Where(storage.RepositoryColumns.Blocked+"=?", filters.Blocked == "true")
+	}
+	if filters.Followed {
+		db = db.Where(storage.RepositoryColumns.StarredByUser + " = 1")
+	}
+	if filters.Language != "" {
+		db = db.Where(storage.RepositoryColumns.PrimaryLanguage+" = ?", filters.Language)
+	}
+	if filters.Grade != "" {
+		db = db.Where(storage.RepositoryColumns.Grade+"=?", filters.Grade)
+	}
+	if filters.Tag != "" {
+		db = db.Where(`EXISTS (SELECT 1 FROM `+storage.AISummaryTable+` s JOIN json_each(s.`+storage.AISummaryColumns.ValueTagsJSON+`) tag
+WHERE s.`+storage.AISummaryColumns.RepoID+`=`+storage.RepositoryTable+`.`+storage.RepositoryColumns.RepoID+` AND tag.value=?)`, filters.Tag)
+	}
+	return filterProjectTheme(tx, a.filterCategories(c, db, filters.Category), filters.Theme)
 }
 
-// metricWindowSQL 读取指标 JSON 中的窗口字段，调用方使用固定窗口和属性。
-func metricWindowSQL(window, attribute string) string {
-	return `json_extract(m.` + storage.LatestMetricColumns.WindowDetailsJSON + `,'$."` + window + `".` + attribute + `')`
+// exactGrowthSQL 只将精确窗口的增长值用于排序和游标。
+func exactGrowthSQL(window, deltaColumn string) string {
+	return "CASE WHEN " + storage.MetricWindowSQL(window, "quality") + "='" + consts.QualityExact + "' THEN m." + deltaColumn + " END"
 }
 
 // repoCards 复用仓库列表的公开卡片字段、指标和摘要。
@@ -233,18 +238,51 @@ func (a *collectionAPI) repoCards(c *gin.Context, tx *gorm.DB, repos []storage.R
 	return items, nil
 }
 
-// sortValue 保留整数键的精度，同时按原浮点值比较热度游标。
+func (a *collectionAPI) repoListCards(c *gin.Context, tx *gorm.DB, repos []storage.Repository) ([]gin.H, error) {
+	items, err := a.repoCards(c, tx, repos)
+	if err != nil || len(items) == 0 || !c.GetBool(publicReadKey) {
+		return items, err
+	}
+	ids := make([]int64, 0, len(repos))
+	for _, repo := range repos {
+		ids = append(ids, repo.RepoID)
+	}
+	matches, _, err := discoverystore.Matches(tx, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	matches = matches.Where(storage.RepositoryTable+"."+storage.RepositoryColumns.RepoID+" IN ?", ids)
+	var selectedIDs []int64
+	if err := tx.Table("(?) AS matches", matches).
+		Where(discoverystore.TimeSQL+" > 0").Pluck(storage.RepositoryColumns.RepoID, &selectedIDs).Error; err != nil {
+		return nil, err
+	}
+	selected := make(map[int64]bool, len(selectedIDs))
+	for _, id := range selectedIDs {
+		selected[id] = true
+	}
+	for i, repo := range repos {
+		isSelected := selected[repo.RepoID]
+		items[i]["selected"] = isSelected
+		if !isSelected {
+			items[i]["recommendationReason"] = nil
+		}
+	}
+	return items, nil
+}
+
+// sortValue 保留整数键的精度，同时按原浮点值比较热度和相关度游标。
 func (c repoCursor) sortValue() (any, error) {
 	number, ok := c.Last.Value.(json.Number)
 	if !ok {
 		return nil, errors.New("排序游标必须为数值")
 	}
-	if c.Sort != consts.SortHotness {
+	if c.Sort != consts.SortHotness && c.Vector == "" {
 		return number.Int64()
 	}
 	value, err := number.Float64()
 	if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
-		return nil, errors.New("热度游标无效")
+		return nil, errors.New("浮点排序游标无效")
 	}
 	return value, nil
 }
@@ -282,8 +320,13 @@ func (a *collectionAPI) filters(c *gin.Context) (repoFilters, string, error) {
 	if err != nil {
 		return f, "", err
 	}
-	sort := c.DefaultQuery("sort", consts.SortDiscovered)
-	if !slices.Contains([]string{consts.SortDiscovered, consts.SortStars, consts.SortFollowed, consts.SortHotness, consts.SortGrowth24h, consts.SortGrowth7d}, sort) || (sort == consts.SortFollowed && !f.Followed) {
+	defaultSort := consts.SortDiscovered
+	if f.Q != "" {
+		defaultSort = consts.SortRelevance
+	}
+	sort := c.DefaultQuery("sort", defaultSort)
+	if !slices.Contains([]string{consts.SortDiscovered, consts.SortRelevance, consts.SortStars, consts.SortFollowed, consts.SortHotness, consts.SortGrowth24h, consts.SortGrowth7d}, sort) ||
+		(sort == consts.SortFollowed && !f.Followed) || (sort == consts.SortRelevance && f.Q == "") {
 		return f, "", errors.New("无效排序")
 	}
 	return f, sort, nil
@@ -355,5 +398,25 @@ func decodeCursor(raw, sort string, filters repoFilters) (repoCursor, error) {
 		cursor.Sort != sort || !reflect.DeepEqual(cursor.Filters, filters) {
 		return cursor, errors.New("游标与当前查询不匹配")
 	}
+	if sort == consts.SortRelevance {
+		if cursor.Last.Rank == nil || *cursor.Last.Rank < 0 || *cursor.Last.Rank > 3 ||
+			(cursor.Vector == "" && *cursor.Last.Rank == 3) {
+			return cursor, errInvalidCursor
+		}
+		if _, err := cursor.sortValue(); err != nil {
+			return cursor, errInvalidCursor
+		}
+	} else if cursor.Vector != "" || cursor.Last.Rank != nil {
+		return cursor, errInvalidCursor
+	}
 	return cursor, nil
+}
+
+func encodeRepoCursor(cursor repoCursor) (*string, error) {
+	data, err := json.Marshal(cursor)
+	if err != nil {
+		return nil, err
+	}
+	value := base64.RawURLEncoding.EncodeToString(data)
+	return &value, nil
 }

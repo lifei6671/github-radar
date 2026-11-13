@@ -69,6 +69,38 @@ func TestDiscoveryTabsPersistWithoutChangingGlobalCategories(t *testing.T) {
 	}
 }
 
+func TestDiscoveryRankingDefaultsValidationAndPersistence(t *testing.T) {
+	router, db := collectionRouter(t)
+	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
+	const path = "/api/v1/system/discovery-tabs"
+	// 模拟已有数据库中缺少新字段的运行配置。
+	if err := db.Exec(`UPDATE system_settings SET value_json=json_remove(value_json,'$.discoveryRanking') WHERE key='runtime.settings.v1'`).Error; err != nil {
+		t.Fatal(err)
+	}
+	before := request(t, router, http.MethodGet, path, "", "admin", 200)
+	if got := jsonBody(t, before["ranking"]); got != `{"consecutiveDays":3,"cooldownDays":2,"freshnessWeight":30,"heatWeight":70}` {
+		t.Fatalf("旧设置默认值错误: %s", got)
+	}
+	for _, ranking := range []string{
+		`{"heatWeight":60,"freshnessWeight":30,"consecutiveDays":3,"cooldownDays":2}`,
+		`{"heatWeight":-10,"freshnessWeight":110,"consecutiveDays":3,"cooldownDays":2}`,
+		`{"heatWeight":70,"freshnessWeight":30,"consecutiveDays":0,"cooldownDays":2}`,
+		`{"heatWeight":70,"freshnessWeight":30,"consecutiveDays":3,"cooldownDays":-1}`,
+	} {
+		request(t, router, http.MethodPut, path, `{"revision":1,"items":[],"ranking":`+ranking+`}`, "admin", 400)
+	}
+	const ranking = `{"consecutiveDays":5,"cooldownDays":0,"freshnessWeight":100,"heatWeight":0}`
+	result := request(t, router, http.MethodPut, path, `{"revision":1,"items":[],"ranking":`+ranking+`}`, "admin", 200)
+	if got := jsonBody(t, result["ranking"]); got != ranking {
+		t.Fatalf("应保存零权重和关闭冷却: %s", got)
+	}
+	request(t, router, http.MethodPut, path, `{"revision":2,"items":[],"selection":{"recentDays":7,"recentSampleHours":48,"growthSampleHours":24,"trendingHours":24,"trendingTop":6}}`, "admin", 200)
+	after := request(t, router, http.MethodGet, path, "", "admin", 200)
+	if got := jsonBody(t, after["ranking"]); got != ranking {
+		t.Fatalf("只改精选门槛应保留轮换设置: %s", got)
+	}
+}
+
 func TestPublicDiscoveryTabsReadDuringWrite(t *testing.T) {
 	router, db := collectionRouter(t)
 	request(t, router, http.MethodPost, "/api/v1/setup/initialize", "", "admin", 200)
@@ -223,7 +255,24 @@ func TestAdminConfigurationIsAuthenticatedAndApplied(t *testing.T) {
 		`{"revision":3,"items":[{"sourceType":"trending","sourceKey":"language:zig:daily","query":"","enabled":false,"intervalMinutes":30,"priority":10}]}`, "admin", 200)
 	request(t, router, http.MethodGet, "/api/v1/trending?sourceKey=language:zig", "", "admin", 200)
 	request(t, router, http.MethodGet, "/api/v1/trending", "", "admin", 400)
-	request(t, router, http.MethodPut, rulePath, `{"revision":4,"items":[]}`, "admin", 200)
+	for _, body := range []string{
+		`{"sourceType":"search","sourceKey":"mcp","query":"topic:mcp","minStars":-1,"intervalMinutes":30}`,
+		`{"sourceType":"search","sourceKey":"mcp","query":"topic:mcp","minStars":2.5,"intervalMinutes":30}`,
+		`{"sourceType":"trending","sourceKey":"all:daily","minStars":200,"intervalMinutes":30}`,
+	} {
+		request(t, router, http.MethodPut, rulePath, `{"revision":4,"items":[`+body+`]}`, "admin", 400)
+	}
+	request(t, router, http.MethodPut, rulePath, `{"revision":4,"items":[
+		{"sourceType":"search","sourceKey":"mcp","query":"topic:mcp","minStars":0,"intervalMinutes":30},
+		{"sourceType":"search","sourceKey":"ai","query":"topic:ai","intervalMinutes":30},
+		{"sourceType":"trending","sourceKey":"all:daily","intervalMinutes":30}
+	]}`, "admin", 200)
+	configured := request(t, router, http.MethodGet, rulePath, "", "admin", 200)["items"].([]any)
+	if configured[0].(map[string]any)["minStars"] != float64(0) || configured[1].(map[string]any)["minStars"] != float64(200) ||
+		configured[2].(map[string]any)["minStars"] != nil {
+		t.Fatalf("应保存显式零值和默认门槛，并让 Trending 独立配置: %+v", configured)
+	}
+	request(t, router, http.MethodPut, rulePath, `{"revision":5,"items":[]}`, "admin", 200)
 	rules := request(t, router, http.MethodGet, rulePath, "", "admin", 200)
 	if len(rules["items"].([]any)) != 0 {
 		t.Fatalf("已清空的规则不应被自动补齐: %+v", rules)

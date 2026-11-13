@@ -10,7 +10,7 @@ import (
 
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/consts"
-	"github.com/lifei6671/github-radar/internal/metrics"
+	"github.com/lifei6671/github-radar/internal/domain/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
 )
 
@@ -107,7 +107,7 @@ func rollHour(tx *gorm.DB, tolerance config.BoundaryToleranceMinutes, part stora
 		return err
 	}
 	merge(&hour.MetricAnchors, part.MetricAnchors)
-	window := metrics.Bucket(hour.MetricAnchors, hour.HourStart, metrics.Hour, tolerance)
+	window := bucketWindow(hour.MetricAnchors, hour.HourStart, metrics.Hour, tolerance)
 	hour.Delta, hour.Quality = window.Delta, window.Quality
 	if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&hour).Error; err != nil {
 		return err
@@ -130,7 +130,12 @@ func rollDay(tx *gorm.DB, tolerance config.BoundaryToleranceMinutes, part storag
 		return err
 	}
 	merge(&day.MetricAnchors, part.MetricAnchors)
-	window := metrics.Bucket(day.MetricAnchors, part.BucketStart, metrics.Day, tolerance)
+	window := bucketWindow(day.MetricAnchors, part.BucketStart, metrics.Day, tolerance)
 	day.Delta, day.Quality = window.Delta, window.Quality
 	return tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&day).Error
+}
+
+func bucketWindow(a storage.MetricAnchors, from, span int64, tolerance config.BoundaryToleranceMinutes) metrics.Window {
+	return metrics.Between(&metrics.Point{At: a.OpenObservedAt, Stars: a.StarsOpen},
+		&metrics.Point{At: a.CloseObservedAt, Stars: a.StarsClose}, from, from+span, tolerance)
 }

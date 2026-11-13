@@ -25,7 +25,7 @@ func Similar(db *gorm.DB, cfg config.Embedding, id int64) ([]Match, error) {
 	items := make([]Match, 0, resultLimit)
 	err := db.Transaction(func(tx *gorm.DB) error {
 		var source storage.Repository
-		if err := tx.Select(repos.RepoID).Where(storage.PublicRepositoryCondition).
+		if err := tx.Select(repos.RepoID).Where(storage.PublishableRepositoryCondition).
 			Take(&source, repos.RepoID+" = ?", id).Error; err != nil {
 			return err
 		}
@@ -42,7 +42,7 @@ func Similar(db *gorm.DB, cfg config.Embedding, id int64) ([]Match, error) {
 			", vec_distance_cosine(" + emb + vectors.Vector + ", ?) AS distance"
 		var candidates []Match
 		if err := tx.Model(&storage.Repository{}).Select(selection, seed.Vector).Joins(embeddingJoin).
-			Where(storage.PublicRepositoryCondition).Where(repo+repos.RepoID+" <> ?", id).
+			Where(storage.PublishableRepositoryCondition).Where(repo+repos.RepoID+" <> ?", id).
 			Where(emb+vectors.ModelKey+" = ? AND length("+emb+vectors.Vector+") = ?", key, len(seed.Vector)).
 			Order("distance").Order(repo + repos.RepoID).Limit(resultLimit).Scan(&candidates).Error; err != nil {
 			return err

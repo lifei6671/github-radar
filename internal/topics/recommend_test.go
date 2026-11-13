@@ -1,4 +1,4 @@
-package topics
+package topics_test
 
 import (
 	"fmt"
@@ -9,6 +9,8 @@ import (
 	"github.com/lifei6671/github-radar/internal/config"
 	"github.com/lifei6671/github-radar/internal/metrics"
 	"github.com/lifei6671/github-radar/internal/storage"
+	"github.com/lifei6671/github-radar/internal/storage/topicstore"
+	"github.com/lifei6671/github-radar/internal/topics"
 	"github.com/lifei6671/github-radar/migrations"
 )
 
@@ -58,25 +60,25 @@ func TestDailySelectionAndReentry(t *testing.T) {
 	if err := db.Create(&marker).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := Generate(t.Context(), db, cfg.Recommendations, now.Add(-time.Hour)); err != nil {
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	var rows []storage.TopicCandidate
 	if err := db.Find(&rows).Error; err != nil || len(rows) != 0 {
 		t.Fatal("本地计划时刻前不应生成")
 	}
-	if err := Generate(t.Context(), db, cfg.Recommendations, now); err != nil {
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, now); err != nil {
 		t.Fatal(err)
 	}
 	var dailyMark storage.MaintenanceState
-	if err := db.Find(&dailyMark, "key=?", dayKey).Error; err != nil || dailyMark.Key != "" {
+	if err := db.Find(&dailyMark, "key=?", topics.RecommendationDayKey).Error; err != nil || dailyMark.Key != "" {
 		t.Fatal("旧指标不应占用当天选题机会")
 	}
 	if err := db.Model(&marker).Update("updated_at", now.UnixMilli()).Error; err != nil {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := Generate(t.Context(), db, cfg.Recommendations, now); err != nil {
+		if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, now); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -98,7 +100,7 @@ func TestDailySelectionAndReentry(t *testing.T) {
 	if err := db.Model(&storage.LatestMetric{}).Where("repo_id=1").Updates(map[string]any{"delta_24h": 150, "calculated_at": next.UnixMilli()}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := Generate(t.Context(), db, cfg.Recommendations, next); err != nil {
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, next); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Take(&first, "id=?", first.ID).Error; err != nil || first.Status != "published" {
@@ -111,7 +113,7 @@ func TestDailySelectionAndReentry(t *testing.T) {
 	if err := db.Model(&storage.LatestMetric{}).Where("repo_id=1").Updates(map[string]any{"delta_24h": 400, "calculated_at": next.UnixMilli()}).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := Generate(t.Context(), db, cfg.Recommendations, next); err != nil {
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, next); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Take(&first, "id=?", first.ID).Error; err != nil || first.Status != "candidate" ||
@@ -127,7 +129,7 @@ func TestDailySelectionAndReentry(t *testing.T) {
 	if err := db.Create(&doc).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := Generate(t.Context(), db, cfg.Recommendations, next.AddDate(0, 0, 1)); err != nil {
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, next.AddDate(0, 0, 1)); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Take(&first, "id=?", first.ID).Error; err != nil || first.Status != "published" {
@@ -143,7 +145,7 @@ func TestDailySelectionAndReentry(t *testing.T) {
 	if err := db.Model(&storage.LatestMetric{}).Where("repo_id=1").Update("calculated_at", next.UnixMilli()).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := Generate(t.Context(), db, cfg.Recommendations, next); err != nil {
+	if err := topics.Generate(t.Context(), topicstore.Store{DB: db}, cfg.Recommendations, next); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Take(&first, "id=?", first.ID).Error; err != nil || first.Status != "candidate" ||
