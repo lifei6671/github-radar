@@ -1,11 +1,11 @@
-FROM node:24-bookworm-slim AS frontend
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS frontend
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 RUN npm run check && npm run build
 
-FROM golang:1.26-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -14,8 +14,9 @@ COPY internal ./internal
 COPY migrations ./migrations
 COPY configs/categories.go configs/categories.yaml ./configs/
 COPY docs/taxonomy.go docs/technical-taxonomy-v1.yaml ./docs/
-# modernc SQLite 可在关闭 CGO 时编译。
-RUN CGO_ENABLED=0 go build -trimpath -o /out/radar ./cmd/radar
+# 前端资源与架构无关，Go 服务使用原生构建环境交叉编译目标架构。
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/radar ./cmd/radar
 
 FROM debian:bookworm-slim
 WORKDIR /app

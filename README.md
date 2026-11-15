@@ -2,6 +2,12 @@
 
 GitHub 开源项目热点雷达，提供 Star 增长、GitHub Trending、中文摘要和选题管理。
 
+## 下载发行版
+
+从 [GitHub Releases](https://github.com/lifei6671/github-radar/releases) 下载与系统匹配的压缩包。macOS 使用 `darwin` 包，Intel 电脑选 `amd64`，Apple 芯片选 `arm64`。Windows 和 Linux 也提供 `amd64` 和 `arm64` 版本。发行包附带前端资源。包含 `web/dist/ssr` 的版本需要在 PATH 中安装 Node.js 22.12 或以上版本。
+
+进入解压后的目录，将 `configs/example.yaml` 复制为 `configs/radar.local.yaml`。按照示例填写站点地址，通过 `./radar hash-password` 和 `./radar generate-session-secret` 生成登录配置，然后运行 `./radar server -config configs/radar.local.yaml`。Windows 下将 `./radar` 替换为 `.\radar.exe`。首次启动后进入 `/admin` 登录并初始化数据库。
+
 ## 本地启动
 
 在仓库根目录使用 Go 1.26 及以上和 Node.js 22.12 及以上版本。先构建前端，再复制部署配置。
@@ -197,6 +203,14 @@ Compose 使用本机随机端口和专用数据卷，重建容器后核对持久
 ## Docker
 
 将 [容器配置示例](deploy/container.yaml) 复制为 `deploy/radar.local.yaml`，填入网站对外地址和两项登录凭据，再运行 `docker compose -f deploy/compose.yaml up --build`。也可用 `RADAR_CONFIG_FILE` 指定实际配置的绝对路径。Compose 以只读方式挂载该文件，容器进程使用 UID `10001`，在 Linux 上需授予该 UID 读取权限。镜像运行时由 Gin 提供 UI 与 API，默认将端口发布到宿主机回环地址，并通过 `radar-data` 卷保存数据库。
+
+也可拉取发布好的镜像，例如 `docker pull ghcr.io/lifei6671/github-radar:v1.2.3`。镜像标签与 Git 标签一致，支持 Linux amd64 和 arm64。
+
+GHCR 首次创建镜像包时默认为私有。要允许用户匿名拉取，请在首次发布后将镜像包的可见性设为 Public。参见 [GitHub Packages 可见性设置](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility#configuring-visibility-of-packages-for-your-personal-account)。
+
+## 自动构建与发布
+
+分支推送和 Pull Request 会运行 Go 检查、前端构建和 Chromium 测试。将包含工作流的提交推送到 GitHub 后，再推送该提交的版本标签，例如 `v1.2.3`。发布流程通过同一套 CI 后，在 GHCR 推送对应版本的 Docker 镜像，并创建 GitHub Release，附上六个系统架构压缩包及 `checksums.txt`。`v1.2.3-rc.1` 这类标签会发布为预发行版。
 
 ## 设计文档
 

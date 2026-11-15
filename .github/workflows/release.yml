@@ -1,0 +1,178 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  verify:
+    name: 运行 CI
+    if: ${{ !github.event.deleted }}
+    uses: ./.github/workflows/ci.yml
+
+  archives:
+    name: 构建三平台发行包
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建发行包共用的前端资源
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: 交叉编译并打包
+        shell: bash
+        run: |
+          # 标签同时用于文件名和 GHCR，校验 Docker 标签字符与长度。
+          version="$GITHUB_REF_NAME"
+          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9]+([.-][A-Za-z0-9]+)*)?$ || ${#version} -gt 128 ]]; then
+            echo '版本标签应使用 v1.2.3 或 v1.2.3-rc.1 格式，最多 128 个字符。' >&2
+            exit 1
+          fi
+
+          output="$RUNNER_TEMP/radar-release"
+          staging="$RUNNER_TEMP/radar-staging"
+          mkdir -p "$output" "$staging"
+
+          # 保留服务按工作目录查找的 web/dist 与示例配置目录。
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            printf '构建 %s\n' "$target"
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="github-radar-$version-$os-$arch"
+            root="$staging/$name"
+            mkdir -p "$root/configs" "$root/web"
+            cp configs/example.yaml "$root/configs/"
+            cp README.md LICENSE "$root/"
+            cp -R web/dist "$root/web/"
+
+            binary=radar
+            if [[ "$os" == windows ]]; then binary=radar.exe; fi
+            GOOS="$os" GOARCH="$arch" go build -trimpath -o "$root/$binary" ./cmd/radar
+
+            if [[ "$os" == windows ]]; then
+              (cd "$staging" && zip -qr "$output/$name.zip" "$name")
+            else
+              tar -czf "$output/$name.tar.gz" -C "$staging" "$name"
+            fi
+          done
+
+          cd "$output"
+          sha256sum ./*.tar.gz ./*.zip > checksums.txt
+
+      - name: 保存发行包与校验和
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: radar-release
+          path: ${{ runner.temp }}/radar-release/
+          if-no-files-found: error
+          # 从头重跑时替换同一次工作流运行中的临时制品。
+          overwrite: true
+
+  image:
+    name: 构建并推送 Docker 镜像
+    needs: [verify, archives]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      name: ${{ steps.image.outputs.name }}
+      digest: ${{ steps.publish.outputs.digest }}
+    steps:
+      - name: 确认版本尚未发布
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          # 已发布的版本重跑时，保留原 Release 对应的 GHCR 镜像标签。
+          status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME")
+          case "$status" in
+            404) ;;
+            200) echo '该标签已发布，请使用新的版本标签。' >&2; exit 1 ;;
+            *) echo "查询版本发布状态失败（HTTP $status）。" >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: 计算 GHCR 镜像名
+        id: image
+        shell: bash
+        run: printf 'name=ghcr.io/%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # 两种架构共用版本标签，镜像以仓库链接声明来源。
+      - name: 发布 Linux amd64 和 arm64 镜像
+        id: publish
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.image.outputs.name }}:${{ github.ref_name }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+  release:
+    name: 创建 GitHub Release
+    needs: [archives, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: radar-release
+          path: ${{ runner.temp }}/radar-release/
+
+      - name: 发布压缩包和镜像地址
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          IMAGE: ${{ needs.image.outputs.name }}
+          IMAGE_DIGEST: ${{ needs.image.outputs.digest }}
+        shell: bash
+        run: |
+          # 使用镜像清单摘要，保证发行说明能定位本次构建。
+          notes="$RUNNER_TEMP/radar-release-notes.md"
+          printf 'Docker 镜像（Linux amd64 / arm64）\n\n- 版本标签 `docker pull %s:%s`\n- 镜像摘要 `docker pull %s@%s`\n' \
+            "$IMAGE" "$GITHUB_REF_NAME" "$IMAGE" "$IMAGE_DIGEST" > "$notes"
+
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --notes-file "$notes" \
+            "${prerelease[@]}" -- "$RUNNER_TEMP"/radar-release/*
